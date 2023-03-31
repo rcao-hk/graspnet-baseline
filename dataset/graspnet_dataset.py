@@ -9,7 +9,7 @@ import scipy.io as scio
 from PIL import Image
 
 import torch
-from torch._six import container_abcs
+import collections.abc as container_abcs
 from torch.utils.data import Dataset
 from tqdm import tqdm
 
@@ -32,13 +32,18 @@ class GraspNetDataset(Dataset):
         self.grasp_labels = grasp_labels
         self.camera = camera
         self.augment = augment
-        self.load_label = load_label
+        self.load_label = load_label    
         self.collision_labels = {}
+        self.voxel_size = 0.005
 
         if split == 'train':
             self.sceneIds = list( range(100) )
         elif split == 'test':
             self.sceneIds = list( range(100,190) )
+        # if split == 'train':
+        #     self.sceneIds = list( range(1) )
+        # elif split == 'test':
+        #     self.sceneIds = list( range(100,101) )
         elif split == 'test_seen':
             self.sceneIds = list( range(100,130) )
         elif split == 'test_similar':
@@ -53,14 +58,19 @@ class GraspNetDataset(Dataset):
         self.metapath = []
         self.scenename = []
         self.frameid = []
+        self.graspnesspath = []
+        self.normalpath = []
         for x in tqdm(self.sceneIds, desc = 'Loading data path and collision labels...'):
             for img_num in range(256):
                 self.colorpath.append(os.path.join(root, 'scenes', x, camera, 'rgb', str(img_num).zfill(4)+'.png'))
                 self.depthpath.append(os.path.join(root, 'scenes', x, camera, 'depth', str(img_num).zfill(4)+'.png'))
                 self.labelpath.append(os.path.join(root, 'scenes', x, camera, 'label', str(img_num).zfill(4)+'.png'))
                 self.metapath.append(os.path.join(root, 'scenes', x, camera, 'meta', str(img_num).zfill(4)+'.mat'))
+                self.normalpath.append(os.path.join(root, 'normals', x, camera, str(img_num).zfill(4)+'.npy'))
                 self.scenename.append(x.strip())
                 self.frameid.append(img_num)
+                if self.load_label:
+                    self.graspnesspath.append(os.path.join(root, 'graspness', x, camera, str(img_num).zfill(4) + '.npy'))
             if self.load_label:
                 collision_labels = np.load(os.path.join(root, 'collision_label', x.strip(),  'collision_labels.npz'))
                 self.collision_labels[x.strip()] = {}
@@ -148,7 +158,8 @@ class GraspNetDataset(Dataset):
         ret_dict = {}
         ret_dict['point_clouds'] = cloud_sampled.astype(np.float32)
         ret_dict['cloud_colors'] = color_sampled.astype(np.float32)
-
+        ret_dict['coors'] = cloud_sampled.astype(np.float32) / self.voxel_size
+        ret_dict['feats'] = np.ones_like(cloud_sampled).astype(np.float32)
         return ret_dict
 
     def get_data_label(self, index):
@@ -157,6 +168,8 @@ class GraspNetDataset(Dataset):
         seg = np.array(Image.open(self.labelpath[index]))
         meta = scio.loadmat(self.metapath[index])
         scene = self.scenename[index]
+        graspness = np.load(self.graspnesspath[index])  # for each point in workspace masked point cloud
+        normal = np.load(self.normalpath[index])
         try:
             obj_idxs = meta['cls_indexes'].flatten().astype(np.int32)
             poses = meta['poses']
@@ -194,7 +207,11 @@ class GraspNetDataset(Dataset):
             idxs = np.concatenate([idxs1, idxs2], axis=0)
         cloud_sampled = cloud_masked[idxs]
         color_sampled = color_masked[idxs]
+        normal_sampled = normal[idxs]
+        
         seg_sampled = seg_masked[idxs]
+        graspness_sampled = graspness[idxs]
+
         objectness_label = seg_sampled.copy()
         objectness_label[objectness_label>1] = 1
         
@@ -202,24 +219,25 @@ class GraspNetDataset(Dataset):
         grasp_points_list = []
         grasp_offsets_list = []
         grasp_scores_list = []
-        grasp_tolerance_list = []
+        # grasp_tolerance_list = []
         for i, obj_idx in enumerate(obj_idxs):
             if obj_idx not in self.valid_obj_idxs:
                 continue
             if (seg_sampled == obj_idx).sum() < 50:
                 continue
             object_poses_list.append(poses[:, :, i])
-            points, offsets, scores, tolerance = self.grasp_labels[obj_idx]
+            # points, offsets, scores, tolerance = self.grasp_labels[obj_idx]
+            points, offsets, scores = self.grasp_labels[obj_idx]
             collision = self.collision_labels[scene][i] #(Np, V, A, D)
 
             # remove invisible grasp points
-            if self.remove_invisible:
-                visible_mask = remove_invisible_grasp_points(cloud_sampled[seg_sampled==obj_idx], points, poses[:,:,i], th=0.01)
-                points = points[visible_mask]
-                offsets = offsets[visible_mask]
-                scores = scores[visible_mask]
-                tolerance = tolerance[visible_mask]
-                collision = collision[visible_mask]
+            # if self.remove_invisible:
+            #     visible_mask = remove_invisible_grasp_points(cloud_sampled[seg_sampled==obj_idx], points, poses[:,:,i], th=0.01)
+            #     points = points[visible_mask]
+            #     offsets = offsets[visible_mask]
+            #     scores = scores[visible_mask]
+            #     # tolerance = tolerance[visible_mask]
+            #     collision = collision[visible_mask]
 
             idxs = np.random.choice(len(points), min(max(int(len(points)/4),300),len(points)), replace=False)
             grasp_points_list.append(points[idxs])
@@ -228,9 +246,9 @@ class GraspNetDataset(Dataset):
             scores = scores[idxs].copy()
             scores[collision] = 0
             grasp_scores_list.append(scores)
-            tolerance = tolerance[idxs].copy()
-            tolerance[collision] = 0
-            grasp_tolerance_list.append(tolerance)
+            # tolerance = tolerance[idxs].copy()
+            # tolerance[collision] = 0
+            # grasp_tolerance_list.append(tolerance)
         
         if self.augment:
             cloud_sampled, object_poses_list = self.augment_data(cloud_sampled, object_poses_list)
@@ -238,12 +256,17 @@ class GraspNetDataset(Dataset):
         ret_dict = {}
         ret_dict['point_clouds'] = cloud_sampled.astype(np.float32)
         ret_dict['cloud_colors'] = color_sampled.astype(np.float32)
+        ret_dict['cloud_normals'] = normal_sampled.astype(np.float32)
+        ret_dict['coors'] = cloud_sampled.astype(np.float32) / self.voxel_size
+        ret_dict['feats'] = np.ones_like(cloud_sampled).astype(np.float32)
+
+        ret_dict['graspness_label'] = graspness_sampled.astype(np.float32)
         ret_dict['objectness_label'] = objectness_label.astype(np.int64)
         ret_dict['object_poses_list'] = object_poses_list
         ret_dict['grasp_points_list'] = grasp_points_list
         ret_dict['grasp_offsets_list'] = grasp_offsets_list
         ret_dict['grasp_labels_list'] = grasp_scores_list
-        ret_dict['grasp_tolerance_list'] = grasp_tolerance_list
+        # ret_dict['grasp_tolerance_list'] = grasp_tolerance_list
 
         return ret_dict
 
@@ -251,15 +274,21 @@ def load_grasp_labels(root):
     obj_names = list(range(88))
     valid_obj_idxs = []
     grasp_labels = {}
-    for i, obj_name in enumerate(tqdm(obj_names, desc='Loading grasping labels...')):
-        if i == 18: continue
-        valid_obj_idxs.append(i + 1) #here align with label png
-        label = np.load(os.path.join(root, 'grasp_label', '{}_labels.npz'.format(str(i).zfill(3))))
-        tolerance = np.load(os.path.join(BASE_DIR, 'tolerance', '{}_tolerance.npy'.format(str(i).zfill(3))))
-        grasp_labels[i + 1] = (label['points'].astype(np.float32), label['offsets'].astype(np.float32),
-                                label['scores'].astype(np.float32), tolerance)
-
+    for obj_idx in tqdm(obj_names, desc='Loading grasping labels...'):
+        # if i == 18: continue
+        valid_obj_idxs.append(obj_idx+1) #here align with label png
+        # tolerance = np.load(os.path.join(root, 'tolerance', '{}_tolerance.npy'.format(str(obj_idx).zfill(3))))
+        # label = np.load(os.path.join(root, 'grasp_label', '{}_labels.npz'.format(str(i).zfill(3))))
+        # grasp_labels[i + 1] = (label['points'].astype(np.float32), label['offsets'].astype(np.float32),
+        #                         label['scores'].astype(np.float32), tolerance)
+        # label = np.load(os.path.join(root, 'grasp_label', '{}_labels.npz'.format(str(obj_idx).zfill(3))))
+        # grasp_labels[obj_idx+1] = (label['points'].astype(np.float32), label['offsets'].astype(np.float32),
+        #                           label['scores'].astype(np.float32), tolerance)
+        label = np.load(os.path.join(root, 'grasp_label_simplified', '{}_labels.npz'.format(str(obj_idx).zfill(3))))
+        grasp_labels[obj_idx+1] = (label['points'].astype(np.float32), label['width'].astype(np.float32),
+                                  label['scores'].astype(np.float32))
     return valid_obj_idxs, grasp_labels
+
 
 def collate_fn(batch):
     if type(batch[0]).__module__ == 'numpy':
@@ -270,6 +299,35 @@ def collate_fn(batch):
         return [[torch.from_numpy(sample) for sample in b] for b in batch]
     
     raise TypeError("batch must contain tensors, dicts or lists; found {}".format(type(batch[0])))
+
+
+import MinkowskiEngine as ME
+def minkowski_collate_fn(list_data):
+    coordinates_batch, features_batch = ME.utils.sparse_collate([d["coors"] for d in list_data],
+                                                                [d["feats"] for d in list_data], dtype=torch.float32)
+    coordinates_batch, features_batch, _, quantize2original = ME.utils.sparse_quantize(
+        coordinates_batch, features_batch, return_index=True, return_inverse=True)
+    res = {
+        "coors": coordinates_batch,
+        "feats": features_batch,
+        "quantize2original": quantize2original
+    }
+
+    def collate_fn_(batch):
+        if type(batch[0]).__module__ == 'numpy':
+            return torch.stack([torch.from_numpy(b) for b in batch], 0)
+        elif isinstance(batch[0], container_abcs.Sequence):
+            return [[torch.from_numpy(sample) for sample in b] for b in batch]
+        elif isinstance(batch[0], container_abcs.Mapping):
+            for key in batch[0]:
+                if key == 'coors' or key == 'feats':
+                    continue
+                res[key] = collate_fn_([d[key] for d in batch])
+            return res
+    res = collate_fn_(list_data)
+
+    return res
+
 
 if __name__ == "__main__":
     root = '/data/Benchmark/graspnet'

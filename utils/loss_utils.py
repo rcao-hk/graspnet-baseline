@@ -7,8 +7,14 @@ import numpy as np
 
 GRASP_MAX_WIDTH = 0.1
 GRASP_MAX_TOLERANCE = 0.05
+GRASPNESS_THRESHOLD = 0.1
 THRESH_GOOD = 0.7
 THRESH_BAD = 0.1
+
+NUM_VIEW = 300
+NUM_ANGLE = 12
+NUM_DEPTH = 4
+M_POINT = 1024
 
 def transform_point_cloud(cloud, transform, format='4x4'):
     """ Transform points to new coordinates with transformation matrix.

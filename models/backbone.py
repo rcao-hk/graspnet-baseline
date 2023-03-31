@@ -12,6 +12,10 @@ sys.path.append(ROOT_DIR)
 sys.path.append(os.path.join(ROOT_DIR, 'pointnet2'))
 
 from pointnet2_modules import PointnetSAModuleVotes, PointnetFPModule
+from models.transformer import TransformerEncoder, TransformerEncoderLayer
+from minkowski import MinkUNet14D
+import MinkowskiEngine as ME
+from pointnet2_utils import furthest_point_sample, gather_operation
 
 class Pointnet2Backbone(nn.Module):
     r"""
@@ -129,3 +133,115 @@ class Pointnet2Backbone(nn.Module):
         end_points['fp2_inds'] = end_points['sa1_inds'][:,0:num_seed] # indices among the entire input point clouds
 
         return features, end_points['fp2_xyz'], end_points
+
+
+class TransformerEncoderBackbone(nn.Module):
+    def __init__(self, input_feature_dim=0):
+        super().__init__()
+
+        self.pre_encoder = PointnetSAModuleVotes(
+            radius=0.2,
+            nsample=64,
+            npoint=2048,
+            mlp=[input_feature_dim, 64, 64, 256],
+            normalize_xyz=True,
+        )
+
+        self.encoder_layer = TransformerEncoderLayer(
+            d_model=256,
+            nhead=4,
+            dim_feedforward=128,
+            dropout=0.0,
+            activation='relu',
+        )
+        self.encoder = TransformerEncoder(
+            encoder_layer=self.encoder_layer, num_layers=3
+        )
+
+    def _break_up_pc(self, pc):
+        xyz = pc[..., 0:3].contiguous()
+        features = (
+            pc[..., 3:].transpose(1, 2).contiguous()
+            if pc.size(-1) > 3 else None
+        )
+
+        return xyz, features
+
+    def forward(self, pointcloud: torch.cuda.FloatTensor, end_points=None):
+        if not end_points: end_points = {}
+        batch_size = pointcloud.shape[0]
+
+        xyz, features = self._break_up_pc(pointcloud)
+        end_points['input_xyz'] = xyz
+        end_points['input_features'] = features
+
+        pre_enc_xyz, pre_enc_features, pre_enc_inds = self.pre_encoder(xyz, features)
+        # xyz: batch x npoints x 3
+        # features: batch x channel x npoints
+        # inds: batch x npoints
+
+        # nn.MultiHeadAttention in encoder expects npoints x batch x channel features
+        pre_enc_features = pre_enc_features.permute(2, 0, 1)
+
+        # xyz points are in batch x npointx channel order
+        enc_xyz, enc_features, enc_inds = self.encoder(
+            pre_enc_features, xyz=pre_enc_xyz
+        )
+        features = enc_features.permute(1, 2, 0)
+        end_points['fp2_xyz'] = enc_xyz
+        end_points['fp2_inds'] = pre_enc_inds
+        return features, enc_xyz, end_points
+
+        # if enc_inds is None:
+        #     # encoder does not perform any downsampling
+        #     enc_inds = pre_enc_inds
+        # else:
+        #     # use gather here to ensure that it works for both FPS and random sampling
+        #     enc_inds = torch.gather(pre_enc_inds, 1, enc_inds)
+        # return enc_xyz, enc_features, enc_inds
+
+class MinkBackbone(nn.Module):
+    def __init__(self, input_feature_dim=0):
+        super().__init__()
+
+        self.backbone = MinkUNet14D(in_channels=3, out_channels=256, D=3)
+        self.M_points = 256
+
+    def _break_up_pc(self, pc):
+        xyz = pc[..., 0:3].contiguous()
+        features = (
+            pc[..., 3:].transpose(1, 2).contiguous()
+            if pc.size(-1) > 3 else None
+        )
+        return xyz, features
+
+    def forward(self, pointcloud: torch.cuda.FloatTensor, end_points=None):
+        if not end_points: end_points = {}
+        batch_size, point_num, _ = pointcloud.shape
+        xyz, features = self._break_up_pc(pointcloud)
+        end_points['input_xyz'] = xyz
+        end_points['input_features'] = features
+
+        coordinates_batch = end_points['coors']
+        features_batch = end_points['feats']
+        mink_input = ME.SparseTensor(features_batch, coordinates=coordinates_batch)
+        features = self.backbone(mink_input).F
+        features_flipped = features[end_points['quantize2original']].view(batch_size, point_num, -1).transpose(1, 2).contiguous()
+
+        fps_idxs = furthest_point_sample(xyz, self.M_points)
+        seed_xyz_flipped = xyz.transpose(1, 2).contiguous()  # 1*3*Ns
+        seed_xyz = gather_operation(seed_xyz_flipped, fps_idxs).transpose(1, 2).squeeze(0).contiguous() # Ns*3
+        seed_features = gather_operation(features_flipped, fps_idxs).squeeze(0).contiguous() # Ns*3
+        
+        end_points['fp2_features'] = seed_features
+        end_points['fp2_xyz'] = seed_xyz
+        end_points['fp2_inds'] = fps_idxs
+        return seed_features, end_points['fp2_xyz'], end_points
+
+        # if enc_inds is None:
+        #     # encoder does not perform any downsampling
+        #     enc_inds = pre_enc_inds
+        # else:
+        #     # use gather here to ensure that it works for both FPS and random sampling
+        #     enc_inds = torch.gather(pre_enc_inds, 1, enc_inds)
+        # return enc_xyz, enc_features, enc_inds

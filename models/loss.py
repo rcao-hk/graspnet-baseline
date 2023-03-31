@@ -38,7 +38,6 @@ def compute_objectness_loss(end_points):
     end_points['loss/stage1_objectness_loss'] = loss
     objectness_pred = torch.argmax(objectness_score, 1)
     end_points['stage1_objectness_acc'] = (objectness_pred == objectness_label.long()).float().mean()
-
     end_points['stage1_objectness_prec'] = (objectness_pred == objectness_label.long())[objectness_pred == 1].float().mean()
     end_points['stage1_objectness_recall'] = (objectness_pred == objectness_label.long())[objectness_label == 1].float().mean()
 
