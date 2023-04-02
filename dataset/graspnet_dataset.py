@@ -116,6 +116,7 @@ class GraspNetDataset(Dataset):
         depth = np.array(Image.open(self.depthpath[index]))
         seg = np.array(Image.open(self.labelpath[index]))
         meta = scio.loadmat(self.metapath[index])
+        normal = np.load(self.normalpath[index])
         scene = self.scenename[index]
         try:
             intrinsic = meta['intrinsic_matrix']
@@ -154,10 +155,13 @@ class GraspNetDataset(Dataset):
             idxs = np.concatenate([idxs1, idxs2], axis=0)
         cloud_sampled = cloud_masked[idxs]
         color_sampled = color_masked[idxs]
+        normal_sampled = normal[idxs]
         
         ret_dict = {}
         ret_dict['point_clouds'] = cloud_sampled.astype(np.float32)
         ret_dict['cloud_colors'] = color_sampled.astype(np.float32)
+        ret_dict['cloud_normals'] = normal_sampled.astype(np.float32)
+        
         ret_dict['coors'] = cloud_sampled.astype(np.float32) / self.voxel_size
         ret_dict['feats'] = np.ones_like(cloud_sampled).astype(np.float32)
         return ret_dict

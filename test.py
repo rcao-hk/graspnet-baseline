@@ -22,8 +22,8 @@ from collision_detector import ModelFreeCollisionDetector
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--dataset_root', default='/data/rcao/dataset/graspnet', help='Dataset root')
-parser.add_argument('--checkpoint_path', default='log/gsnet_v0.1/checkpoint_16.tar', help='Model checkpoint path')
-parser.add_argument('--dump_dir', default='experiment/gsnet_v0.1_16', help='Dump dir to save outputs')
+parser.add_argument('--checkpoint_path', default='log/gsnet_v0.1.1/checkpoint.tar', help='Model checkpoint path')
+parser.add_argument('--dump_dir', default='experiment/gsnet_v0.1.1', help='Dump dir to save outputs')
 parser.add_argument('--camera', default='realsense', help='Camera split [realsense/kinect]')
 parser.add_argument('--split', default='test_seen', help='Test set split [test_seen/test_similar/test_novel]')
 parser.add_argument('--seed_feat_dim', default=512, type=int, help='Point wise feature dim')
