@@ -5,11 +5,11 @@ import torch
 def get_loss(end_points):
     objectness_loss, end_points = compute_objectness_loss(end_points)
     graspness_loss, end_points = compute_graspness_loss(end_points)
-    # view_loss, end_points = compute_view_graspness_loss(end_points)
+    view_loss, end_points = compute_view_graspness_loss(end_points)
     score_loss, end_points = compute_score_loss(end_points)
     width_loss, end_points = compute_width_loss(end_points)
-    # loss = objectness_loss + 10 * graspness_loss + 100 * view_loss + 15 * score_loss + 10 * width_loss
-    loss = objectness_loss + 10 * graspness_loss + 15 * score_loss + 10 * width_loss
+    loss = objectness_loss + 10 * graspness_loss + 100 * view_loss + 15 * score_loss + 10 * width_loss
+    # loss = objectness_loss + 10 * graspness_loss + 15 * score_loss + 10 * width_loss
     end_points['loss/overall_loss'] = loss
     return loss, end_points
 
