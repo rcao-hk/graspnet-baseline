@@ -119,3 +119,37 @@ def huber_loss(error, delta=1.0):
     linear = (abs_error - quadratic)
     loss = 0.5 * quadratic**2 + delta * linear
     return loss
+
+
+def batch_key_points(centers, Rs, widths):
+    center_shape = centers.size()
+    if len(centers.size()) == 3:
+        Bs, num_samples, _ = center_shape
+        centers = centers.view((-1, 3))
+        Rs = Rs.view((-1, 3, 3))
+        widths = widths.view(-1)
+    depth_base = 0.02
+    height = 0.02
+    tail_length = 0.04
+    R_sym = torch.tensor([[1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]], device=centers.device)
+    key_points = torch.zeros((centers.size(0), 5, 3), device=centers.device)
+
+    key_points[:, :, 0] -= height / 2
+    key_points[:, :2, 1] += widths.unsqueeze(-1) / 2
+    key_points[:, 2:4, 1] -= widths.unsqueeze(-1) / 2
+    key_points[:, 1:3, 0] += depth_base / 2
+    key_points[:, 0, 0] -= depth_base / 2
+    key_points[:, 3, 0] -= depth_base / 2
+    key_points[:, 4, 0] -= (depth_base / 2 + tail_length)
+    key_points_sym = key_points.detach()
+
+    key_points = torch.matmul(Rs, key_points.transpose(1, 2)).transpose(1, 2)
+    key_points_sym = torch.matmul(torch.matmul(Rs, R_sym), key_points_sym.transpose(1, 2)).transpose(1, 2)
+
+    key_points += centers.unsqueeze(1)
+    key_points_sym += centers.unsqueeze(1)
+    
+    if len(center_shape) == 3:
+        key_points = key_points.view((Bs, num_samples, 5, 3))
+        key_points_sym = key_points_sym.view((Bs, num_samples, 5, 3))
+    return key_points, key_points_sym

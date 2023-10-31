@@ -44,24 +44,24 @@ sys.path.append(os.path.join(ROOT_DIR, 'models'))
 sys.path.append(os.path.join(ROOT_DIR, 'dataset'))
 
 # from graspnet import GraspNet, get_loss
-from GSNet import GraspNet, IGNet
+from GSNet import IGNet
 from IGNet_loss import get_loss
-from pytorch_utils import BNMomentumScheduler
+# from pytorch_utils import BNMomentumScheduler
 # from graspnet_dataset import GraspNetDataset, collate_fn, minkowski_collate_fn, load_grasp_labels
 from ignet_dataset import GraspNetDataset, collate_fn, minkowski_collate_fn, load_grasp_labels
 from label_generation import process_grasp_labels
 
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--dataset_root', default='/data/rcao/dataset/graspnet', help='Dataset root')
+parser.add_argument('--dataset_root', default='/media/8TB/rcao/dataset/graspnet', help='Dataset root')
 parser.add_argument('--camera', default='realsense', help='Camera split [realsense/kinect]')
 parser.add_argument('--checkpoint_path', default=None, help='Model checkpoint path [default: None]')
-parser.add_argument('--log_dir', default='log/ignet_v0.1', help='Dump dir to save model checkpoint [default: log]')
+parser.add_argument('--log_dir', default='log/ignet_v0.3.5.1', help='Dump dir to save model checkpoint [default: log]')
 parser.add_argument('--num_point', type=int, default=512, help='Point Number [default: 20000]')
 parser.add_argument('--seed_feat_dim', default=512, type=int, help='Point wise feature dim')
 parser.add_argument('--num_view', type=int, default=300, help='View Number [default: 300]')
-parser.add_argument('--max_epoch', type=int, default=54, help='Epoch to run [default: 18]')
-parser.add_argument('--batch_size', type=int, default=32, help='Batch Size during training [default: 2]')
+parser.add_argument('--max_epoch', type=int, default=61, help='Epoch to run [default: 18]')
+parser.add_argument('--batch_size', type=int, default=16, help='Batch Size during training [default: 2]')
 parser.add_argument('--learning_rate', type=float, default=0.001, help='Initial learning rate [default: 0.001]')
 parser.add_argument('--weight_decay', type=float, default=0, help='Optimization L2 weight decay [default: 0]')
 # parser.add_argument('--bn_decay_step', type=int, default=2, help='Period of BN decay (in epochs) [default: 2]')
@@ -94,13 +94,17 @@ def my_worker_init_fn(worker_id):
     np.random.seed(np.random.get_state()[1][0] + worker_id)
     pass
 
-device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda:4" if torch.cuda.is_available() else "cpu")
 torch.cuda.set_device(device)
 
 # Create Dataset and Dataloader
 valid_obj_idxs, grasp_labels = load_grasp_labels(cfgs.dataset_root)
-TRAIN_DATASET = GraspNetDataset(cfgs.dataset_root, valid_obj_idxs, grasp_labels, camera=cfgs.camera, split='train', num_points=cfgs.num_point, remove_outlier=True, augment=True)
-TEST_DATASET = GraspNetDataset(cfgs.dataset_root, valid_obj_idxs, grasp_labels, camera=cfgs.camera, split='test_seen', num_points=cfgs.num_point, remove_outlier=True, augment=False)
+TRAIN_DATASET = GraspNetDataset(cfgs.dataset_root, valid_obj_idxs, grasp_labels, camera=cfgs.camera, split='train', 
+                                num_points=cfgs.num_point, remove_outlier=True, augment=True, real_data=True, 
+                                syn_data=True)
+TEST_DATASET = GraspNetDataset(cfgs.dataset_root, valid_obj_idxs, grasp_labels, camera=cfgs.camera, split='test_seen', 
+                               num_points=cfgs.num_point, remove_outlier=True, augment=False, real_data=True, 
+                               syn_data=True)
 
 print(len(TRAIN_DATASET), len(TEST_DATASET))
 # TRAIN_DATALOADER = DataLoader(TRAIN_DATASET, batch_size=cfgs.batch_size, shuffle=True,
@@ -116,7 +120,7 @@ print(len(TRAIN_DATALOADER), len(TEST_DATALOADER))
 # net = GraspNet(input_feature_dim=0, num_view=cfgs.num_view, num_angle=12, num_depth=4,
 #                         cylinder_radius=0.05, hmin=-0.02, hmax_list=[0.01,0.02,0.03,0.04])
 
-net = IGNet(seed_feat_dim=cfgs.seed_feat_dim, is_training=True)
+net = IGNet(num_view=cfgs.num_view, seed_feat_dim=cfgs.seed_feat_dim, is_training=True)
 net.to(device)
 
 # Load the Adam optimizer
@@ -169,10 +173,9 @@ def train_one_epoch():
             if 'list' in key:
                 for i in range(len(batch_data_label[key])):
                     for j in range(len(batch_data_label[key][i])):
-                        batch_data_label[key][i][j] = batch_data_label[key][i][j].to(device)
+                        batch_data_label[key][i][j] = batch_data_label[key][i][j].cuda()
             else:
-                batch_data_label[key] = batch_data_label[key].to(device)
-
+                batch_data_label[key] = batch_data_label[key].cuda()
         # Forward pass
         end_points = net(batch_data_label)
 
@@ -208,10 +211,9 @@ def evaluate_one_epoch():
             if 'list' in key:
                 for i in range(len(batch_data_label[key])):
                     for j in range(len(batch_data_label[key][i])):
-                        batch_data_label[key][i][j] = batch_data_label[key][i][j].to(device)
+                        batch_data_label[key][i][j] = batch_data_label[key][i][j].cuda()
             else:
-                batch_data_label[key] = batch_data_label[key].to(device)
-        
+                batch_data_label[key] = batch_data_label[key].cuda()
         # Forward pass
         with torch.no_grad():
             end_points = net(batch_data_label)
