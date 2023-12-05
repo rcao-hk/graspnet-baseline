@@ -10,7 +10,7 @@ from graspnetAPI import GraspGroup, GraspNetEval
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--dataset_root', default='/media/8TB/rcao/dataset/graspnet', help='Dataset root')
-parser.add_argument('--dump_dir', default='experiment/ignet_v0.3.3.2.1', help='Dump dir to save outputs')
+parser.add_argument('--dump_dir', default='experiment/ignet_v0.3.3.2.2', help='Dump dir to save outputs')
 parser.add_argument('--camera', default='realsense', help='Camera split [realsense/kinect]')
 parser.add_argument('--split', default='test_seen', help='Test set split [test_seen/test_similar/test_novel]')
 parser.add_argument('--num_workers', type=int, default=20, help='Number of workers used in evaluation [default: 30]')

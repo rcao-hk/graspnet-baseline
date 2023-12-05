@@ -26,7 +26,9 @@ angles_repeat = angles.tile(NUM_VIEW)
 views_repeat = views.repeat_interleave(NUM_ANGLE, dim=0)
 grasp_rot = batch_viewpoint_params_to_matrix(-views_repeat, angles_repeat)  # (300, 12, 9)
 depths = torch.linspace(0.01, 0.04, 4)
-bins = torch.linspace(0, GRASP_MAX_WIDTH, steps=4)
+width_bins = torch.tensor([0.02, 0.04, 0.06, 0.08])
+score_bins = torch.tensor([0.2, 0.4, 0.6, 0.8])
+
 
 def generate_half_grasp_views(views, azimuth_range=(0, 2 * np.pi), elev_range=(0, 0.5 * np.pi)):
     views_constrained = []
@@ -402,7 +404,7 @@ class WidthNet(nn.Module):
         # regression-based
         self.conv2 = nn.Conv1d(self.in_dim, self.num_view * self.num_angle * self.num_depth, 1)
         # classfication-based
-        # self.conv2 = nn.Conv1d(self.in_dim, self.num_view * self.num_angle * self.num_depth * (len(bins)+1), 1)
+        # self.conv2 = nn.Conv1d(self.in_dim, self.num_view * self.num_angle * self.num_depth * (len(width_bins)+1), 1)
 
     def forward(self, seed_features, end_points):
         B, _, num_seed = seed_features.size()
@@ -411,7 +413,7 @@ class WidthNet(nn.Module):
         width_pred = features.transpose(1, 2).contiguous() # (B, num_seed, num_view*num_angle)
         
         # classification-based
-        # width_pred = width_pred.view(B, num_seed, self.num_view * self.num_angle * self.num_depth, len(bins)+1)
+        # width_pred = width_pred.view(B, num_seed, self.num_view * self.num_angle * self.num_depth, len(width_bins)+1)
         end_points['grasp_width_pred'] = width_pred
         return end_points
     
@@ -428,7 +430,7 @@ class RotationScoringNet(nn.Module):
         # regression-based
         # self.conv2 = nn.Conv1d(self.in_dim, self.num_view * self.num_angle * self.num_depth, 1)
         # classfication-based
-        self.conv2 = nn.Conv1d(self.in_dim, self.num_view * self.num_angle * self.num_depth * (len(bins)+1), 1)
+        self.conv2 = nn.Conv1d(self.in_dim, self.num_view * self.num_angle * self.num_depth * (len(score_bins)+1), 1)
 
     def forward(self, seed_features, end_points):
         B, _, num_seed = seed_features.size()
@@ -437,7 +439,7 @@ class RotationScoringNet(nn.Module):
         rotation_scores = features.transpose(1, 2).contiguous() # (B, num_seed, num_view*num_angle)
 
         # classification-based
-        rotation_scores = rotation_scores.view(B, num_seed, self.num_view * self.num_angle * self.num_depth, len(bins)+1)
+        rotation_scores = rotation_scores.view(B, num_seed, self.num_view * self.num_angle * self.num_depth, len(score_bins)+1)
         end_points['grasp_score_pred'] = rotation_scores
         return end_points
 
@@ -654,18 +656,22 @@ def process_grasp_labels(end_points):
     # view_graspness_min = view_graspness_min.unsqueeze(-1).expand(-1, -1, 300)  # same shape as batch_grasp_view_graspness
     # batch_grasp_view_graspness = (batch_grasp_view_graspness - view_graspness_min) / (view_graspness_max - view_graspness_min + 1e-5)
 
-    # process scores
-    label_mask = (batch_grasp_scores > 0) & (batch_grasp_widths <= GRASP_MAX_WIDTH)  # (B, Ns, V, A, D)
-    batch_grasp_scores[~label_mask] = 0
-
     # batch_grasp_scores = batch_grasp_scores[:, :, :, :, 0].view(batch_size, num_samples, -1)
     # batch_grasp_widths = batch_grasp_widths[:, :, :, :, 0].view(batch_size, num_samples, -1)
     batch_grasp_scores = batch_grasp_scores[:, :, :, :, :].view(batch_size, num_samples, -1)
     batch_grasp_widths = batch_grasp_widths[:, :, :, :, :].view(batch_size, num_samples, -1)
 
-    batch_grasp_widths_ids = torch.bucketize(batch_grasp_widths, bins.to(batch_grasp_widths.device))
-    batch_grasp_scores_ids = torch.bucketize(batch_grasp_scores, bins.to(batch_grasp_scores.device))
-    # print(torch.unique(batch_grasp_widths_ids))
+    # score_mask = batch_grasp_scores > 0.0
+    # batch_grasp_scores[score_mask] = torch.log(1.0 / batch_grasp_scores[score_mask])
+
+    # process scores
+    label_mask = (batch_grasp_scores > 0) & (batch_grasp_widths <= GRASP_MAX_WIDTH)  # (B, Ns, V, A, D)
+    batch_grasp_scores = 1.1 - batch_grasp_scores
+    batch_grasp_scores[~label_mask] = 0
+    
+    batch_grasp_widths_ids = torch.bucketize(batch_grasp_widths, width_bins.to(batch_grasp_widths.device))
+    batch_grasp_scores_ids = torch.bucketize(batch_grasp_scores, score_bins.to(batch_grasp_scores.device))
+    
     end_points['batch_grasp_point'] = batch_grasp_points
     # end_points['batch_grasp_view_rot'] = batch_grasp_views_rot
     # end_points['batch_grasp_rot_max'] = batch_grasp_rot_max
@@ -692,14 +698,14 @@ def match_grasp_view_and_label(end_points):
     # top_view_grasp_scores = torch.gather(grasp_scores, 2, top_view_inds_).squeeze(2)
     # top_view_grasp_widths = torch.gather(grasp_widths, 2, top_view_inds_).squeeze(2)
 
-    u_max = grasp_scores.max()
-    po_mask = grasp_scores > 0
-    po_mask_num = torch.sum(po_mask)
-    if po_mask_num > 0:
+    # u_max = grasp_scores.max()
+    # po_mask = grasp_scores > 0
+    # po_mask_num = torch.sum(po_mask)
+    # if po_mask_num > 0:
         # grasp_scores_record = grasp_scores[po_mask]
         # print('before min:{}, max:{}'.format(grasp_scores_record.min(), grasp_scores_record.max()))
         
-        grasp_scores[po_mask] = torch.log(u_max / grasp_scores[po_mask])
+        # grasp_scores[po_mask] = torch.log(u_max / grasp_scores[po_mask])
         
         # grasp_scores_record = grasp_scores[po_mask]
         # print('before min:{}, max:{}'.format(grasp_scores_record.min(), grasp_scores_record.max()))

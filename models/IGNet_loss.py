@@ -21,7 +21,7 @@ def get_loss(end_points, device):
     # rotation_loss, end_points = compute_rotation_loss(end_points)
     # loss = 10 * score_loss + width_loss
     # loss = 0.1 * score_loss + width_loss  # BCE  bs = 16
-    loss = score_loss + width_loss # focal loss  bs = 12
+    loss = 10 * score_loss + width_loss # focal loss  bs = 10
     end_points['loss/overall_loss'] = loss
     return loss, end_points
 
@@ -40,7 +40,7 @@ def get_loss(end_points, device):
 # classifcation-based
 def compute_score_loss(end_points, device):
     # criterion = nn.CrossEntropyLoss(reduction='mean', label_smoothing=0.1).to(device)
-    criterion = FocalLoss(alpha=0.5, gamma=2.0, reduction='mean')
+    criterion = FocalLoss(alpha=0.75, gamma=2.0, reduction='mean').to(device)
     grasp_score_pred = end_points['grasp_score_pred'].permute((0, 3, 1, 2))
     grasp_score_label = end_points['batch_grasp_score_ids']
     loss = criterion(grasp_score_pred, grasp_score_label)

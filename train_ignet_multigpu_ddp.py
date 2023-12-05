@@ -24,7 +24,7 @@ import torch
 # torch.set_num_threads(1)
 
 import torch.nn as nn
-from torch.optim import Adam
+from torch.optim import Adam, AdamW
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 
@@ -65,19 +65,19 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--dataset_root', default='/media/8TB/rcao/dataset/graspnet', help='Dataset root')
 parser.add_argument('--camera', default='realsense', help='Camera split [realsense/kinect]')
 parser.add_argument('--checkpoint_path', default=None, help='Model checkpoint path [default: None]')
-parser.add_argument('--log_dir', default='log/ignet_v0.3.5.2', help='Dump dir to save model checkpoint [default: log]')
+parser.add_argument('--log_dir', default='log/ignet_v0.3.5', help='Dump dir to save model checkpoint [default: log]')
 parser.add_argument('--num_point', type=int, default=512, help='Point Number [default: 20000]')
 parser.add_argument('--seed_feat_dim', default=512, type=int, help='Point wise feature dim')
 parser.add_argument('--num_view', type=int, default=300, help='View Number [default: 300]')
 parser.add_argument('--max_epoch', type=int, default=61, help='Epoch to run [default: 18]')
-parser.add_argument('--batch_size', type=int, default=12, help='Batch Size during training [default: 2]')
-parser.add_argument('--worker_num', type=int, default=0, help='Worker number for dataloader [default: 4]')
+parser.add_argument('--batch_size', type=int, default=10, help='Batch Size during training [default: 2]')
+parser.add_argument('--worker_num', type=int, default=2, help='Worker number for dataloader [default: 4]')
 parser.add_argument('--learning_rate', type=float, default=0.001, help='Initial learning rate [default: 0.001]')
-parser.add_argument('--weight_decay', type=float, default=0, help='Optimization L2 weight decay [default: 0]')
+# parser.add_argument('--weight_decay', type=float, default=0, help='Optimization L2 weight decay [default: 0]')
 # parser.add_argument('--bn_decay_step', type=int, default=2, help='Period of BN decay (in epochs) [default: 2]')
 # parser.add_argument('--bn_decay_rate', type=float, default=0.5, help='Decay rate for BN decay [default: 0.5]')
-parser.add_argument('--lr_decay_steps', default='8,12,16', help='When to decay the learning rate (in epochs) [default: 8,12,16]')
-parser.add_argument('--lr_decay_rates', default='0.1,0.1,0.1', help='Decay rates for lr decay [default: 0.1,0.1,0.1]')
+# parser.add_argument('--lr_decay_steps', default='8,12,16', help='When to decay the learning rate (in epochs) [default: 8,12,16]')
+# parser.add_argument('--lr_decay_rates', default='0.1,0.1,0.1', help='Decay rates for lr decay [default: 0.1,0.1,0.1]')
 cfgs = parser.parse_args()
 
 
@@ -112,7 +112,7 @@ def main_worker(gpu, ngpus_per_node, args):
         log_string("Use GPU: {} for training".format(args.gpu))
     args.rank = 0 * ngpus_per_node + gpu
     now = datetime.now()
-    port_id = int(now.minute)*100 + int(now.second)
+    port_id = int(now.minute)*1000 + int(now.second)
     log_string("Port ID: {}".format(port_id))
     dist.init_process_group(
         backend="nccl",
@@ -207,7 +207,7 @@ def main_worker(gpu, ngpus_per_node, args):
                                     syn_data=True)
     test_dataset = GraspNetDataset(cfgs.dataset_root, valid_obj_idxs, grasp_labels, camera=cfgs.camera, split='test_seen', 
                                 num_points=cfgs.num_point, remove_outlier=True, augment=False, real_data=True, 
-                                syn_data=True)
+                                syn_data=False)
 
     log_string("{}, {}".format(len(train_dataset), len(test_dataset)))
     train_sampler = DistributedSampler(train_dataset)
@@ -230,16 +230,17 @@ def main_worker(gpu, ngpus_per_node, args):
     # define loss function (criterion) and optimizer
     # criterion = nn.CrossEntropyLoss().cuda(args.gpu)
     # Synchronized batch norm
-    # net = ME.MinkowskiSyncBatchNorm.convert_sync_batchnorm(model)
+    model = ME.MinkowskiSyncBatchNorm.convert_sync_batchnorm(model)
     
-    optimizer = Adam(model.parameters(), lr=cfgs.learning_rate, weight_decay=cfgs.weight_decay)
-    lr_scheduler = CosineAnnealingLR(optimizer, T_max=16, eta_min=0.0)
+    optimizer = AdamW(model.parameters(), lr=cfgs.learning_rate)
+    lr_scheduler = CosineAnnealingLR(optimizer, T_max=16, eta_min=1e-5)
 
     start_epoch = 0
     if dist.get_rank() == 0 and CHECKPOINT_PATH is not None and os.path.isfile(CHECKPOINT_PATH):
         checkpoint = torch.load(CHECKPOINT_PATH)
         model.load_state_dict(checkpoint['model_state_dict'])
-        # optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
         start_epoch = checkpoint['epoch']
         log_string("-> loaded checkpoint %s (epoch: %d)"%(CHECKPOINT_PATH, start_epoch))
 
@@ -263,6 +264,7 @@ def main_worker(gpu, ngpus_per_node, args):
         save_dict = {'epoch': epoch+1, # after training one epoch, the start_epoch should be epoch+1
                     'optimizer_state_dict': optimizer.state_dict(),
                     'loss': loss,
+                    'lr_scheduler':lr_scheduler.state_dict(),
                     }
         try: # with nn.DataParallel() the net is added as a submodule of DataParallel
             save_dict['model_state_dict'] = model.module.state_dict()

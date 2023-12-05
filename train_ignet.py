@@ -61,8 +61,9 @@ parser.add_argument('--num_point', type=int, default=512, help='Point Number [de
 parser.add_argument('--seed_feat_dim', default=512, type=int, help='Point wise feature dim')
 parser.add_argument('--num_view', type=int, default=300, help='View Number [default: 300]')
 parser.add_argument('--max_epoch', type=int, default=61, help='Epoch to run [default: 18]')
-parser.add_argument('--batch_size', type=int, default=16, help='Batch Size during training [default: 2]')
+parser.add_argument('--batch_size', type=int, default=8, help='Batch Size during training [default: 2]')
 parser.add_argument('--learning_rate', type=float, default=0.001, help='Initial learning rate [default: 0.001]')
+parser.add_argument('--worker_num', type=int, default=8, help='Worker number for dataloader [default: 4]')
 parser.add_argument('--weight_decay', type=float, default=0, help='Optimization L2 weight decay [default: 0]')
 # parser.add_argument('--bn_decay_step', type=int, default=2, help='Period of BN decay (in epochs) [default: 2]')
 # parser.add_argument('--bn_decay_rate', type=float, default=0.5, help='Decay rate for BN decay [default: 0.5]')
@@ -94,7 +95,7 @@ def my_worker_init_fn(worker_id):
     np.random.seed(np.random.get_state()[1][0] + worker_id)
     pass
 
-device = torch.device("cuda:4" if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 torch.cuda.set_device(device)
 
 # Create Dataset and Dataloader
@@ -112,9 +113,9 @@ print(len(TRAIN_DATASET), len(TEST_DATASET))
 # TEST_DATALOADER = DataLoader(TEST_DATASET, batch_size=cfgs.batch_size, shuffle=False,
 #     num_workers=4, worker_init_fn=my_worker_init_fn, collate_fn=collate_fn)
 TRAIN_DATALOADER = DataLoader(TRAIN_DATASET, batch_size=cfgs.batch_size, shuffle=True,
-    num_workers=8, worker_init_fn=my_worker_init_fn, collate_fn=minkowski_collate_fn)
+    num_workers=cfgs.worker_num, worker_init_fn=my_worker_init_fn, collate_fn=minkowski_collate_fn)
 TEST_DATALOADER = DataLoader(TEST_DATASET, batch_size=cfgs.batch_size, shuffle=False,
-    num_workers=8, worker_init_fn=my_worker_init_fn, collate_fn=minkowski_collate_fn)
+    num_workers=cfgs.worker_num, worker_init_fn=my_worker_init_fn, collate_fn=minkowski_collate_fn)
 print(len(TRAIN_DATALOADER), len(TEST_DATALOADER))
 # Init the model and optimzier
 # net = GraspNet(input_feature_dim=0, num_view=cfgs.num_view, num_angle=12, num_depth=4,
@@ -125,7 +126,7 @@ net.to(device)
 
 # Load the Adam optimizer
 optimizer = optim.Adam(net.parameters(), lr=cfgs.learning_rate, weight_decay=cfgs.weight_decay)
-lr_scheduler = CosineAnnealingLR(optimizer, T_max=16, eta_min=0.0)
+lr_scheduler = CosineAnnealingLR(optimizer, T_max=16, eta_min=1e-5)
 
 # Load checkpoint if there is any
 it = -1 # for the initialize value of `LambdaLR` and `BNMomentumScheduler`
@@ -134,6 +135,7 @@ if CHECKPOINT_PATH is not None and os.path.isfile(CHECKPOINT_PATH):
     checkpoint = torch.load(CHECKPOINT_PATH)
     net.load_state_dict(checkpoint['model_state_dict'])
     optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
     start_epoch = checkpoint['epoch']
     log_string("-> loaded checkpoint %s (epoch: %d)"%(CHECKPOINT_PATH, start_epoch))
 # Decay Batchnorm momentum from 0.5 to 0.999
@@ -180,7 +182,7 @@ def train_one_epoch():
         end_points = net(batch_data_label)
 
         # Compute loss and gradients, update parameters.
-        loss, end_points = get_loss(end_points)
+        loss, end_points = get_loss(end_points, device)
         loss.backward()
         if (batch_idx+1) % 1 == 0:
             optimizer.step()
@@ -219,7 +221,7 @@ def evaluate_one_epoch():
             end_points = net(batch_data_label)
 
         # Compute loss
-        loss, end_points = get_loss(end_points)
+        loss, end_points = get_loss(end_points, device)
 
         # Accumulate statistics and print out
         for key in end_points:
@@ -256,6 +258,7 @@ def train(start_epoch):
         save_dict = {'epoch': epoch+1, # after training one epoch, the start_epoch should be epoch+1
                     'optimizer_state_dict': optimizer.state_dict(),
                     'loss': loss,
+                    'lr_scheduler':lr_scheduler.state_dict(),
                     }
         try: # with nn.DataParallel() the net is added as a submodule of DataParallel
             save_dict['model_state_dict'] = net.module.state_dict()

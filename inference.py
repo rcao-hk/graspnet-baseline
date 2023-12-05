@@ -64,8 +64,9 @@ parser.add_argument('--collision_thresh', type=float, default=0.01, help='Collis
 cfgs = parser.parse_args()
 
 network_ver = 'v0.3.3.2'
-save_ver = 'v0.3.3.2.1'
+save_ver = 'v0.3.3.2.2'
 data_type = 'real' # syn
+restored_depth = True
 trained_epoch = 50
 split = cfgs.split
 camera = cfgs.camera
@@ -94,8 +95,12 @@ def inference(scene_idx):
         if data_type == 'real':
             rgb_path = os.path.join(dataset_root,
                                     'scenes/scene_{:04d}/{}/rgb/{:04d}.png'.format(scene_idx, camera, anno_idx))
-            depth_path = os.path.join(dataset_root,
-                                    'scenes/scene_{:04d}/{}/depth/{:04d}.png'.format(scene_idx, camera, anno_idx))
+            if restored_depth:
+                depth_path = os.path.join(dataset_root,
+                                          'restored_depth/scene_{:04d}/{}/{:04d}.png'.format(scene_idx, camera, anno_idx))
+            else:
+                depth_path = os.path.join(dataset_root,
+                                          'scenes/scene_{:04d}/{}/depth/{:04d}.png'.format(scene_idx, camera, anno_idx))   
             mask_path = os.path.join(dataset_root,
                                     'scenes/scene_{:04d}/{}/label/{:04d}.png'.format(scene_idx, camera, anno_idx))
         elif data_type == 'syn':
