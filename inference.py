@@ -44,39 +44,39 @@ def setup_seed(seed):
 # 设置随机数种子
 setup_seed(0)
 
+parser = argparse.ArgumentParser()
+parser.add_argument('--split', default='test_seen', help='Dataset split [default: test_seen]')
+parser.add_argument('--camera', default='realsense', help='Camera to use [kinect | realsense]')
+parser.add_argument('--seed_feat_dim', default=512, type=int, help='Point wise feature dim')
+parser.add_argument('--dataset_root', default='/media/8TB/rcao/dataset/graspnet', help='Where dataset is')
+parser.add_argument('--network_ver', type=str, help='Network version', required=True)
+parser.add_argument('--dump_dir', type=str, help='Dump dir to save outputs', required=True)
+parser.add_argument('--gpu_id', type=str, default='0', help='GPU ID')
+parser.add_argument('--voxel_size', type=float, default=0.005, help='Voxel Size to process point clouds before collision detection [default: 0.01]')
+parser.add_argument('--collision_thresh', type=float, default=0.01, help='Collision Threshold in collision detection [default: 0.01]')
+cfgs = parser.parse_args()
+
 minimum_num_pt = 50
 num_pt = 512
 width = 1280
 height = 720
 # voxel_size = 0.005
 # TOP_K = 300
-device = torch.device("cuda:4" if torch.cuda.is_available() else "cpu")
-torch.cuda.set_device(device)
 
-parser = argparse.ArgumentParser()
-parser.add_argument('--split', default='test_seen', help='dataset split [default: test_seen]')
-parser.add_argument('--camera', default='realsense', help='camera to use [kinect | realsense]')
-parser.add_argument('--seed_feat_dim', default=512, type=int, help='Point wise feature dim')
-parser.add_argument('--dataset_root', default='/media/8TB/rcao/dataset/graspnet', help='where dataset is')
-parser.add_argument('--dump_root', default='experiment', help='Dump dir to save outputs')
-parser.add_argument('--voxel_size', type=float, default=0.005, help='Voxel Size to process point clouds before collision detection [default: 0.01]')
-parser.add_argument('--collision_thresh', type=float, default=0.01, help='Collision Threshold in collision detection [default: 0.01]')
-cfgs = parser.parse_args()
-
-network_ver = 'v0.3.3.2'
-save_ver = 'v0.3.3.2.2'
 data_type = 'real' # syn
 restored_depth = True
+use_gt_mask = False
 trained_epoch = 50
 split = cfgs.split
 camera = cfgs.camera
 dataset_root = cfgs.dataset_root
 voxel_size = cfgs.voxel_size
-dump_dir = os.path.join(cfgs.dump_root, 'ignet_'+save_ver)
-# suctionnet_eval = SuctionNetEval(root=dataset_root, camera=camera)
+network_ver = cfgs.network_ver
+dump_dir = os.path.join('experiment', cfgs.dump_dir)
 
-# net = SuctionNet(feature_dim=512, is_training=False)
-# net.to(device)
+device = torch.device("cuda:"+cfgs.gpu_id if torch.cuda.is_available() else "cpu")
+torch.cuda.set_device(device)
+
 net = IGNet(num_view=300, seed_feat_dim=cfgs.seed_feat_dim, is_training=False)
 net.to(device)
 net.eval()
@@ -125,7 +125,8 @@ def inference(scene_idx):
         net_seg = np.array(Image.open(seg_mask_path))
         # normal = np.load(normal_path)['normals']
 
-        # net_seg = seg
+        if use_gt_mask:
+            net_seg = seg
         meta = scio.loadmat(meta_path)
 
         obj_idxs = meta['cls_indexes'].flatten().astype(np.int32)
