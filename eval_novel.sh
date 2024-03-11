@@ -1,2 +1,2 @@
-python inference.py --split 'test_novel' --camera 'realsense' --network_ver 'v0.3.3.5' --dump_dir 'ignet_v0.3.3.5'
-python eval.py --split 'test_novel' --dump_dir 'ignet_v0.3.3.5'
+python inference.py --split 'test_novel' --network_ver 'v0.3.6.3' --checkpoint 'epoch_49_train_0.1661040508467704_val_4.168487717855411.tar' --dump_dir 'ignet_v0.3.6.3' --gpu_id '1' --camera 'realsense'
+python eval.py --split 'test_novel' --dump_dir 'ignet_v0.3.6.3'

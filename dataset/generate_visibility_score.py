@@ -152,5 +152,3 @@ for scene_idx in range(100, 130):
         visib_info_save_path = os.path.join(visib_info_save_root, 'scene_{:04}'.format(scene_idx), camera)
         os.makedirs(visib_info_save_path, exist_ok=True)
         scio.savemat(os.path.join(visib_info_save_path, '{:04}.mat'.format(anno_idx)), info_dict)
-
-

@@ -22,7 +22,7 @@ from data_utils import CameraInfo, transform_point_cloud, create_point_cloud_fro
 class GraspNetDataset(Dataset):
     def __init__(self, root, valid_obj_idxs, grasp_labels, camera='kinect', split='train', num_points=1024,
                  remove_outlier=False, remove_invisible=True, augment=False, load_label=True, real_data=True, 
-                 syn_data=False):
+                 syn_data=False, visib_threshold=0.0):
         # assert(num_points<=50000)
         self.root = root
         self.split = split
@@ -39,7 +39,7 @@ class GraspNetDataset(Dataset):
         self.minimum_num_pt = 50
         self.real_data = real_data
         self.syn_data = syn_data
-        
+        self.visib_threshold = visib_threshold
         if split == 'train':
             self.sceneIds = list(range(100))
         elif split == 'test':
@@ -58,6 +58,7 @@ class GraspNetDataset(Dataset):
         self.metapath = []
         self.scenename = []
         self.frameid = []
+        self.visibpath = []
         # self.graspnesspath = []
         # self.normalpath = []
         for x in tqdm(self.sceneIds, desc = 'Loading data path and collision labels...'):
@@ -65,8 +66,10 @@ class GraspNetDataset(Dataset):
                 if self.real_data:
                     self.colorpath.append(os.path.join(root, 'scenes', x, camera, 'rgb', str(img_num).zfill(4)+'.png'))
                     self.depthpath.append(os.path.join(root, 'scenes', x, camera, 'depth', str(img_num).zfill(4)+'.png'))
+                    # self.depthpath.append(os.path.join(root, 'restored_depth',  x, camera, str(img_num).zfill(4)+'.png'))
                     self.labelpath.append(os.path.join(root, 'scenes', x, camera, 'label', str(img_num).zfill(4)+'.png'))
                     self.metapath.append(os.path.join(root, 'scenes', x, camera, 'meta', str(img_num).zfill(4)+'.mat'))
+                    self.visibpath.append(os.path.join(root, 'visib_info', x, camera, str(img_num).zfill(4)+'.mat'))
                     # self.normalpath.append(os.path.join(root, 'normals', x, camera, str(img_num).zfill(4)+'.npz'))
                     self.scenename.append(x.strip())
                     self.frameid.append(img_num)
@@ -76,6 +79,7 @@ class GraspNetDataset(Dataset):
                     self.depthpath.append(os.path.join(root, 'virtual_scenes', x, camera, str(img_num).zfill(4)+'_depth.png'))
                     self.labelpath.append(os.path.join(root, 'virtual_scenes', x, camera, str(img_num).zfill(4)+'_label.png'))
                     self.metapath.append(os.path.join(root, 'scenes', x, camera, 'meta', str(img_num).zfill(4)+'.mat'))
+                    self.visibpath.append(os.path.join(root, 'visib_info', x, camera, str(img_num).zfill(4)+'.mat'))                    
                     # self.normalpath.append(os.path.join(root, 'normals', x, camera, str(img_num).zfill(4)+'.npz'))
                     self.scenename.append(x.strip())
                     self.frameid.append(img_num)
@@ -126,6 +130,7 @@ class GraspNetDataset(Dataset):
         depth = np.array(Image.open(self.depthpath[index]))
         seg = np.array(Image.open(self.labelpath[index]))
         meta = scio.loadmat(self.metapath[index])
+        visib_info = scio.loadmat(self.visibpath[index])
         # normal = np.load(self.normalpath[index])['normals']
         scene = self.scenename[index]
         try:
@@ -160,9 +165,10 @@ class GraspNetDataset(Dataset):
             choose_idx = np.random.choice(np.arange(len(obj_idxs)))
             inst_mask = seg_masked == obj_idxs[choose_idx]
             inst_mask_len = inst_mask.sum()
-            if inst_mask_len > self.minimum_num_pt:
+            inst_visib_fract = float(visib_info[str(obj_idxs[choose_idx])]['visib_fract'])
+            if inst_mask_len > self.minimum_num_pt and inst_visib_fract > self.visib_threshold:
                 break
-
+        
         # if return_raw_cloud:
         #     return cloud_masked, color_masked
 
@@ -197,6 +203,7 @@ class GraspNetDataset(Dataset):
         depth = np.array(Image.open(self.depthpath[index]))
         seg = np.array(Image.open(self.labelpath[index]))
         meta = scio.loadmat(self.metapath[index])
+        visib_info = scio.loadmat(self.visibpath[index])
         scene = self.scenename[index]
         # graspness = np.load(self.graspnesspath[index])  # for each point in workspace masked point cloud
         # normal = np.load(self.normalpath[index])['normals']
@@ -234,7 +241,8 @@ class GraspNetDataset(Dataset):
             choose_idx = np.random.choice(np.arange(len(obj_idxs)))
             inst_mask = seg_masked == obj_idxs[choose_idx]
             inst_mask_len = inst_mask.sum()
-            if inst_mask_len > self.minimum_num_pt:
+            inst_visib_fract = float(visib_info[str(obj_idxs[choose_idx])]['visib_fract'])
+            if inst_mask_len > self.minimum_num_pt and inst_visib_fract > self.visib_threshold:
                 break
             
         # sample points

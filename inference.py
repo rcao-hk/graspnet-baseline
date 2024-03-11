@@ -47,11 +47,12 @@ setup_seed(0)
 parser = argparse.ArgumentParser()
 parser.add_argument('--split', default='test_seen', help='Dataset split [default: test_seen]')
 parser.add_argument('--camera', default='realsense', help='Camera to use [kinect | realsense]')
-parser.add_argument('--seed_feat_dim', default=512, type=int, help='Point wise feature dim')
-parser.add_argument('--dataset_root', default='/media/8TB/rcao/dataset/graspnet', help='Where dataset is')
-parser.add_argument('--network_ver', type=str, help='Network version', required=True)
-parser.add_argument('--dump_dir', type=str, help='Dump dir to save outputs', required=True)
+parser.add_argument('--seed_feat_dim', default=256, type=int, help='Point wise feature dim')
+parser.add_argument('--dataset_root', default='/media/gpuadmin/rcao/dataset/graspnet', help='Where dataset is')
+parser.add_argument('--network_ver', type=str, default='v0.3.5.2',help='Network version', required=True)
+parser.add_argument('--dump_dir', type=str, default='ignet_v0.3.5.2', help='Dump dir to save outputs', required=True)
 parser.add_argument('--gpu_id', type=str, default='0', help='GPU ID')
+parser.add_argument('--checkpoint', type=str, help='Checkpoint name of trained model')
 parser.add_argument('--voxel_size', type=float, default=0.005, help='Voxel Size to process point clouds before collision detection [default: 0.01]')
 parser.add_argument('--collision_thresh', type=float, default=0.01, help='Collision Threshold in collision detection [default: 0.01]')
 cfgs = parser.parse_args()
@@ -64,15 +65,16 @@ height = 720
 # TOP_K = 300
 
 data_type = 'real' # syn
-restored_depth = True
+restored_depth = False
 use_gt_mask = False
-trained_epoch = 50
+seg_model = 'uois'
 split = cfgs.split
 camera = cfgs.camera
 dataset_root = cfgs.dataset_root
 voxel_size = cfgs.voxel_size
 network_ver = cfgs.network_ver
 dump_dir = os.path.join('experiment', cfgs.dump_dir)
+checkpoint_name = cfgs.checkpoint
 
 device = torch.device("cuda:"+cfgs.gpu_id if torch.cuda.is_available() else "cpu")
 torch.cuda.set_device(device)
@@ -81,7 +83,7 @@ net = IGNet(num_view=300, seed_feat_dim=cfgs.seed_feat_dim, is_training=False)
 net.to(device)
 net.eval()
 checkpoint = torch.load(
-    os.path.join('log', 'ignet_' + network_ver, 'checkpoint_{}.tar'.format(trained_epoch)),
+    os.path.join('log', 'ignet_' + network_ver, checkpoint_name),
     map_location=device)
 # checkpoint = torch.load(os.path.join('log', 'ignet_' + network_ver, cfgs.camera, 'checkpoint.tar'), map_location=device)
 # checkpoint = torch.load(os.path.join('log', 'ignet_' + network_ver, 'checkpoint.tar'), map_location=device)
@@ -111,7 +113,7 @@ def inference(scene_idx):
         meta_path = os.path.join(dataset_root,
                                 'scenes/scene_{:04d}/{}/meta/{:04d}.mat'.format(scene_idx, camera, anno_idx))
         seg_mask_path = os.path.join(dataset_root,
-                                'seg_mask/scene_{:04d}/{}/{:04d}.png'.format(scene_idx, camera, anno_idx))
+                                '{}_mask/scene_{:04d}/{}/{:04d}.png'.format(seg_model, scene_idx, camera, anno_idx))
 
         # suction_score_path = os.path.join(dataset_root, 'suction/scene_{:04d}/{}/{:04d}.npz'.format(scene_idx, camera, anno_idx))
         # normal_path = os.path.join(dataset_root, 'normals/scene_{:04d}/{}/{:04d}.npz'.format(scene_idx, camera, anno_idx))

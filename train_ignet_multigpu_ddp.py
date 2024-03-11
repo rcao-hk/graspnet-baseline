@@ -2,6 +2,7 @@ import os
 os.environ['CUDA_VISIBLE_DEVICES'] = '2, 3'
 # os.environ["OMP_NUM_THREADS"] = "1"
 # os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:2048"
 
 import resource
 # RuntimeError: received 0 items of ancdata. Issue: pytorch/pytorch#973
@@ -65,13 +66,13 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--dataset_root', default='/media/8TB/rcao/dataset/graspnet', help='Dataset root')
 parser.add_argument('--camera', default='realsense', help='Camera split [realsense/kinect]')
 parser.add_argument('--checkpoint_path', default=None, help='Model checkpoint path [default: None]')
-parser.add_argument('--log_dir', default='log/ignet_v0.3.5', help='Dump dir to save model checkpoint [default: log]')
-parser.add_argument('--num_point', type=int, default=512, help='Point Number [default: 20000]')
-parser.add_argument('--seed_feat_dim', default=512, type=int, help='Point wise feature dim')
+parser.add_argument('--log_dir', default='log/ignet_v0.3.5.3', help='Dump dir to save model checkpoint [default: log]')
+parser.add_argument('--num_point', type=int, default=256, help='Point Number [default: 20000]')
+parser.add_argument('--seed_feat_dim', default=256, type=int, help='Point wise feature dim')
 parser.add_argument('--num_view', type=int, default=300, help='View Number [default: 300]')
 parser.add_argument('--max_epoch', type=int, default=61, help='Epoch to run [default: 18]')
-parser.add_argument('--batch_size', type=int, default=10, help='Batch Size during training [default: 2]')
-parser.add_argument('--worker_num', type=int, default=2, help='Worker number for dataloader [default: 4]')
+parser.add_argument('--batch_size', type=int, default=18, help='Batch Size during training [default: 2]')
+parser.add_argument('--worker_num', type=int, default=3, help='Worker number for dataloader [default: 4]')
 parser.add_argument('--learning_rate', type=float, default=0.001, help='Initial learning rate [default: 0.001]')
 # parser.add_argument('--weight_decay', type=float, default=0, help='Optimization L2 weight decay [default: 0]')
 # parser.add_argument('--bn_decay_step', type=int, default=2, help='Period of BN decay (in epochs) [default: 2]')
@@ -236,7 +237,8 @@ def main_worker(gpu, ngpus_per_node, args):
     lr_scheduler = CosineAnnealingLR(optimizer, T_max=16, eta_min=1e-5)
 
     start_epoch = 0
-    if dist.get_rank() == 0 and CHECKPOINT_PATH is not None and os.path.isfile(CHECKPOINT_PATH):
+    
+    if CHECKPOINT_PATH is not None and os.path.isfile(CHECKPOINT_PATH):
         checkpoint = torch.load(CHECKPOINT_PATH)
         model.load_state_dict(checkpoint['model_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])

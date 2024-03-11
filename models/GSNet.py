@@ -16,6 +16,7 @@ import pointnet2.pytorch_utils as pt_utils
 from pointnet2.pointnet2_utils import CylinderQueryAndGroup, furthest_point_sample, gather_operation
 from loss_utils import generate_grasp_views, batch_viewpoint_params_to_matrix, batch_key_points, transform_point_cloud, \
                        GRASPNESS_THRESHOLD, GRASP_MAX_WIDTH, NUM_ANGLE, NUM_VIEW, NUM_DEPTH, M_POINT
+from models.coral_loss import corn_label_from_logits
 
 
 angles = torch.tensor([np.pi / NUM_ANGLE * i for i in range(NUM_ANGLE)])
@@ -27,7 +28,25 @@ views_repeat = views.repeat_interleave(NUM_ANGLE, dim=0)
 grasp_rot = batch_viewpoint_params_to_matrix(-views_repeat, angles_repeat)  # (300, 12, 9)
 depths = torch.linspace(0.01, 0.04, 4)
 width_bins = torch.tensor([0.02, 0.04, 0.06, 0.08])
-score_bins = torch.tensor([0.2, 0.4, 0.6, 0.8])
+# score_bins = torch.tensor([0.2, 0.4, 0.6, 0.8])
+score_bins = torch.tensor([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9])
+
+
+def score_unbucketize(bucketized_data):
+
+    # bucket_means = torch.tensor([0.1, 0.3, 0.5, 0.7, 0.9]).to(bucketized_data.device)
+    bucket_means = torch.tensor([0.05, 0.15, 0.25, 0.35, 0.45, 0.55, 0.65, 0.75, 0.85, 0.95]).to(bucketized_data.device)
+    
+    # 为了使用 torch.gather，我们需要确保 bucket_means 在非索引维度上与 bucketized_data 的形状相匹配
+    # 首先将 bucket_means 调整为适当的形状
+    bucket_means = bucket_means.view(-1, *([1] * (bucketized_data.dim() - 1)))
+
+    # 使用 expand 方法使 bucket_means 在非索引维度上与 bucketized_data 的形状相匹配
+    expanded_size = [-1] + list(bucketized_data.shape[1:])
+    bucket_means = bucket_means.expand(expanded_size)
+
+    # 使用 torch.gather 在第一个维度上收集数据
+    return torch.gather(bucket_means, 0, bucketized_data)
 
 
 def generate_half_grasp_views(views, azimuth_range=(0, 2 * np.pi), elev_range=(0, 0.5 * np.pi)):
@@ -401,8 +420,13 @@ class WidthNet(nn.Module):
         self.in_dim = seed_feature_dim
         self.is_training = is_training
         self.conv1 = nn.Conv1d(self.in_dim, self.in_dim, 1)
+        # v0.3.3.3.1
+        self.conv2 = nn.Conv1d(self.in_dim, self.in_dim * 2, 1)
+        self.bn1 = nn.BatchNorm1d(self.in_dim)
+        self.bn2 = nn.BatchNorm1d(self.in_dim * 2)
         # regression-based
-        self.conv2 = nn.Conv1d(self.in_dim, self.num_view * self.num_angle * self.num_depth, 1)
+        self.conv3 = nn.Conv1d(self.in_dim * 2, self.num_view * self.num_angle * self.num_depth, 1)
+        # self.conv2 = nn.Conv1d(self.in_dim, self.num_view * self.num_angle * self.num_depth, 1)
         # classfication-based
         # self.conv2 = nn.Conv1d(self.in_dim, self.num_view * self.num_angle * self.num_depth * (len(width_bins)+1), 1)
 
@@ -410,7 +434,11 @@ class WidthNet(nn.Module):
         B, _, num_seed = seed_features.size()
         features = F.relu(self.conv1(seed_features), inplace=True)
         features = self.conv2(features)
-        width_pred = features.transpose(1, 2).contiguous() # (B, num_seed, num_view*num_angle)
+        # v0.3.3.3.1
+        features = F.relu(self.bn1(self.conv1(seed_features)), inplace=True)
+        features = F.relu(self.bn2(self.conv2(features)), inplace=True)
+        features = self.conv3(features)
+        width_pred = features.transpose(1, 2).contiguous() # (B, num_seed, num_view * num_angle)
         
         # classification-based
         # width_pred = width_pred.view(B, num_seed, self.num_view * self.num_angle * self.num_depth, len(width_bins)+1)
@@ -427,19 +455,27 @@ class RotationScoringNet(nn.Module):
         self.in_dim = seed_feature_dim
         self.is_training = is_training
         self.conv1 = nn.Conv1d(self.in_dim, self.in_dim, 1)
-        # regression-based
-        # self.conv2 = nn.Conv1d(self.in_dim, self.num_view * self.num_angle * self.num_depth, 1)
-        # classfication-based
-        self.conv2 = nn.Conv1d(self.in_dim, self.num_view * self.num_angle * self.num_depth * (len(score_bins)+1), 1)
+        # # v0.3.3.3.1
+        self.conv2 = nn.Conv1d(self.in_dim, self.in_dim * 2, 1)
+        self.bn1 = nn.BatchNorm1d(self.in_dim)
+        self.bn2 = nn.BatchNorm1d(self.in_dim * 2)
+        # # regression-based
+        self.conv3 = nn.Conv1d(self.in_dim * 2, self.num_view * self.num_angle * self.num_depth, 1)
+        # classfication-based (len(score_bins)+1) CORN (len(score_bins))
+        # self.conv3 = nn.Conv1d(self.in_dim * 2, self.num_view * self.num_angle * self.num_depth * len(score_bins), 1)
 
     def forward(self, seed_features, end_points):
         B, _, num_seed = seed_features.size()
         features = F.relu(self.conv1(seed_features), inplace=True)
         features = self.conv2(features)
-        rotation_scores = features.transpose(1, 2).contiguous() # (B, num_seed, num_view*num_angle)
+        # v0.3.3.3.1
+        features = F.relu(self.bn1(self.conv1(seed_features)), inplace=True)
+        features = F.relu(self.bn2(self.conv2(features)), inplace=True)
+        features = self.conv3(features)
+        rotation_scores = features.transpose(1, 2).contiguous() # (B, num_seed, num_view * num_angle)
 
         # classification-based
-        rotation_scores = rotation_scores.view(B, num_seed, self.num_view * self.num_angle * self.num_depth, len(score_bins)+1)
+        # rotation_scores = rotation_scores.view(B, num_seed, self.num_view * self.num_angle * self.num_depth, len(score_bins))
         end_points['grasp_score_pred'] = rotation_scores
         return end_points
 
@@ -481,6 +517,7 @@ class IGNet(nn.Module):
         seed_features = self.backbone(mink_input).F
         seed_features = seed_features[end_points['quantize2original']].view(B, point_num, -1).transpose(1, 2)
 
+        end_points['seed_features'] = seed_features
         # end_points['grasp_score'] = self.scoring(seed_features)
         # v0.4
         # end_points = self.scoring_head(seed_features, end_points)
@@ -727,11 +764,19 @@ def pred_decode(end_points, normalize=False):
     for i in range(batch_size):
         grasp_center = end_points['point_clouds'][i].float()
         grasp_score = end_points['grasp_score_pred'][i].float()
-        grasp_width = 1.2 * end_points['grasp_width_pred'][i] / 10.
+        grasp_width = 1.2 * end_points['grasp_width_pred'][i] / 10.  # 10 for multiply 10 in loss function
 
         if normalize:
             grasp_score = normalize_tensor(grasp_score)
-            
+        
+        # v0.3.5
+        # grasp_score = grasp_score.argmax(-1)
+        # grasp_score = score_unbucketize(grasp_score)
+        
+        # v0.3.5.2
+        # grasp_score = corn_label_from_logits(grasp_score)
+        # grasp_score = score_unbucketize(grasp_score)
+        
         # v0.4
         # grasp_width = 1.2 * end_points['grasp_width_pred'][i]
         grasp_score, grasp_score_inds = torch.max(grasp_score, dim=1)  # [M_POINT]
