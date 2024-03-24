@@ -11,16 +11,9 @@ import MinkowskiEngine as ME
 
 from graspnetAPI import GraspGroup, GraspNetEval
 
-import sys
-ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
-sys.path.append(os.path.join(ROOT_DIR, 'utils'))
-sys.path.append(os.path.join(ROOT_DIR, 'pointnet2'))
-sys.path.append(os.path.join(ROOT_DIR, 'models'))
-sys.path.append(os.path.join(ROOT_DIR, 'dataset'))
-
-from GSNet import IGNet, pred_decode
-from collision_detector import ModelFreeCollisionDetector
-from data_utils import CameraInfo, create_point_cloud_from_depth_image, get_workspace_mask
+from models.GSNet import IGNet, pred_decode
+from utils.collision_detector import ModelFreeCollisionDetector
+from utils.data_utils import CameraInfo, create_point_cloud_from_depth_image, get_workspace_mask
 
 import resource
 # RuntimeError: received 0 items of ancdata. Issue: pytorch/pytorch#973
@@ -53,7 +46,8 @@ parser.add_argument('--network_ver', type=str, default='v0.3.5.2',help='Network 
 parser.add_argument('--dump_dir', type=str, default='ignet_v0.3.5.2', help='Dump dir to save outputs', required=True)
 parser.add_argument('--gpu_id', type=str, default='0', help='GPU ID')
 parser.add_argument('--checkpoint', type=str, help='Checkpoint name of trained model')
-parser.add_argument('--voxel_size', type=float, default=0.005, help='Voxel Size to process point clouds before collision detection [default: 0.01]')
+parser.add_argument('--voxel_size', type=float, default=0.005, help='Voxel Size to quantize point cloud [default: 0.005]')
+parser.add_argument('--collision_voxel_size', type=float, default=0.01, help='Voxel Size to process point clouds before collision detection [default: 0.01]')
 parser.add_argument('--collision_thresh', type=float, default=0.01, help='Collision Threshold in collision detection [default: 0.01]')
 cfgs = parser.parse_args()
 
@@ -214,7 +208,7 @@ def inference(scene_idx):
         # collision detection
         if cfgs.collision_thresh > 0:
             # cloud, _ = TEST_DATASET.get_data(data_idx, return_raw_cloud=True)
-            mfcdetector = ModelFreeCollisionDetector(cloud.reshape(-1, 3), voxel_size=cfgs.voxel_size)
+            mfcdetector = ModelFreeCollisionDetector(cloud.reshape(-1, 3), voxel_size=cfgs.collision_voxel_size)
             collision_mask = mfcdetector.detect(gg, approach_dist=0.05, collision_thresh=cfgs.collision_thresh)
             gg = gg[~collision_mask]
 

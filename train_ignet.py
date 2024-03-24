@@ -35,29 +35,23 @@ def setup_seed(seed):
 # 设置随机数种子
 setup_seed(0)
 
-
-ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
-sys.path.append(os.path.join(ROOT_DIR, 'utils'))
-sys.path.append(os.path.join(ROOT_DIR, 'pointnet2'))
-sys.path.append(os.path.join(ROOT_DIR, 'models'))
-sys.path.append(os.path.join(ROOT_DIR, 'dataset'))
-
 # from graspnet import GraspNet, get_loss
-from GSNet import IGNet
-from IGNet_loss import get_loss
+from models.GSNet import IGNet
+from models.IGNet_loss import get_loss
 # from pytorch_utils import BNMomentumScheduler
 # from graspnet_dataset import GraspNetDataset, collate_fn, minkowski_collate_fn, load_grasp_labels
-from ignet_dataset import GraspNetDataset, collate_fn, minkowski_collate_fn, load_grasp_labels
-from label_generation import process_grasp_labels
+from dataset.ignet_dataset import GraspNetDataset, collate_fn, minkowski_collate_fn, load_grasp_labels
 
  
 parser = argparse.ArgumentParser()
 parser.add_argument('--dataset_root', default='/media/gpuadmin/rcao/dataset/graspnet', help='Dataset root')
 parser.add_argument('--camera', default='realsense', help='Camera split [realsense/kinect]')
 parser.add_argument('--checkpoint_path', default=None, help='Model checkpoint path [default: None]')
-parser.add_argument('--log_dir', default='log/ignet_v0.3.6.3', help='Dump dir to save model checkpoint [default: log]')
+parser.add_argument('--log_dir', default='log/ignet_v0.3.6.7', help='Dump dir to save model checkpoint [default: log]')
 parser.add_argument('--num_point', type=int, default=512, help='Point Number [default: 20000]')
 parser.add_argument('--seed_feat_dim', default=256, type=int, help='Point wise feature dim')
+parser.add_argument('--voxel_size', type=int, default=0.001, help='Voxel Size for Quantize [default: 0.005]')
+parser.add_argument('--visib_threshold', type=int, default=0.5, help='Visibility Threshold [default: 0.5]')
 parser.add_argument('--num_view', type=int, default=300, help='View Number [default: 300]')
 parser.add_argument('--max_epoch', type=int, default=61, help='Epoch to run [default: 18]')
 parser.add_argument('--batch_size', type=int, default=32, help='Batch Size during training [default: 2]')
@@ -94,17 +88,17 @@ def my_worker_init_fn(worker_id):
     np.random.seed(np.random.get_state()[1][0] + worker_id)
     pass
 
-device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda:3" if torch.cuda.is_available() else "cpu")
 torch.cuda.set_device(device)
 
 # Create Dataset and Dataloader
 valid_obj_idxs, grasp_labels = load_grasp_labels(cfgs.dataset_root)
 TRAIN_DATASET = GraspNetDataset(cfgs.dataset_root, valid_obj_idxs, grasp_labels, camera=cfgs.camera, split='train', 
                                 num_points=cfgs.num_point, remove_outlier=True, augment=True, real_data=True, 
-                                syn_data=True, visib_threshold=0.)
+                                syn_data=True, visib_threshold=cfgs.visib_threshold, voxel_size=cfgs.voxel_size)
 TEST_DATASET = GraspNetDataset(cfgs.dataset_root, valid_obj_idxs, grasp_labels, camera=cfgs.camera, split='test_seen', 
                                num_points=cfgs.num_point, remove_outlier=True, augment=False, real_data=True, 
-                               syn_data=False, visib_threshold=0.3)
+                               syn_data=False, visib_threshold=cfgs.visib_threshold, voxel_size=cfgs.voxel_size)
 
 print(len(TRAIN_DATASET), len(TEST_DATASET))
 # TRAIN_DATALOADER = DataLoader(TRAIN_DATASET, batch_size=cfgs.batch_size, shuffle=True,
@@ -138,6 +132,7 @@ if CHECKPOINT_PATH is not None and os.path.isfile(CHECKPOINT_PATH):
     lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
     start_epoch = checkpoint['epoch']
     log_string("-> loaded checkpoint %s (epoch: %d)"%(CHECKPOINT_PATH, start_epoch))
+    
 # Decay Batchnorm momentum from 0.5 to 0.999
 # note: pytorch's BN momentum (default 0.1)= 1 - tensorflow's BN momentum
 # BN_MOMENTUM_INIT = 0.5
