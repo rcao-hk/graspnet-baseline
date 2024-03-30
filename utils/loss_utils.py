@@ -121,26 +121,71 @@ def huber_loss(error, delta=1.0):
     return loss
 
 
-def batch_key_points(centers, Rs, widths):
+# def batch_key_points(centers, Rs, widths):
+#     center_shape = centers.size()
+#     if len(centers.size()) == 3:
+#         Bs, num_samples, _ = center_shape
+#         centers = centers.view((-1, 3))
+#         Rs = Rs.view((-1, 3, 3))
+#         widths = widths.view(-1)
+#     depth_base = 0.02
+#     height = 0.02
+#     tail_length = 0.04
+#     R_sym = torch.tensor([[1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]], device=centers.device)
+#     key_points = torch.zeros((centers.size(0), 5, 3), device=centers.device)
+
+#     key_points[:, :, 0] -= height / 2
+#     key_points[:, :2, 1] += widths.unsqueeze(-1) / 2
+#     key_points[:, 2:4, 1] -= widths.unsqueeze(-1) / 2
+#     key_points[:, 1:3, 0] += depth_base / 2
+#     key_points[:, 0, 0] -= depth_base / 2
+#     key_points[:, 3, 0] -= depth_base / 2
+#     key_points[:, 4, 0] -= (depth_base / 2 + tail_length)
+#     key_points_sym = key_points.detach()
+
+#     key_points = torch.matmul(Rs, key_points.transpose(1, 2)).transpose(1, 2)
+#     key_points_sym = torch.matmul(torch.matmul(Rs, R_sym), key_points_sym.transpose(1, 2)).transpose(1, 2)
+
+#     key_points += centers.unsqueeze(1)
+#     key_points_sym += centers.unsqueeze(1)
+    
+#     if len(center_shape) == 3:
+#         key_points = key_points.view((Bs, num_samples, 5, 3))
+#         key_points_sym = key_points_sym.view((Bs, num_samples, 5, 3))
+#     return key_points, key_points_sym
+
+
+def batch_get_key_points(centers, Rs, widths, depths):
+    '''
+        Input:
+            centers: torch.Tensor of shape (-1, 3) for the translation.
+            Rs: torch.Tensor of shape (-1, 3, 3) for the rotation matrix.
+            widths: torch.Tensor of shape (-1) for the grasp width.
+            depths: torch.Tensor of shape (-1) for the grasp depth.
+
+        Output:
+            key_points: torch.Tensor of shape (-1, 4, 3) for the key points of the grasp.
+            key_points_sym: torch.Tensor of shape (-1, 4, 3) for the symmetric key points of the grasp.
+    '''
     center_shape = centers.size()
-    if len(centers.size()) == 3:
+    if len(center_shape) == 3:
         Bs, num_samples, _ = center_shape
         centers = centers.view((-1, 3))
         Rs = Rs.view((-1, 3, 3))
         widths = widths.view(-1)
-    depth_base = 0.02
-    height = 0.02
-    tail_length = 0.04
-    R_sym = torch.tensor([[1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]], device=centers.device)
-    key_points = torch.zeros((centers.size(0), 5, 3), device=centers.device)
+        depths = depths.view(-1)
 
-    key_points[:, :, 0] -= height / 2
-    key_points[:, :2, 1] += widths.unsqueeze(-1) / 2
-    key_points[:, 2:4, 1] -= widths.unsqueeze(-1) / 2
-    key_points[:, 1:3, 0] += depth_base / 2
-    key_points[:, 0, 0] -= depth_base / 2
-    key_points[:, 3, 0] -= depth_base / 2
-    key_points[:, 4, 0] -= (depth_base / 2 + tail_length)
+    height = 0.02
+
+    R_sym = torch.tensor([[1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]], device=centers.device)
+    key_points = torch.zeros((centers.size(0), 4, 3), device=centers.device)
+
+    # Adjustments based on depth_base, widths, and height
+    key_points[:, :, 0] -= depths.unsqueeze(1)  # Adjust x coordinates based on depth
+    key_points[:, 1:, 1] -= widths.unsqueeze(1) / 2  # Adjust y coordinates based on width
+    key_points[:, 2, 2] += height / 2  # Adjust the z coordinate for one of the height key points
+    key_points[:, 3, 2] -= height / 2  # Adjust the z coordinate for the other height key point
+
     key_points_sym = key_points.detach()
 
     key_points = torch.matmul(Rs, key_points.transpose(1, 2)).transpose(1, 2)
@@ -148,8 +193,7 @@ def batch_key_points(centers, Rs, widths):
 
     key_points += centers.unsqueeze(1)
     key_points_sym += centers.unsqueeze(1)
-    
     if len(center_shape) == 3:
-        key_points = key_points.view((Bs, num_samples, 5, 3))
-        key_points_sym = key_points_sym.view((Bs, num_samples, 5, 3))
+        key_points = key_points.view((Bs, num_samples, 4, 3))
+        key_points_sym = key_points_sym.view((Bs, num_samples, 4, 3))
     return key_points, key_points_sym

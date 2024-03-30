@@ -1,2 +1,2 @@
-python inference.py --split 'test_novel' --network_ver 'v0.3.6.3' --checkpoint 'epoch_49_train_0.1661040508467704_val_4.168487717855411.tar' --dump_dir 'ignet_v0.3.6.3' --gpu_id '1' --camera 'realsense'
-python eval.py --split 'test_novel' --dump_dir 'ignet_v0.3.6.3'
+python inference.py --split 'test_novel' --network_ver 'v0.3.6.8' --checkpoint 'epoch_48_train_0.208172993225744_val_4.807553348558334.tar' --dump_dir 'ignet_v0.3.6.8' --gpu_id '3' --camera 'realsense' --voxel_size '0.001'
+python eval.py --split 'test_novel' --dump_dir 'ignet_v0.3.6.8'

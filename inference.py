@@ -11,7 +11,6 @@ import MinkowskiEngine as ME
 
 from graspnetAPI import GraspGroup, GraspNetEval
 
-from models.GSNet import IGNet, pred_decode
 from utils.collision_detector import ModelFreeCollisionDetector
 from utils.data_utils import CameraInfo, create_point_cloud_from_depth_image, get_workspace_mask
 
@@ -42,11 +41,11 @@ parser.add_argument('--split', default='test_seen', help='Dataset split [default
 parser.add_argument('--camera', default='realsense', help='Camera to use [kinect | realsense]')
 parser.add_argument('--seed_feat_dim', default=256, type=int, help='Point wise feature dim')
 parser.add_argument('--dataset_root', default='/media/gpuadmin/rcao/dataset/graspnet', help='Where dataset is')
-parser.add_argument('--network_ver', type=str, default='v0.3.5.2',help='Network version', required=True)
-parser.add_argument('--dump_dir', type=str, default='ignet_v0.3.5.2', help='Dump dir to save outputs', required=True)
-parser.add_argument('--gpu_id', type=str, default='0', help='GPU ID')
-parser.add_argument('--checkpoint', type=str, help='Checkpoint name of trained model')
-parser.add_argument('--voxel_size', type=float, default=0.005, help='Voxel Size to quantize point cloud [default: 0.005]')
+parser.add_argument('--network_ver', type=str, default='v0.4.3',required=True, help='Network version')
+parser.add_argument('--dump_dir', type=str, default='ignet_v0.4.3', required=True, help='Dump dir to save outputs')
+parser.add_argument('--gpu_id', type=str, default='3', help='GPU ID')
+parser.add_argument('--checkpoint', type=str, required=True, help='Checkpoint name of trained model')
+parser.add_argument('--voxel_size', type=float, default=0.001, help='Voxel Size to quantize point cloud [default: 0.005]')
 parser.add_argument('--collision_voxel_size', type=float, default=0.01, help='Voxel Size to process point clouds before collision detection [default: 0.01]')
 parser.add_argument('--collision_thresh', type=float, default=0.01, help='Collision Threshold in collision detection [default: 0.01]')
 cfgs = parser.parse_args()
@@ -73,14 +72,14 @@ checkpoint_name = cfgs.checkpoint
 device = torch.device("cuda:"+cfgs.gpu_id if torch.cuda.is_available() else "cpu")
 torch.cuda.set_device(device)
 
+from models.GSNet import IGNet, pred_decode
+# from models.GSNet_v0_4 import IGNet, pred_decode
 net = IGNet(num_view=300, seed_feat_dim=cfgs.seed_feat_dim, is_training=False)
 net.to(device)
 net.eval()
 checkpoint = torch.load(
     os.path.join('log', 'ignet_' + network_ver, checkpoint_name),
     map_location=device)
-# checkpoint = torch.load(os.path.join('log', 'ignet_' + network_ver, cfgs.camera, 'checkpoint.tar'), map_location=device)
-# checkpoint = torch.load(os.path.join('log', 'ignet_' + network_ver, 'checkpoint.tar'), map_location=device)
 
 net.load_state_dict(checkpoint['model_state_dict'])
 eps = 1e-12

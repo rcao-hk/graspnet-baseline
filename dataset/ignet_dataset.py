@@ -22,7 +22,7 @@ from data_utils import CameraInfo, transform_point_cloud, create_point_cloud_fro
 class GraspNetDataset(Dataset):
     def __init__(self, root, valid_obj_idxs, grasp_labels, camera='kinect', split='train', num_points=1024,
                  remove_outlier=False, remove_invisible=True, augment=False, load_label=True, real_data=True, 
-                 syn_data=False, visib_threshold=0.0):
+                 syn_data=False, visib_threshold=0.0, voxel_size=0.005):
         # assert(num_points<=50000)
         self.root = root
         self.split = split
@@ -35,7 +35,7 @@ class GraspNetDataset(Dataset):
         self.augment = augment
         self.load_label = load_label    
         self.collision_labels = {}
-        self.voxel_size = 0.005
+        self.voxel_size = voxel_size
         self.minimum_num_pt = 50
         self.real_data = real_data
         self.syn_data = syn_data
@@ -376,6 +376,33 @@ def minkowski_collate_fn(list_data):
         "coors": coordinates_batch,
         "feats": features_batch,
         "quantize2original": quantize2original
+    }
+
+    def collate_fn_(batch):
+        if type(batch[0]).__module__ == 'numpy':
+            return torch.stack([torch.from_numpy(b) for b in batch], 0)
+        elif isinstance(batch[0], container_abcs.Sequence):
+            return [[torch.from_numpy(sample) for sample in b] for b in batch]
+        elif isinstance(batch[0], container_abcs.Mapping):
+            for key in batch[0]:
+                if key == 'coors' or key == 'feats':
+                    continue
+                res[key] = collate_fn_([d[key] for d in batch])
+            return res
+    res = collate_fn_(list_data)
+
+    return res
+
+
+def pt_collate_fn(list_data):
+    coordinates_batch, features_batch = ME.utils.sparse_collate([d["coors"] for d in list_data],
+                                                                [d["feats"] for d in list_data], dtype=torch.float32)
+    # coordinates_batch, features_batch, _, quantize2original = ME.utils.sparse_quantize(
+    #     coordinates_batch, features_batch, return_index=True, return_inverse=True)
+    res = {
+        "coors": coordinates_batch,
+        "feats": features_batch,
+        # "quantize2original": quantize2original
     }
 
     def collate_fn_(batch):

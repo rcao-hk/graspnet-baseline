@@ -35,36 +35,24 @@ def setup_seed(seed):
 # 设置随机数种子
 setup_seed(0)
 
-# from graspnet import GraspNet, get_loss
-from models.GSNet import IGNet
-# from models.GSNet_v0_5 import IGNet
-# from models.GSNet_v0_4 import IGNet
 from models.IGNet_loss import get_loss
+from dataset.ignet_dataset import GraspNetDataset, pt_collate_fn, load_grasp_labels
+from models.point_transformer.model import Ignet_pt
 
-# from pytorch_utils import BNMomentumScheduler
-# from graspnet_dataset import GraspNetDataset, collate_fn, minkowski_collate_fn, load_grasp_labels
-from dataset.ignet_dataset import GraspNetDataset, minkowski_collate_fn, load_grasp_labels
-
- 
 parser = argparse.ArgumentParser()
 parser.add_argument('--dataset_root', default='/media/gpuadmin/rcao/dataset/graspnet', help='Dataset root')
 parser.add_argument('--camera', default='realsense', help='Camera split [realsense/kinect]')
 parser.add_argument('--checkpoint_path', default=None, help='Model checkpoint path [default: None]')
-parser.add_argument('--log_dir', default='log/ignet_v0.3.7', help='Dump dir to save model checkpoint [default: log]')
-parser.add_argument('--num_point', type=int, default=512, help='Point Number [default: 20000]')
-parser.add_argument('--seed_feat_dim', default=256, type=int, help='Point wise feature dim')
-parser.add_argument('--voxel_size', type=int, default=0.001, help='Voxel Size for Quantize [default: 0.005]')
+parser.add_argument('--log_dir', default='log/ignet_v0.5', help='Dump dir to save model checkpoint [default: log]')
+parser.add_argument('--num_point', type=int, default=512, help='Point Number [default: 1024]')
+# parser.add_argument('--seed_feat_dim', default=256, type=int, help='Point wise feature dim')
+parser.add_argument('--voxel_size', type=int, default=0.002, help='Voxel Size for Quantize [default: 0.005]')
 parser.add_argument('--visib_threshold', type=int, default=0.5, help='Visibility Threshold [default: 0.5]')
 parser.add_argument('--num_view', type=int, default=300, help='View Number [default: 300]')
 parser.add_argument('--max_epoch', type=int, default=61, help='Epoch to run [default: 18]')
-parser.add_argument('--batch_size', type=int, default=32, help='Batch Size during training [default: 2]')
-parser.add_argument('--learning_rate', type=float, default=0.002, help='Initial learning rate [default: 0.001]')
-parser.add_argument('--worker_num', type=int, default=24, help='Worker number for dataloader [default: 4]')
-# parser.add_argument('--weight_decay', type=float, default=0, help='Optimization L2 weight decay [default: 0]')
-# parser.add_argument('--bn_decay_step', type=int, default=2, help='Period of BN decay (in epochs) [default: 2]')
-# parser.add_argument('--bn_decay_rate', type=float, default=0.5, help='Decay rate for BN decay [default: 0.5]')
-# parser.add_argument('--lr_decay_steps', default='8,12,16', help='When to decay the learning rate (in epochs) [default: 8,12,16]')
-# parser.add_argument('--lr_decay_rates', default='0.1,0.1,0.1', help='Decay rates for lr decay [default: 0.1,0.1,0.1]')
+parser.add_argument('--batch_size', type=int, default=30, help='Batch Size during training [default: 2]')
+parser.add_argument('--learning_rate', type=float, default=0.001, help='Initial learning rate [default: 0.001]')
+parser.add_argument('--worker_num', type=int, default=16, help='Worker number for dataloader [default: 4]')
 cfgs = parser.parse_args()
 
 # ------------------------------------------------------------------------- GLOBAL CONFIG BEG
@@ -91,7 +79,7 @@ def my_worker_init_fn(worker_id):
     np.random.seed(np.random.get_state()[1][0] + worker_id)
     pass
 
-device = torch.device("cuda:5" if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda:3" if torch.cuda.is_available() else "cpu")
 torch.cuda.set_device(device)
 
 # Create Dataset and Dataloader
@@ -109,15 +97,13 @@ print(len(TRAIN_DATASET), len(TEST_DATASET))
 # TEST_DATALOADER = DataLoader(TEST_DATASET, batch_size=cfgs.batch_size, shuffle=False,
 #     num_workers=4, worker_init_fn=my_worker_init_fn, collate_fn=collate_fn)
 TRAIN_DATALOADER = DataLoader(TRAIN_DATASET, batch_size=cfgs.batch_size, shuffle=True,
-    num_workers=cfgs.worker_num, worker_init_fn=my_worker_init_fn, collate_fn=minkowski_collate_fn)
+    num_workers=cfgs.worker_num, worker_init_fn=my_worker_init_fn, collate_fn=pt_collate_fn)
 TEST_DATALOADER = DataLoader(TEST_DATASET, batch_size=cfgs.batch_size, shuffle=False,
-    num_workers=cfgs.worker_num, worker_init_fn=my_worker_init_fn, collate_fn=minkowski_collate_fn)
+    num_workers=cfgs.worker_num, worker_init_fn=my_worker_init_fn, collate_fn=pt_collate_fn)
 print(len(TRAIN_DATALOADER), len(TEST_DATALOADER))
-# Init the model and optimzier
-# net = GraspNet(input_feature_dim=0, num_view=cfgs.num_view, num_angle=12, num_depth=4,
-#                         cylinder_radius=0.05, hmin=-0.02, hmax_list=[0.01,0.02,0.03,0.04])
 
-net = IGNet(num_view=cfgs.num_view, seed_feat_dim=cfgs.seed_feat_dim, is_training=True)
+# Init the model and optimzier
+net = Ignet_pt(num_view=cfgs.num_view, voxel_size=cfgs.voxel_size, is_training=True)
 net.to(device)
 
 # Load the Adam optimizer
@@ -135,7 +121,7 @@ if CHECKPOINT_PATH is not None and os.path.isfile(CHECKPOINT_PATH):
     lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
     start_epoch = checkpoint['epoch']
     log_string("-> loaded checkpoint %s (epoch: %d)"%(CHECKPOINT_PATH, start_epoch))
-    
+
 # Decay Batchnorm momentum from 0.5 to 0.999
 # note: pytorch's BN momentum (default 0.1)= 1 - tensorflow's BN momentum
 # BN_MOMENTUM_INIT = 0.5
@@ -145,23 +131,11 @@ if CHECKPOINT_PATH is not None and os.path.isfile(CHECKPOINT_PATH):
 # scheduler = OneCycleLR(optimizer, max_lr=cfgs.learning_rate, steps_per_epoch=len(TRAIN_DATALOADER),
                     #    epochs=cfgs.max_epoch, last_epoch=start_epoch * len(TRAIN_DATALOADER)-1)
 
-
-# def get_current_lr(epoch):
-#     lr = cfgs.learning_rate
-#     for i,lr_decay_epoch in enumerate(LR_DECAY_STEPS):
-#         if epoch >= lr_decay_epoch:
-#             lr *= LR_DECAY_RATES[i]
-#     return lr
-
-# def adjust_learning_rate(optimizer, epoch):
-#     lr = get_current_lr(epoch)
-#     for param_group in optimizer.param_groups:
-#         param_group['lr'] = lr
-
 # TensorBoard Visualizers
-log_writer = SummaryWriter(os.path.join(cfgs.log_dir))
-# ------------------------------------------------------------------------- GLOBAL CONFIG END
+TRAIN_WRITER = SummaryWriter(os.path.join(cfgs.log_dir, 'train'))
+TEST_WRITER = SummaryWriter(os.path.join(cfgs.log_dir, 'test'))
 
+# ------------------------------------------------------------------------- GLOBAL CONFIG END
 def train_one_epoch():
     stat_dict = {} # collect statistics
     # adjust_learning_rate(optimizer, EPOCH_CNT)
@@ -199,13 +173,14 @@ def train_one_epoch():
         if (batch_idx+1) % batch_interval == 0:
             log_string(' ---- batch: %03d ----' % (batch_idx+1))
             for key in sorted(stat_dict.keys()):
-                log_writer.add_scalar('train_' + key, stat_dict[key]/batch_interval, (EPOCH_CNT*len(TRAIN_DATALOADER)+batch_idx)*cfgs.batch_size)
+                TRAIN_WRITER.add_scalar(key, stat_dict[key]/batch_interval, (EPOCH_CNT*len(TRAIN_DATALOADER)+batch_idx)*cfgs.batch_size)
                 log_string('mean %s: %f'%(key, stat_dict[key]/batch_interval))
                 stat_dict[key] = 0
     
     log_string('overall loss:{}, batch num:{}'.format(overall_loss, batch_idx+1))
     mean_loss = overall_loss/float(batch_idx+1)
     return mean_loss
+
 
 def evaluate_one_epoch():
     stat_dict = {} # collect statistics
@@ -238,7 +213,7 @@ def evaluate_one_epoch():
         overall_loss += stat_dict['loss/overall_loss']
         
     for key in sorted(stat_dict.keys()):
-        log_writer.add_scalar('test_' + key, stat_dict[key]/float(batch_idx+1), (EPOCH_CNT+1)*len(TRAIN_DATALOADER)*cfgs.batch_size)
+        TEST_WRITER.add_scalar(key, stat_dict[key]/float(batch_idx+1), (EPOCH_CNT+1)*len(TRAIN_DATALOADER)*cfgs.batch_size)
         log_string('eval mean %s: %f'%(key, stat_dict[key]/(float(batch_idx+1))))
 
     log_string('overall loss:{}, batch num:{}'.format(overall_loss, batch_idx+1))
@@ -261,7 +236,6 @@ def train(start_epoch):
         # REF: https://github.com/pytorch/pytorch/issues/5059
         np.random.seed()
         train_loss = train_one_epoch()
-        log_writer.add_scalar('training/learning_rate', optimizer.param_groups[0]['lr'], epoch)
         lr_scheduler.step()
         
         eval_loss = evaluate_one_epoch()
@@ -288,6 +262,7 @@ def train(start_epoch):
         #     torch.save(save_dict, os.path.join(cfgs.log_dir, 'checkpoint_{}.tar'.format(epoch)))
         # if not EPOCH_CNT % 5:
         #     torch.save(save_dict, os.path.join(cfgs.log_dir, 'checkpoint_{}.tar'.format(EPOCH_CNT)))
+
 
 if __name__=='__main__':
     train(start_epoch)
