@@ -21,25 +21,51 @@ def sym_loss(p1_key_points, p2_key_points, p2_key_points_sym):
 def get_loss(end_points, device):
     # score_loss, score_oe_loss, end_points = compute_score_loss(end_points, device)
     score_loss, end_points = compute_score_loss(end_points, device)
-    width_loss, end_points = compute_width_loss(end_points, device)
+    # width_loss, end_points = compute_width_loss(end_points, device)
     # rotation_loss, end_points = compute_rotation_loss(end_points)
     # loss = 10 * score_loss + width_loss
     # loss = 0.1 * score_loss + width_loss  # BCE  bs = 16
     # loss = 10 * score_loss + 0.1*score_oe_loss + width_loss # focal loss  bs = 10
-    loss = 10 * score_loss + 0.1 * width_loss
+    # loss = 10 * score_loss + 0.1 * width_loss
+    loss = score_loss
     end_points['loss/overall_loss'] = loss
     return loss, end_points
 
 
+# def get_loss(end_points, device):
+#     # score_loss, score_oe_loss, end_points = compute_score_loss(end_points, device)
+#     score_loss, end_points = compute_score_loss(end_points, device)
+#     width_loss, end_points = compute_width_loss(end_points, device)
+#     # rotation_loss, end_points = compute_rotation_loss(end_points)
+#     # loss = 10 * score_loss + width_loss
+#     # loss = 0.1 * score_loss + width_loss  # BCE  bs = 16
+#     # loss = 10 * score_loss + 0.1*score_oe_loss + width_loss # focal loss  bs = 10
+#     loss = 10 * score_loss + 0.1 * width_loss
+#     end_points['loss/overall_loss'] = loss
+#     return loss, end_points
+
+
 # regression-based loss
 # def compute_score_loss(end_points, device):
-#     criterion = nn.SmoothL1Loss(reduction='mean').to(device)
+#     criterion = nn.SmoothL1Loss(reduction='none').to(device)
 #     # criterion = nn.MSELoss(reduction='mean').to(device)
 #     grasp_score_pred = end_points['grasp_score_pred']
 #     grasp_score_label = end_points['batch_grasp_score']
 #     loss = criterion(grasp_score_pred, grasp_score_label)
 #     end_points['loss/score_loss'] = loss
 #     return loss, end_points
+
+# top-k loss backpropagation
+def compute_score_loss(end_points, device):
+    criterion = nn.SmoothL1Loss(reduction='none').to(device)
+    # criterion = nn.MSELoss(reduction='mean').to(device)
+    grasp_score_pred = end_points['grasp_score_pred']
+    grasp_score_label = end_points['batch_grasp_score']
+    loss = criterion(grasp_score_pred, grasp_score_label) # (bs, 512, 300*12*4)
+    topk_loss, _ = torch.topk(loss, k=1, dim=2)
+    loss = topk_loss.mean()
+    end_points['loss/score_loss'] = loss
+    return loss, end_points
 
 
 # regression-based with oridinal loss
@@ -71,26 +97,28 @@ def get_loss(end_points, device):
 
 
 # regression-based
+def compute_width_loss(end_points, device):
+    criterion = nn.SmoothL1Loss(reduction='none').to(device)
+    # criterion = nn.MSELoss(reduction='none').to(device)
+    grasp_width_pred = end_points['grasp_width_pred']
+    grasp_width_label = end_points['batch_grasp_width'] * 10
+    loss = criterion(grasp_width_pred, grasp_width_label)
+    grasp_score_label = end_points['batch_grasp_score']
+    loss_mask = grasp_score_label > 0
+    loss = loss[loss_mask].mean()
+    end_points['loss/width_loss'] = loss
+    return loss, end_points
+
+
+# v0.5
 # def compute_width_loss(end_points, device):
 #     criterion = nn.SmoothL1Loss(reduction='none').to(device)
 #     # criterion = nn.MSELoss(reduction='none').to(device)
 #     grasp_width_pred = end_points['grasp_width_pred']
 #     grasp_width_label = end_points['batch_grasp_width'] * 10
+#     grasp_score_mask = end_points['batch_grasp_mask']
 #     loss = criterion(grasp_width_pred, grasp_width_label)
-#     grasp_score_label = end_points['batch_grasp_score']
-#     loss_mask = grasp_score_label > 0
-#     loss = loss[loss_mask].mean()
-#     end_points['loss/width_loss'] = loss
-#     return loss, end_points
-
-
-# v0.5
-# def compute_width_loss(end_points, device):
-#     criterion = nn.SmoothL1Loss().to(device)
-#     # criterion = nn.MSELoss(reduction='none').to(device)
-#     grasp_width_pred = end_points['grasp_width_pred']
-#     grasp_width_label = end_points['batch_grasp_width'] * 10
-#     loss = criterion(grasp_width_pred, grasp_width_label)
+#     loss = loss[grasp_score_mask].mean()
 #     end_points['loss/width_loss'] = loss
 #     return loss, end_points
 
@@ -106,27 +134,6 @@ def get_loss(end_points, device):
 #     loss = loss[loss_mask].mean()
 #     end_points['loss/width_loss'] = loss
 #     return loss, end_points
-
-
-# v0.3.7
-def compute_score_loss(end_points, device):
-    criterion = nn.SmoothL1Loss(reduction='mean').to(device)
-    # criterion = nn.MSELoss(reduction='mean').to(device)
-    grasp_score_pred = end_points['grasp_score_pred']
-    grasp_score_label = end_points['batch_grasp_score']
-    loss = criterion(grasp_score_pred, grasp_score_label)
-    end_points['loss/score_loss'] = loss
-    return loss, end_points
-
-
-def compute_width_loss(end_points, device):
-    criterion = nn.SmoothL1Loss().to(device)
-    # criterion = nn.MSELoss(reduction='none').to(device)
-    grasp_width_pred = end_points['grasp_width_pred']
-    grasp_width_label = end_points['batch_grasp_width'] * 10
-    loss = criterion(grasp_width_pred, grasp_width_label)
-    end_points['loss/width_loss'] = loss
-    return loss, end_points
 
 # v0.4
 # def compute_score_loss(end_points, device):

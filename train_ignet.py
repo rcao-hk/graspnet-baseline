@@ -2,6 +2,13 @@
 
 import os
 import sys
+
+ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.append(os.path.join(ROOT_DIR, 'pointnet2'))
+# sys.path.append(os.path.join(ROOT_DIR, 'utils'))
+# sys.path.append(os.path.join(ROOT_DIR, 'models'))
+# sys.path.append(os.path.join(ROOT_DIR, 'dataset'))
+
 import numpy as np
 from datetime import datetime
 import argparse
@@ -11,7 +18,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
-from torch.optim.lr_scheduler import ExponentialLR, MultiStepLR, CosineAnnealingLR, OneCycleLR
+from torch.optim.lr_scheduler import ExponentialLR, MultiStepLR, CosineAnnealingLR
 
 import resource
 # RuntimeError: received 0 items of ancdata. Issue: pytorch/pytorch#973
@@ -36,30 +43,31 @@ def setup_seed(seed):
 setup_seed(0)
 
 # from graspnet import GraspNet, get_loss
-from models.GSNet import IGNet
+# from models.GSNet import IGNet
 # from models.GSNet_v0_5 import IGNet
 # from models.GSNet_v0_4 import IGNet
-from models.IGNet_loss import get_loss
+# from models.IGNet_loss import get_loss
 
-# from pytorch_utils import BNMomentumScheduler
-# from graspnet_dataset import GraspNetDataset, collate_fn, minkowski_collate_fn, load_grasp_labels
+from models.IGNet_v0_6 import IGNet
+from models.IGNet_loss_v0_6 import get_loss
+
 from dataset.ignet_dataset import GraspNetDataset, minkowski_collate_fn, load_grasp_labels
 
- 
 parser = argparse.ArgumentParser()
 parser.add_argument('--dataset_root', default='/media/gpuadmin/rcao/dataset/graspnet', help='Dataset root')
 parser.add_argument('--camera', default='realsense', help='Camera split [realsense/kinect]')
 parser.add_argument('--checkpoint_path', default=None, help='Model checkpoint path [default: None]')
-parser.add_argument('--log_dir', default='log/ignet_v0.3.7', help='Dump dir to save model checkpoint [default: log]')
+parser.add_argument('--log_dir', default='log/ignet_v0.6.0', help='Dump dir to save model checkpoint [default: log]')
 parser.add_argument('--num_point', type=int, default=512, help='Point Number [default: 20000]')
 parser.add_argument('--seed_feat_dim', default=256, type=int, help='Point wise feature dim')
-parser.add_argument('--voxel_size', type=int, default=0.001, help='Voxel Size for Quantize [default: 0.005]')
+parser.add_argument('--voxel_size', type=int, default=0.002, help='Voxel Size for Quantize [default: 0.005]')
 parser.add_argument('--visib_threshold', type=int, default=0.5, help='Visibility Threshold [default: 0.5]')
 parser.add_argument('--num_view', type=int, default=300, help='View Number [default: 300]')
 parser.add_argument('--max_epoch', type=int, default=61, help='Epoch to run [default: 18]')
-parser.add_argument('--batch_size', type=int, default=32, help='Batch Size during training [default: 2]')
-parser.add_argument('--learning_rate', type=float, default=0.002, help='Initial learning rate [default: 0.001]')
-parser.add_argument('--worker_num', type=int, default=24, help='Worker number for dataloader [default: 4]')
+parser.add_argument('--batch_size', type=int, default=36, help='Batch Size during training [default: 2]')
+parser.add_argument('--learning_rate', type=float, default=0.001, help='Initial learning rate [default: 0.001]')
+parser.add_argument('--worker_num', type=int, default=18, help='Worker number for dataloader [default: 4]')
+parser.add_argument('--ckpt_save_interval', type=int, default=5, help='Number for save checkpoint[default: 5]')
 # parser.add_argument('--weight_decay', type=float, default=0, help='Optimization L2 weight decay [default: 0]')
 # parser.add_argument('--bn_decay_step', type=int, default=2, help='Period of BN decay (in epochs) [default: 2]')
 # parser.add_argument('--bn_decay_rate', type=float, default=0.5, help='Decay rate for BN decay [default: 0.5]')
@@ -76,8 +84,7 @@ DEFAULT_CHECKPOINT_PATH = os.path.join(cfgs.log_dir, 'checkpoint.tar')
 CHECKPOINT_PATH = cfgs.checkpoint_path if cfgs.checkpoint_path is not None \
     else DEFAULT_CHECKPOINT_PATH
 
-if not os.path.exists(cfgs.log_dir):
-    os.makedirs(cfgs.log_dir)
+os.makedirs(cfgs.log_dir, exist_ok=True)
 
 LOG_FOUT = open(os.path.join(cfgs.log_dir, 'log_train.txt'), 'a')
 LOG_FOUT.write(str(cfgs)+'\n')
@@ -91,7 +98,7 @@ def my_worker_init_fn(worker_id):
     np.random.seed(np.random.get_state()[1][0] + worker_id)
     pass
 
-device = torch.device("cuda:5" if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda:3" if torch.cuda.is_available() else "cpu")
 torch.cuda.set_device(device)
 
 # Create Dataset and Dataloader
@@ -283,11 +290,11 @@ def train(start_epoch):
                         + "_train_" + str(train_loss) \
                         + "_val_" + str(eval_loss)
             torch.save(save_dict, os.path.join(cfgs.log_dir, ckpt_name + '.tar'))
+        elif not EPOCH_CNT % cfgs.ckpt_save_interval:
+            torch.save(save_dict, os.path.join(cfgs.log_dir, 'checkpoint_{}.tar'.format(EPOCH_CNT)))
         log_string("best_epoch:{}".format(best_epoch))
         # if epoch in LR_DECAY_STEPS:
         #     torch.save(save_dict, os.path.join(cfgs.log_dir, 'checkpoint_{}.tar'.format(epoch)))
-        # if not EPOCH_CNT % 5:
-        #     torch.save(save_dict, os.path.join(cfgs.log_dir, 'checkpoint_{}.tar'.format(EPOCH_CNT)))
 
 if __name__=='__main__':
     train(start_epoch)

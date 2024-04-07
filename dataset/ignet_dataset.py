@@ -267,6 +267,7 @@ class GraspNetDataset(Dataset):
             object_pose = object_poses_list[0]
         
         grasp_idxs = np.random.choice(len(points), 350, replace=False)
+        # grasp_idxs = np.random.choice(len(points), min(max(int(len(points) / 4), 350), len(points)), replace=False)
         grasp_points = points[grasp_idxs]
         grasp_offsets = offsets[grasp_idxs]
         collision = collision[grasp_idxs].copy()
