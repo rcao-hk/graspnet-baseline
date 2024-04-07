@@ -8,6 +8,7 @@
 #include "interpolate.h"
 #include "sampling.h"
 #include "cylinder_query.h"
+#include "rectangular_query.h"
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("gather_points", &gather_points);
@@ -24,4 +25,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("group_points_grad", &group_points_grad);
 
   m.def("cylinder_query", &cylinder_query);
+  m.def("rectangular_query", &rectangular_query);
 }
