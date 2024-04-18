@@ -20,7 +20,6 @@ from models.coral_loss import corn_label_from_logits
 from pytorch3d.transforms import rotation_6d_to_matrix, matrix_to_rotation_6d
 # from rectangular_query_ext import rectangular_query
 
-
 base_depth = 0.04
 angles = torch.tensor([np.pi / NUM_ANGLE * i for i in range(NUM_ANGLE)])
 views = generate_grasp_views(NUM_VIEW)  # num of views, (300,3), np.float32

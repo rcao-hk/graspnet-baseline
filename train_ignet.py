@@ -1,7 +1,8 @@
 """ Training routine for GraspNet baseline model. """
 
-import os
 import sys
+import os
+os.environ['CUDA_VISIBLE_DEVICES'] = '2'
 
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(ROOT_DIR, 'pointnet2'))
@@ -51,24 +52,27 @@ setup_seed(0)
 from models.IGNet_v0_6 import IGNet
 from models.IGNet_loss_v0_6 import get_loss
 
+# from models.IGNet_v0_7 import IGNet
+# from models.IGNet_loss_v0_7 import get_loss
+
 from dataset.ignet_dataset import GraspNetDataset, minkowski_collate_fn, load_grasp_labels
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--dataset_root', default='/media/gpuadmin/rcao/dataset/graspnet', help='Dataset root')
 parser.add_argument('--camera', default='realsense', help='Camera split [realsense/kinect]')
 parser.add_argument('--checkpoint_path', default=None, help='Model checkpoint path [default: None]')
-parser.add_argument('--log_dir', default='log/ignet_v0.6.0', help='Dump dir to save model checkpoint [default: log]')
-parser.add_argument('--num_point', type=int, default=512, help='Point Number [default: 20000]')
+parser.add_argument('--log_dir', default='log/ignet_v0.6.3.1', help='Dump dir to save model checkpoint [default: log]')
+parser.add_argument('--num_point', type=int, default=1024, help='Point Number [default: 20000]')
 parser.add_argument('--seed_feat_dim', default=256, type=int, help='Point wise feature dim')
-parser.add_argument('--voxel_size', type=int, default=0.002, help='Voxel Size for Quantize [default: 0.005]')
+parser.add_argument('--voxel_size', type=float, default=0.002, help='Voxel Size for Quantize [default: 0.005]')
 parser.add_argument('--visib_threshold', type=int, default=0.5, help='Visibility Threshold [default: 0.5]')
 parser.add_argument('--num_view', type=int, default=300, help='View Number [default: 300]')
 parser.add_argument('--max_epoch', type=int, default=61, help='Epoch to run [default: 18]')
-parser.add_argument('--batch_size', type=int, default=36, help='Batch Size during training [default: 2]')
-parser.add_argument('--learning_rate', type=float, default=0.001, help='Initial learning rate [default: 0.001]')
-parser.add_argument('--worker_num', type=int, default=18, help='Worker number for dataloader [default: 4]')
+parser.add_argument('--batch_size', type=int, default=26, help='Batch Size during training [default: 2]')
+parser.add_argument('--learning_rate', type=float, default=0.002, help='Initial learning rate [default: 0.001]')
+parser.add_argument('--worker_num', type=int, default=16, help='Worker number for dataloader [default: 4]')
 parser.add_argument('--ckpt_save_interval', type=int, default=5, help='Number for save checkpoint[default: 5]')
-# parser.add_argument('--weight_decay', type=float, default=0, help='Optimization L2 weight decay [default: 0]')
+parser.add_argument('--weight_decay', type=float, default=0.001, help='Optimization L2 weight decay [default: 0]')
 # parser.add_argument('--bn_decay_step', type=int, default=2, help='Period of BN decay (in epochs) [default: 2]')
 # parser.add_argument('--bn_decay_rate', type=float, default=0.5, help='Decay rate for BN decay [default: 0.5]')
 # parser.add_argument('--lr_decay_steps', default='8,12,16', help='When to decay the learning rate (in epochs) [default: 8,12,16]')
@@ -98,7 +102,7 @@ def my_worker_init_fn(worker_id):
     np.random.seed(np.random.get_state()[1][0] + worker_id)
     pass
 
-device = torch.device("cuda:3" if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 torch.cuda.set_device(device)
 
 # Create Dataset and Dataloader
@@ -129,14 +133,14 @@ net.to(device)
 
 # Load the Adam optimizer
 # optimizer = optim.Adam(net.parameters(), lr=cfgs.learning_rate, weight_decay=cfgs.weight_decay)
-optimizer = optim.AdamW(net.parameters(), lr=cfgs.learning_rate)
+optimizer = optim.AdamW(net.parameters(), lr=cfgs.learning_rate, weight_decay=cfgs.weight_decay)
 lr_scheduler = CosineAnnealingLR(optimizer, T_max=16, eta_min=1e-5)
 
 # Load checkpoint if there is any
 it = -1 # for the initialize value of `LambdaLR` and `BNMomentumScheduler`
 start_epoch = 0
 if CHECKPOINT_PATH is not None and os.path.isfile(CHECKPOINT_PATH):
-    checkpoint = torch.load(CHECKPOINT_PATH)
+    checkpoint = torch.load(CHECKPOINT_PATH, map_location=device)
     net.load_state_dict(checkpoint['model_state_dict'])
     optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
     lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
@@ -186,11 +190,16 @@ def train_one_epoch():
                 batch_data_label[key] = batch_data_label[key].cuda()
         # Forward pass
         end_points = net(batch_data_label)
-
+         
         # Compute loss and gradients, update parameters.
         loss, end_points = get_loss(end_points, device)
         loss.backward()
         # if (batch_idx+1) % 1 == 0:
+        # for name, parms in net.named_parameters():
+        #     try:
+        #         print('-->name:', name, '-->grad_requirs:', parms.requires_grad, '--weight', torch.mean(parms.data), ' -->grad_value:', torch.mean(parms.grad))
+        #     except:
+        #         print('error')
         optimizer.step()
         optimizer.zero_grad()
         # scheduler.step()
@@ -292,6 +301,7 @@ def train(start_epoch):
             torch.save(save_dict, os.path.join(cfgs.log_dir, ckpt_name + '.tar'))
         elif not EPOCH_CNT % cfgs.ckpt_save_interval:
             torch.save(save_dict, os.path.join(cfgs.log_dir, 'checkpoint_{}.tar'.format(EPOCH_CNT)))
+        torch.save(save_dict, os.path.join(cfgs.log_dir, 'checkpoint.tar'))
         log_string("best_epoch:{}".format(best_epoch))
         # if epoch in LR_DECAY_STEPS:
         #     torch.save(save_dict, os.path.join(cfgs.log_dir, 'checkpoint_{}.tar'.format(epoch)))

@@ -1,2 +1,2 @@
-python inference.py --split 'test_similar' --network_ver 'v0.3.6.8' --checkpoint 'epoch_48_train_0.208172993225744_val_4.807553348558334.tar' --dump_dir 'ignet_v0.3.6.8' --gpu_id '3' --camera 'realsense' --voxel_size '0.001'
-python eval.py --split 'test_similar' --dump_dir 'ignet_v0.3.6.8'
+python inference.py --split 'test_similar' --network_ver 'v0.6.3' --ckpt_epoch 51 --dump_dir 'ignet_v0.6.3' --gpu_id '0' --camera 'realsense' --voxel_size 0.002
+python eval.py --split 'test_similar' --dump_dir 'ignet_v0.6.3'

@@ -1,6 +1,15 @@
 import os
+os.environ['CUDA_LAUNCH_BLOCKING'] = '1' 
+
+import sys
+
+ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.append(os.path.join(ROOT_DIR, 'pointnet2'))
+
 import cv2
 import time
+import re
+import glob
 import argparse
 import numpy as np
 import torch
@@ -41,17 +50,17 @@ parser.add_argument('--split', default='test_seen', help='Dataset split [default
 parser.add_argument('--camera', default='realsense', help='Camera to use [kinect | realsense]')
 parser.add_argument('--seed_feat_dim', default=256, type=int, help='Point wise feature dim')
 parser.add_argument('--dataset_root', default='/media/gpuadmin/rcao/dataset/graspnet', help='Where dataset is')
-parser.add_argument('--network_ver', type=str, default='v0.4.3',required=True, help='Network version')
-parser.add_argument('--dump_dir', type=str, default='ignet_v0.4.3', required=True, help='Dump dir to save outputs')
-parser.add_argument('--gpu_id', type=str, default='3', help='GPU ID')
-parser.add_argument('--checkpoint', type=str, required=True, help='Checkpoint name of trained model')
-parser.add_argument('--voxel_size', type=float, default=0.001, help='Voxel Size to quantize point cloud [default: 0.005]')
+parser.add_argument('--network_ver', type=str, default='v0.6.3', help='Network version')
+parser.add_argument('--dump_dir', type=str, default='ignet_v0.6.3', help='Dump dir to save outputs')
+parser.add_argument('--inst_pt_num', type=int, default=1024, help='Dump dir to save outputs')
+parser.add_argument('--gpu_id', type=str, default='0', help='GPU ID')
+parser.add_argument('--ckpt_epoch', type=int, default=51, help='Checkpoint epoch name of trained model')
+parser.add_argument('--voxel_size', type=float, default=0.002, help='Voxel Size to quantize point cloud [default: 0.005]')
 parser.add_argument('--collision_voxel_size', type=float, default=0.01, help='Voxel Size to process point clouds before collision detection [default: 0.01]')
 parser.add_argument('--collision_thresh', type=float, default=0.01, help='Collision Threshold in collision detection [default: 0.01]')
 cfgs = parser.parse_args()
 
 minimum_num_pt = 50
-num_pt = 512
 width = 1280
 height = 720
 # voxel_size = 0.005
@@ -61,29 +70,49 @@ data_type = 'real' # syn
 restored_depth = False
 use_gt_mask = False
 seg_model = 'uois'
+num_pt = cfgs.inst_pt_num
 split = cfgs.split
 camera = cfgs.camera
 dataset_root = cfgs.dataset_root
 voxel_size = cfgs.voxel_size
 network_ver = cfgs.network_ver
 dump_dir = os.path.join('experiment', cfgs.dump_dir)
-checkpoint_name = cfgs.checkpoint
+ckpt_epoch = cfgs.ckpt_epoch
 
 device = torch.device("cuda:"+cfgs.gpu_id if torch.cuda.is_available() else "cpu")
 torch.cuda.set_device(device)
 
-from models.GSNet import IGNet, pred_decode
+if network_ver.startswith('v0.6'):
+    from models.IGNet_v0_6 import IGNet, pred_decode
+elif network_ver.startswith('v0.7'):
+    from models.IGNet_v0_7 import IGNet, pred_decode
+else:
+    from models.GSNet import IGNet, pred_decode
 # from models.GSNet_v0_4 import IGNet, pred_decode
+
+pattern = re.compile(rf'(epoch_{ckpt_epoch}_.+\.tar|checkpoint_{ckpt_epoch}\.tar)$')
+ckpt_files = glob.glob(os.path.join('log', 'ignet_' + network_ver, '*.tar'))
+
+ckpt_name = None
+for ckpt_path in ckpt_files:
+    if pattern.search(os.path.basename(ckpt_path)):
+        ckpt_name = ckpt_path
+        break
+
+try :
+    assert ckpt_name is not None
+    print('Load checkpoint from {}'.format(ckpt_name))
+except :
+    print('No such checkpoint file.')
+    sys.exit(1)
+
 net = IGNet(num_view=300, seed_feat_dim=cfgs.seed_feat_dim, is_training=False)
 net.to(device)
 net.eval()
-checkpoint = torch.load(
-    os.path.join('log', 'ignet_' + network_ver, checkpoint_name),
-    map_location=device)
+checkpoint = torch.load(ckpt_name, map_location=device)
 
 net.load_state_dict(checkpoint['model_state_dict'])
-eps = 1e-12
-
+eps = 1e-8
 
 def inference(scene_idx):
     for anno_idx in range(256):
