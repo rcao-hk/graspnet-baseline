@@ -289,11 +289,11 @@ class DepthNet(nn.Module):
         self.is_training = is_training
         self.conv1 = nn.Conv1d(self.in_dim, self.in_dim, 1)
         # regression-based
-        # self.conv2 = nn.Conv1d(self.in_dim, self.num_depth * 2, 1)
+        self.conv2 = nn.Conv1d(self.in_dim, self.num_depth * 2, 1)
         # classfication-based
         # self.conv2 = nn.Conv1d(self.in_dim, self.num_depth * 2 * (len(width_bins)+1), 1)
         # score only
-        self.conv2 = nn.Conv1d(self.in_dim, self.num_depth, 1)
+        # self.conv2 = nn.Conv1d(self.in_dim, self.num_depth, 1)
         self.act =  nn.ReLU(inplace=True)
 
     def forward(self, seed_features, end_points):
@@ -302,20 +302,20 @@ class DepthNet(nn.Module):
         features = self.act(self.conv1(seed_features))
         features = self.conv2(features)
         # regression-based
-        # features = features.view(B, 2, self.num_depth, num_seed)
-        # features = features.permute(0, 1, 3, 2) # (B, 2, num_seed, num_depth)
+        features = features.view(B, 2, self.num_depth, num_seed)
+        features = features.permute(0, 1, 3, 2) # (B, 2, num_seed, num_depth)
         
         # classification-based
         # features = features.view(B, 2, self.num_depth, len(width_bins)+1, num_seed)
         # features = features.permute(0, 1, 4, 2, 3)
         
-        # end_points['grasp_score_pred'] = features[:, 0]
-        # end_points['grasp_width_pred'] = features[:, 1]
+        end_points['grasp_score_pred'] = features[:, 0]
+        end_points['grasp_width_pred'] = features[:, 1]
         
         # regression-based
-        features = features.view(B, self.num_depth, num_seed)
-        features = features.permute(0, 2, 1) # (B, num_seed, num_depth)
-        end_points['grasp_score_pred'] = features
+        # features = features.view(B, self.num_depth, num_seed)
+        # features = features.permute(0, 2, 1) # (B, num_seed, num_depth)
+        # end_points['grasp_score_pred'] = features
         
         return end_points
 
@@ -735,7 +735,7 @@ def pred_decode(end_points, normalize=False):
     for i in range(batch_size):
         grasp_center = end_points['point_clouds'][i].float()
         grasp_score = end_points['grasp_score_pred'][i].float() # (num_samples, D)
-        # grasp_width = 1.2 * end_points['grasp_width_pred'][i] / 10.  # 10 for multiply 10 in loss function
+        grasp_width = 1.2 * end_points['grasp_width_pred'][i] / 10.  # 10 for multiply 10 in loss function
 
         if normalize:
             grasp_score = normalize_tensor(grasp_score)
@@ -755,8 +755,8 @@ def pred_decode(end_points, normalize=False):
         # grasp_width = grasp_width.argmax(-1)
         # grasp_width = value_unbucketize(grasp_width, width_bins.clone().to(grasp_center.device))
         
-        # grasp_width = torch.gather(grasp_width, 1, grasp_score_inds.view(-1, 1))
-        # grasp_width = torch.clamp(grasp_width, min=0., max=GRASP_MAX_WIDTH)
+        grasp_width = torch.gather(grasp_width, 1, grasp_score_inds.view(-1, 1))
+        grasp_width = torch.clamp(grasp_width, min=0., max=GRASP_MAX_WIDTH)
         
         views_rot = grasp_rot.clone().to(grasp_center.device)
         views_rot = views_rot.unsqueeze(0).tile((num_samples, 1, 1, 1))
@@ -765,7 +765,7 @@ def pred_decode(end_points, normalize=False):
         topk_grasp_rots = torch.gather(views_rot, 1, top_rot_inds).squeeze(1)
         topk_grasp_rots = topk_grasp_rots.view(-1, 9)
 
-        grasp_width  = compute_grasp_widths(grasp_center, topk_grasp_rots, width_intervals.clone(), nsample=512)
+        # grasp_width  = compute_grasp_widths(grasp_center, topk_grasp_rots, width_intervals.clone(), nsample=512)
         grasp_height = 0.02 * torch.ones_like(grasp_score)
         obj_ids = -1 * torch.ones_like(grasp_score)
         grasp_preds.append(torch.cat([grasp_score, grasp_width, grasp_height,

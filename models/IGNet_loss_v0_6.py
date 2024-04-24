@@ -28,9 +28,9 @@ def get_loss(end_points, device):
     # loss = 10 * score_loss + 0.1*score_oe_loss + width_loss # focal loss  bs = 10
     # loss = 10 * score_loss + 0.1 * width_loss
     # classifcation-based
-    loss = 10 * graspness_loss + 0.5 * score_loss + 0.1 * width_loss
+    # loss = 10 * graspness_loss + 0.5 * score_loss + 0.1 * width_loss
     # regression-based
-    # loss = 5 * graspness_loss + 5 * score_loss + width_loss
+    loss = 5 * graspness_loss + 5 * score_loss + width_loss
     # score only
     # loss = 5 * graspness_loss + score_loss
     end_points['loss/overall_loss'] = loss
@@ -47,47 +47,47 @@ def compute_graspness_loss(end_points, device):
 
 
 # regression-based
-# def compute_score_loss(end_points, device):
-#     criterion = nn.SmoothL1Loss(reduction='mean').to(device)
-#     grasp_score_pred = end_points['grasp_score_pred']
-#     grasp_score_label = end_points['batch_grasp_score']
-#     loss = criterion(grasp_score_pred, grasp_score_label)
-#     end_points['loss/score_loss'] = loss
-#     return loss, end_points
-
-
-# def compute_width_loss(end_points, device):
-#     criterion = nn.SmoothL1Loss(reduction='none').to(device)
-#     grasp_width_pred = end_points['grasp_width_pred']
-#     grasp_width_label = end_points['batch_grasp_width'] * 10
-#     loss = criterion(grasp_width_pred, grasp_width_label)
-#     grasp_score_label = end_points['batch_grasp_score']
-#     loss_mask = grasp_score_label > 0
-#     loss = loss[loss_mask].mean()
-#     end_points['loss/width_loss'] = loss
-#     return loss, end_points
-
-
-# classifcation-based
 def compute_score_loss(end_points, device):
-    criterion = nn.CrossEntropyLoss(reduction='mean').to(device)
-    grasp_score_pred = end_points['grasp_score_pred'].permute(0, 3, 1, 2)
-    grasp_score_label = end_points['batch_grasp_score_ids']
+    criterion = nn.SmoothL1Loss(reduction='mean').to(device)
+    grasp_score_pred = end_points['grasp_score_pred']
+    grasp_score_label = end_points['batch_grasp_score']
     loss = criterion(grasp_score_pred, grasp_score_label)
     end_points['loss/score_loss'] = loss
     return loss, end_points
 
 
 def compute_width_loss(end_points, device):
-    criterion = nn.CrossEntropyLoss(reduction='none').to(device)
-    grasp_width_pred = end_points['grasp_width_pred'].permute(0, 3, 1, 2)
-    grasp_width_label = end_points['batch_grasp_width_ids']
+    criterion = nn.SmoothL1Loss(reduction='none').to(device)
+    grasp_width_pred = end_points['grasp_width_pred']
+    grasp_width_label = end_points['batch_grasp_width'] * 10
     loss = criterion(grasp_width_pred, grasp_width_label)
     grasp_score_label = end_points['batch_grasp_score']
     loss_mask = grasp_score_label > 0
     loss = loss[loss_mask].mean()
     end_points['loss/width_loss'] = loss
     return loss, end_points
+
+
+# classifcation-based
+# def compute_score_loss(end_points, device):
+#     criterion = nn.CrossEntropyLoss(reduction='mean').to(device)
+#     grasp_score_pred = end_points['grasp_score_pred'].permute(0, 3, 1, 2)
+#     grasp_score_label = end_points['batch_grasp_score_ids']
+#     loss = criterion(grasp_score_pred, grasp_score_label)
+#     end_points['loss/score_loss'] = loss
+#     return loss, end_points
+
+
+# def compute_width_loss(end_points, device):
+#     criterion = nn.CrossEntropyLoss(reduction='none').to(device)
+#     grasp_width_pred = end_points['grasp_width_pred'].permute(0, 3, 1, 2)
+#     grasp_width_label = end_points['batch_grasp_width_ids']
+#     loss = criterion(grasp_width_pred, grasp_width_label)
+#     grasp_score_label = end_points['batch_grasp_score']
+#     loss_mask = grasp_score_label > 0
+#     loss = loss[loss_mask].mean()
+#     end_points['loss/width_loss'] = loss
+#     return loss, end_points
  
 # v0.5
 # def compute_width_loss(end_points, device):

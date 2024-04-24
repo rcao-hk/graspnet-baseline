@@ -61,13 +61,13 @@ from dataset.ignet_dataset import GraspNetDataset, minkowski_collate_fn, collate
 # from dataset.ignet_multi_dataset import GraspNetDataset, minkowski_collate_fn, collate_fn, load_grasp_labels
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--dataset_root', default='/media/gpuadmin/rcao/dataset/graspnet', help='Dataset root')
+parser.add_argument('--dataset_root', default='/media/user/data1/rcao/graspnet', help='Dataset root')
 parser.add_argument('--camera', default='realsense', help='Camera split [realsense/kinect]')
 parser.add_argument('--resume_checkpoint', default=None, help='Model checkpoint path [default: None]')
-parser.add_argument('--ckpt_root', default='/media/gpuadmin/rcao/result/ignet', help='Checkpoint dir to save model [default: log]')
-parser.add_argument('--method_id', default='ignet_v0.8.3', help='Method version')
+parser.add_argument('--ckpt_root', default='/media/user/data2/result/ignet', help='Checkpoint dir to save model [default: log]')
+parser.add_argument('--method_id', default='ignet_v0.6.2.1', help='Method version')
 parser.add_argument('--log_root', default='log', help='Log dir to save log [default: log]')
-parser.add_argument('--num_point', type=int, default=1024, help='Point Number [default: 20000]')
+parser.add_argument('--num_point', type=int, default=768, help='Point Number [default: 20000]')
 parser.add_argument('--seed_feat_dim', default=256, type=int, help='Point wise feature dim')
 parser.add_argument('--voxel_size', type=float, default=0.002, help='Voxel Size for Quantize [default: 0.005]')
 parser.add_argument('--visib_threshold', type=int, default=0.5, help='Visibility Threshold [default: 0.5]')
@@ -134,8 +134,10 @@ print(len(TRAIN_DATALOADER), len(TEST_DATALOADER))
 # net = GraspNet(input_feature_dim=0, num_view=cfgs.num_view, num_angle=12, num_depth=4,
 #                         cylinder_radius=0.05, hmin=-0.02, hmax_list=[0.01,0.02,0.03,0.04])
 
-net = IGNet(num_view=cfgs.num_view, seed_feat_dim=cfgs.seed_feat_dim, img_feat_dim=64, is_training=True)
+net = IGNet(num_view=cfgs.num_view, seed_feat_dim=cfgs.seed_feat_dim, is_training=True)
 net.to(device)
+# net = IGNet(num_view=cfgs.num_view, seed_feat_dim=cfgs.seed_feat_dim, img_feat_dim=64, is_training=True)
+# net.to(device)
 
 # Load the Adam optimizer
 # optimizer = optim.Adam(net.parameters(), lr=cfgs.learning_rate, weight_decay=cfgs.weight_decay)
