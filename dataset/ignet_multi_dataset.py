@@ -427,7 +427,9 @@ def load_grasp_labels(root):
 
 
 def collate_fn(batch):
-    if type(batch[0]).__module__ == 'numpy':
+    if isinstance(batch[0], torch.Tensor):
+        return torch.stack(batch, 0)
+    elif type(batch[0]).__module__ == 'numpy':
         return torch.stack([torch.from_numpy(b) for b in batch], 0)
     elif isinstance(batch[0], container_abcs.Mapping):
         return {key:collate_fn([d[key] for d in batch]) for key in batch[0]}

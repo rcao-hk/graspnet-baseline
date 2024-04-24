@@ -156,9 +156,7 @@ from models.pspnet import PSPNet
 psp_models = {
     'resnet18': lambda: PSPNet(sizes=(1, 2, 3, 6), psp_size=512, deep_features_size=256, backend='resnet18'),
     'resnet34': lambda: PSPNet(sizes=(1, 2, 3, 6), psp_size=512, deep_features_size=256, backend='resnet34'),
-    'resnet50': lambda: PSPNet(sizes=(1, 2, 3, 6), psp_size=2048, deep_features_size=1024, backend='resnet50'),
-    'resnet101': lambda: PSPNet(sizes=(1, 2, 3, 6), psp_size=2048, deep_features_size=1024, backend='resnet101'),
-    'resnet152': lambda: PSPNet(sizes=(1, 2, 3, 6), psp_size=2048, deep_features_size=1024, backend='resnet152')
+    'resnet50': lambda: PSPNet(sizes=(1, 2, 3, 6), psp_size=2048, deep_features_size=1024, backend='resnet50')
 }
 
 
@@ -279,13 +277,14 @@ class IGNet(nn.Module):
         super().__init__()
         self.is_training = is_training
         self.seed_feature_dim = seed_feat_dim
-        self.img_feature_dim = img_feat_dim
+        # self.img_feature_dim = img_feat_dim
+        self.img_feature_dim = 0
         self.num_depth = num_depth
         self.num_angle = num_angle
         self.num_view = num_view
 
-        self.point_backbone = MinkUNet14D(in_channels=3, out_channels=self.seed_feature_dim, D=3)
-        self.img_backbone = psp_models['resnet18'.lower()]()
+        self.point_backbone = MinkUNet14D(in_channels=img_feat_dim, out_channels=self.seed_feature_dim, D=3)
+        self.img_backbone = psp_models['resnet34'.lower()]()
         self.rot_head = RotationScoringNet(self.num_view, num_angle=self.num_angle,
                                                 num_depth=self.num_depth,
                                                 seed_feature_dim=self.seed_feature_dim + self.img_feature_dim, 
@@ -321,16 +320,25 @@ class IGNet(nn.Module):
         img_feat = img_feat.view(B, img_dim, -1)
         img_idxs = img_idxs.unsqueeze(1).repeat(1, img_dim, 1)
         image_features = torch.gather(img_feat, 2, img_idxs).contiguous()
-        
+        image_features = image_features.transpose(1, 2)
         # point-wise features
-        coordinates_batch = end_points['coors']
-        features_batch = end_points['feats']
-        mink_input = ME.SparseTensor(features_batch, coordinates=coordinates_batch)
-        point_features = self.point_backbone(mink_input).F
-        point_features = point_features[end_points['quantize2original']].view(B, point_num, -1).transpose(1, 2)
-        seed_features = torch.concat([point_features, image_features], dim=1)
-        # seed_features = point_features + image_features
+        # coordinates_batch = end_points['coors']
+        # features_batch = end_points['feats']
+        # mink_input = ME.SparseTensor(features_batch, coordinates=coordinates_batch)
+        # point_features = self.point_backbone(mink_input).F
+        # point_features = point_features[end_points['quantize2original']].view(B, point_num, -1).transpose(1, 2)
+        # seed_features = torch.concat([point_features, image_features], dim=1)
         
+        coordinates_batch, features_batch = ME.utils.sparse_collate(coords=[c for c in end_points['coors']], 
+                                                                    feats=[f for f in image_features], 
+                                                                    dtype=torch.float32)
+        coordinates_batch, features_batch, _, quantize2original = ME.utils.sparse_quantize(
+            coordinates_batch, features_batch, return_index=True, return_inverse=True, device=seed_xyz.device)
+
+        mink_input = ME.SparseTensor(coordinates=coordinates_batch, features=features_batch)
+        point_features = self.point_backbone(mink_input).F
+        seed_features = point_features[quantize2original].view(B, point_num, -1).transpose(1, 2)
+    
         end_points['seed_features'] = seed_features  # (B, seed_feature_dim, num_seed)
         end_points, rot_features = self.rot_head(seed_features, end_points)
         seed_features = seed_features + rot_features
@@ -559,15 +567,15 @@ def pred_decode(end_points, normalize=False):
     grasp_preds = []
     for i in range(batch_size):
         grasp_center = end_points['point_clouds'][i].float()
-        # grasp_score = end_points['grasp_score_pred'][i].float() # (num_samples, D)
-        # grasp_width = 1.2 * end_points['grasp_width_pred'][i] / 10.  # 10 for multiply 10 in loss function
+        grasp_score = end_points['grasp_score_pred'][i].float() # (num_samples, D)
+        grasp_width = 1.2 * end_points['grasp_width_pred'][i] / 10.  # 10 for multiply 10 in loss function
 
         if normalize:
             grasp_score = normalize_tensor(grasp_score)
 
-        grasp_score = end_points['grasp_score_pred'][i] # (num_samples, D, score_bin_num)
-        grasp_score = grasp_score.argmax(-1)
-        grasp_score = value_unbucketize(grasp_score, score_bins.clone().to(grasp_center.device))
+        # grasp_score = end_points['grasp_score_pred'][i] # (num_samples, D, score_bin_num)
+        # grasp_score = grasp_score.argmax(-1)
+        # grasp_score = value_unbucketize(grasp_score, score_bins.clone().to(grasp_center.device))
         
         grasp_score, grasp_score_inds = torch.max(grasp_score, dim=-1)  # [M_POINT]
         grasp_score = grasp_score.view(-1, 1)
@@ -576,9 +584,9 @@ def pred_decode(end_points, normalize=False):
         grasp_depth = grasp_depth.unsqueeze(0).tile((num_samples, 1))
         grasp_depth = torch.gather(grasp_depth, 1, grasp_score_inds.view(-1, 1)) # (Ns, 1)
 
-        grasp_width = end_points['grasp_width_pred'][i] # (num_samples, D, width_bin_num)
-        grasp_width = grasp_width.argmax(-1)
-        grasp_width = value_unbucketize(grasp_width, width_bins.clone().to(grasp_center.device))
+        # grasp_width = end_points['grasp_width_pred'][i] # (num_samples, D, width_bin_num)
+        # grasp_width = grasp_width.argmax(-1)
+        # grasp_width = value_unbucketize(grasp_width, width_bins.clone().to(grasp_center.device))
         
         grasp_width = torch.gather(grasp_width, 1, grasp_score_inds.view(-1, 1))
         grasp_width = torch.clamp(grasp_width, min=0., max=GRASP_MAX_WIDTH)

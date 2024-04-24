@@ -18,7 +18,6 @@ from pointnet2.pointnet2_utils import RectangularQueryAndGroup, RectangularQuery
 from utils.loss_utils import generate_grasp_views, batch_viewpoint_params_to_matrix, batch_get_key_points, transform_point_cloud, GRASPNESS_THRESHOLD, GRASP_MAX_WIDTH, NUM_ANGLE, NUM_VIEW, NUM_DEPTH, M_POINT
 from models.coral_loss import corn_label_from_logits
 from pytorch3d.transforms import rotation_6d_to_matrix, matrix_to_rotation_6d
-# from rectangular_query_ext import rectangular_query
 
 
 base_depth = 0.04
@@ -36,6 +35,8 @@ depths = torch.linspace(0.01, 0.04, 4)
 # v0.6.3.1
 score_bins = torch.tensor([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9])
 width_bins = torch.tensor([0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09])
+
+width_intervals = torch.tensor([0.0, 0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 0.1])
 
 
 def value_unbucketize(bucketized_data, bins):
@@ -290,9 +291,9 @@ class DepthNet(nn.Module):
         # regression-based
         # self.conv2 = nn.Conv1d(self.in_dim, self.num_depth * 2, 1)
         # classfication-based
-        self.conv2 = nn.Conv1d(self.in_dim, self.num_depth * 2 * (len(width_bins)+1), 1)
+        # self.conv2 = nn.Conv1d(self.in_dim, self.num_depth * 2 * (len(width_bins)+1), 1)
         # score only
-        # self.conv2 = nn.Conv1d(self.in_dim, self.num_depth, 1)
+        self.conv2 = nn.Conv1d(self.in_dim, self.num_depth, 1)
         self.act =  nn.ReLU(inplace=True)
 
     def forward(self, seed_features, end_points):
@@ -305,17 +306,17 @@ class DepthNet(nn.Module):
         # features = features.permute(0, 1, 3, 2) # (B, 2, num_seed, num_depth)
         
         # classification-based
-        features = features.view(B, 2, self.num_depth, len(width_bins)+1, num_seed)
-        features = features.permute(0, 1, 4, 2, 3)
+        # features = features.view(B, 2, self.num_depth, len(width_bins)+1, num_seed)
+        # features = features.permute(0, 1, 4, 2, 3)
         
-        end_points['grasp_score_pred'] = features[:, 0]
-        end_points['grasp_width_pred'] = features[:, 1]
+        # end_points['grasp_score_pred'] = features[:, 0]
+        # end_points['grasp_width_pred'] = features[:, 1]
         
         # regression-based
-        # features = features.view(B, self.num_depth, num_seed)
-        # features = features.permute(0, 2, 1) # (B, num_seed, num_depth)
+        features = features.view(B, self.num_depth, num_seed)
+        features = features.permute(0, 2, 1) # (B, num_seed, num_depth)
+        end_points['grasp_score_pred'] = features
         
-        # end_points['grasp_score_pred'] = features
         return end_points
 
 
@@ -666,21 +667,82 @@ def match_grasp_view_and_label(end_points):
     return top_template_rot_mat, end_points
 
 
+def compute_grasp_widths(grasp_points, grasp_poses, width_intervals, nsample):
+
+    point_num, _ = grasp_points.size()
+    crop_length = (0.04 + base_depth) * torch.ones((1, point_num, 1), device=grasp_points.device)
+    crop_width = GRASP_MAX_WIDTH * torch.ones_like(crop_length, device=grasp_points.device)
+    crop_height = 0.02 * torch.ones_like(crop_length, device=grasp_points.device)
+    crop_size = torch.concat([crop_length, crop_width, crop_height], dim=-1).contiguous()
+    rectangular_idx = RectangularQuery.apply(crop_size, nsample, grasp_points.unsqueeze(0), grasp_points.unsqueeze(0), grasp_poses.unsqueeze(0)).long()
+
+    query_points = torch.gather(grasp_points.unsqueeze(0).unsqueeze(2).expand(-1, -1, nsample, -1), 1,
+                                rectangular_idx.unsqueeze(-1).expand(-1, -1, -1, 3))
+    query_points = query_points.squeeze(0)
+    grasp_poses = grasp_poses.view(point_num, 3, 3)
+    
+    finger_width = 0.01
+    finger_height = 0.02
+    finger_depth_base = 0.02
+
+    grasp_depths = 0.04 * torch.ones((len(grasp_points),), device=grasp_points.device)
+    grasp_widths = width_intervals.unsqueeze(0).tile((len(grasp_points), 1)).to(grasp_points.device)
+    width_num = len(width_intervals)
+    
+    # 调整grasp_points形状以广播
+    grasp_points = grasp_points.unsqueeze(1)  # 形状从(1024, 3)变为(1024, 1, 3)
+
+    # 计算target
+    target = query_points - grasp_points  # 利用广播减法
+    target = torch.matmul(target, grasp_poses)  # 矩阵乘法
+
+    # 扩展grasp_widths为 (1024, nsample, len(width_bins) )
+    grasp_widths_expand = grasp_widths.unsqueeze(1).expand(-1, nsample, -1)
+
+    mask1 = ((target[:, :, 2] > -finger_height / 2) & (target[:, :, 2] < finger_height / 2))
+    mask2 = ((target[:, :, 0] > -finger_depth_base) & (target[:, :, 0] < grasp_depths.unsqueeze(1).expand(-1, nsample)))
+
+    # mask3，mask4，mask5，已修正为考虑每个bin的宽度
+    mask3 = target[:, :, 1].unsqueeze(-1) > -(grasp_widths_expand / 2 + finger_width)
+    mask4 = target[:, :, 1].unsqueeze(-1) < -grasp_widths_expand / 2
+    mask5 = target[:, :, 1].unsqueeze(-1) < (grasp_widths_expand / 2 + finger_width)
+    mask6 = target[:, :, 1].unsqueeze(-1) > grasp_widths_expand / 2
+
+    # mask7: 检查是否在指定深度的底部范围内
+    mask7 = ((target[:, :, 0] > -(finger_depth_base + finger_width)) & (target[:, :, 0] < -finger_depth_base))
+
+    mask1 = mask1.unsqueeze(-1).expand(-1, -1, width_num)
+    mask2 = mask2.unsqueeze(-1).expand(-1, -1, width_num)
+    mask7 = mask7.unsqueeze(-1).expand(-1, -1, width_num)
+
+    # 计算每个bin的左、右和底部碰撞掩码
+    left_mask = mask1 & mask2 & mask3 & mask4
+    right_mask = mask1 & mask2 & mask5 & mask6
+    bottom_mask = mask1 & mask3 & mask5 & mask7
+
+    # 综合所有bin，检查是否有碰撞
+    collision_mask = (left_mask | right_mask | bottom_mask).any(dim=1)
+
+    first_no_collision = torch.argmax((~collision_mask).int(), dim=1)
+    pred_grasp_widths = torch.gather(grasp_widths, 1, first_no_collision.view(-1, 1))
+    return pred_grasp_widths
+
+
 def pred_decode(end_points, normalize=False):
     grasp_center = end_points['point_clouds']
     batch_size, num_samples, _ = grasp_center.shape
     grasp_preds = []
     for i in range(batch_size):
         grasp_center = end_points['point_clouds'][i].float()
-        # grasp_score = end_points['grasp_score_pred'][i].float() # (num_samples, D)
+        grasp_score = end_points['grasp_score_pred'][i].float() # (num_samples, D)
         # grasp_width = 1.2 * end_points['grasp_width_pred'][i] / 10.  # 10 for multiply 10 in loss function
 
         if normalize:
             grasp_score = normalize_tensor(grasp_score)
 
-        grasp_score = end_points['grasp_score_pred'][i] # (num_samples, D, score_bin_num)
-        grasp_score = grasp_score.argmax(-1)
-        grasp_score = value_unbucketize(grasp_score, score_bins.clone().to(grasp_center.device))
+        # grasp_score = end_points['grasp_score_pred'][i] # (num_samples, D, score_bin_num)
+        # grasp_score = grasp_score.argmax(-1)
+        # grasp_score = value_unbucketize(grasp_score, score_bins.clone().to(grasp_center.device))
         
         grasp_score, grasp_score_inds = torch.max(grasp_score, dim=-1)  # [M_POINT]
         grasp_score = grasp_score.view(-1, 1)
@@ -689,13 +751,13 @@ def pred_decode(end_points, normalize=False):
         grasp_depth = grasp_depth.unsqueeze(0).tile((num_samples, 1))
         grasp_depth = torch.gather(grasp_depth, 1, grasp_score_inds.view(-1, 1)) # (Ns, 1)
 
-        grasp_width = end_points['grasp_width_pred'][i] # (num_samples, D, width_bin_num)
-        grasp_width = grasp_width.argmax(-1)
-        grasp_width = value_unbucketize(grasp_width, width_bins.clone().to(grasp_center.device))
+        # grasp_width = end_points['grasp_width_pred'][i] # (num_samples, D, width_bin_num)
+        # grasp_width = grasp_width.argmax(-1)
+        # grasp_width = value_unbucketize(grasp_width, width_bins.clone().to(grasp_center.device))
         
-        grasp_width = torch.gather(grasp_width, 1, grasp_score_inds.view(-1, 1))
-        grasp_width = torch.clamp(grasp_width, min=0., max=GRASP_MAX_WIDTH)
-
+        # grasp_width = torch.gather(grasp_width, 1, grasp_score_inds.view(-1, 1))
+        # grasp_width = torch.clamp(grasp_width, min=0., max=GRASP_MAX_WIDTH)
+        
         views_rot = grasp_rot.clone().to(grasp_center.device)
         views_rot = views_rot.unsqueeze(0).tile((num_samples, 1, 1, 1))
         top_rot_inds = end_points['grasp_top_rot_inds'][i]
@@ -703,6 +765,7 @@ def pred_decode(end_points, normalize=False):
         topk_grasp_rots = torch.gather(views_rot, 1, top_rot_inds).squeeze(1)
         topk_grasp_rots = topk_grasp_rots.view(-1, 9)
 
+        grasp_width  = compute_grasp_widths(grasp_center, topk_grasp_rots, width_intervals.clone(), nsample=512)
         grasp_height = 0.02 * torch.ones_like(grasp_score)
         obj_ids = -1 * torch.ones_like(grasp_score)
         grasp_preds.append(torch.cat([grasp_score, grasp_width, grasp_height,
