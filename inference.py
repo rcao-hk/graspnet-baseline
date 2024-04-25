@@ -221,14 +221,14 @@ def inference(scene_idx):
         coordinates_batch, features_batch = ME.utils.sparse_collate(inst_coors_list, inst_feats_list,
                                                                     dtype=torch.float32)
         coordinates_batch, features_batch, _, quantize2original = ME.utils.sparse_quantize(
-            coordinates_batch, features_batch, return_index=True, return_inverse=True)
+            coordinates_batch, features_batch, return_index=True, return_inverse=True, device=device)
 
         batch_data_label = {"point_clouds": inst_cloud_tensor,
                             "cloud_colors": inst_colors_tensor,
                             # "cloud_normals": inst_normals_tensor,
-                            "coors": coordinates_batch.to(device),
-                            "feats": features_batch.to(device),
-                            "quantize2original": quantize2original.to(device)}
+                            "coors": coordinates_batch,
+                            "feats": features_batch,
+                            "quantize2original": quantize2original}
 
         end_points = net(batch_data_label)
         grasp_preds = pred_decode(end_points, normalize=False)

@@ -283,19 +283,24 @@ def inference(scene_idx):
         inst_imgs_tensor = torch.stack(inst_imgs_list, dim=0).to(device)
         inst_img_idxs_tensor = torch.tensor(np.array(inst_img_idxs_list), dtype=torch.int64, device=device)
         
-        coordinates_batch, features_batch = ME.utils.sparse_collate(inst_coors_list, inst_feats_list,
-                                                                    dtype=torch.float32)
-        coordinates_batch, features_batch, _, quantize2original = ME.utils.sparse_quantize(
-            coordinates_batch, features_batch, return_index=True, return_inverse=True)
+        inst_coors_tensor = torch.tensor(np.array(inst_coors_list), dtype=torch.float32, device=device)
+        inst_feats_tensor = torch.tensor(np.array(inst_feats_list), dtype=torch.float32, device=device)
+        # coordinates_batch, features_batch = ME.utils.sparse_collate(inst_coors_list, inst_feats_list,
+        #                                                             dtype=torch.float32)
+        # coordinates_batch, features_batch, _, quantize2original = ME.utils.sparse_quantize(
+        #     coordinates_batch, features_batch, return_index=True, return_inverse=True, device=device)
 
         batch_data_label = {"point_clouds": inst_cloud_tensor,
                             "cloud_colors": inst_colors_tensor,
                             # "cloud_normals": inst_normals_tensor,
                             "img": inst_imgs_tensor,
                             "img_idxs": inst_img_idxs_tensor,
-                            "coors": coordinates_batch.to(device),
-                            "feats": features_batch.to(device),
-                            "quantize2original": quantize2original.to(device)}
+                            # "coors": coordinates_batch,
+                            # "feats": features_batch,
+                            "coors": inst_coors_tensor,
+                            "feats": inst_feats_tensor,
+                            # "quantize2original": quantize2original.to(device)
+                            }
 
         end_points = net(batch_data_label)
         grasp_preds = pred_decode(end_points, normalize=False)
