@@ -12,6 +12,7 @@
 *.so
 *.egg
 **/*.egg-info/**
-logs
+log
 dataset/tolerance
 .vscode
+scripts
