@@ -86,8 +86,8 @@ parser.add_argument('--weight_decay', type=float, default=0.001, help='Optimizat
 cfgs = parser.parse_args()
 
 # ------------------------------------------------------------------------- GLOBAL CONFIG BEG
-cfgs.ckpt_dir = os.path.join(cfgs.ckpt_root, cfgs.method_id)
-cfgs.log_dir = os.path.join(cfgs.log_root, cfgs.method_id)
+cfgs.ckpt_dir = os.path.join(cfgs.ckpt_root, cfgs.method_id, cfgs.camera)
+cfgs.log_dir = os.path.join(cfgs.log_root, cfgs.method_id, cfgs.camera)
 os.makedirs(cfgs.ckpt_dir, exist_ok=True)
 os.makedirs(cfgs.log_dir, exist_ok=True)
 
@@ -95,7 +95,6 @@ EPOCH_CNT = 0
 DEFAULT_CHECKPOINT_PATH = os.path.join(cfgs.ckpt_dir, 'checkpoint.tar')
 CHECKPOINT_PATH = cfgs.resume_checkpoint if cfgs.resume_checkpoint is not None \
     else DEFAULT_CHECKPOINT_PATH
-
 
 LOG_FOUT = open(os.path.join(cfgs.log_dir, 'log_train.txt'), 'a')
 LOG_FOUT.write(str(cfgs)+'\n')
