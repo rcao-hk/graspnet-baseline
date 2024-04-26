@@ -5,6 +5,7 @@
 import os
 import sys
 import numpy as np
+import open3d as o3d
 import scipy.io as scio
 from PIL import Image
 
@@ -21,8 +22,7 @@ from utils.data_utils import CameraInfo, transform_point_cloud, create_point_clo
 
 class GraspNetDataset(Dataset):
     def __init__(self, root, valid_obj_idxs, grasp_labels, camera='kinect', split='train', num_points=1024,
-                 remove_outlier=False, remove_invisible=True, augment=False, load_label=True, real_data=True, 
-                 syn_data=False, visib_threshold=0.0, voxel_size=0.005):
+                 remove_outlier=False, remove_invisible=True, augment=False, denoise=False, load_label=True, real_data=True, syn_data=False, visib_threshold=0.0, voxel_size=0.005):
         self.root = root
         self.split = split
         self.num_points = num_points
@@ -32,6 +32,8 @@ class GraspNetDataset(Dataset):
         self.grasp_labels = grasp_labels
         self.camera = camera
         self.augment = augment
+        self.denoise = denoise
+        self.denoise_pre_sample_num = int(self.num_points * 1.5)
         self.load_label = load_label    
         self.collision_labels = {}
         self.voxel_size = voxel_size
@@ -58,8 +60,8 @@ class GraspNetDataset(Dataset):
         self.scenename = []
         self.frameid = []
         self.visibpath = []
+        self.real_flags = []
         # self.graspnesspath = []
-        # self.normalpath = []
         for x in tqdm(self.sceneIds, desc = 'Loading data path and collision labels...'):
             for img_num in range(256):
                 if self.real_data:
@@ -71,6 +73,7 @@ class GraspNetDataset(Dataset):
                     self.visibpath.append(os.path.join(root, 'visib_info', x, camera, str(img_num).zfill(4)+'.mat'))
                     self.scenename.append(x.strip())
                     self.frameid.append(img_num)
+                    self.real_flags.append(True)
                                     
                 if self.syn_data:
                     self.colorpath.append(os.path.join(root, 'virtual_scenes', x, camera, str(img_num).zfill(4)+'_rgb.png'))
@@ -80,6 +83,7 @@ class GraspNetDataset(Dataset):
                     self.visibpath.append(os.path.join(root, 'visib_info', x, camera, str(img_num).zfill(4)+'.mat'))                    
                     self.scenename.append(x.strip())
                     self.frameid.append(img_num)
+                    self.real_flags.append(False)
                 # if self.load_label:
                 #     self.graspnesspath.append(os.path.join(root, 'graspness', x, camera, str(img_num).zfill(4) + '.npy'))
             if self.load_label:
@@ -122,7 +126,28 @@ class GraspNetDataset(Dataset):
         else:
             return self.get_data(index)
 
-    def get_data(self, index, return_raw_cloud=False):
+    def sample_points(self, points_len, sample_num):
+        if points_len >= sample_num:
+            idxs = np.random.choice(points_len, sample_num, replace=False)
+        else:
+            idxs1 = np.arange(points_len)
+            idxs2 = np.random.choice(points_len, sample_num - points_len, replace=True)
+            idxs = np.concatenate([idxs1, idxs2], axis=0)
+        return idxs
+    
+    def inst_pc_denoise(self, inst_points):
+        sampled_idxs = self.sample_points(len(inst_points), self.denoise_pre_sample_num)
+        sampled_pcd = o3d.geometry.PointCloud()
+        sampled_pcd.points = o3d.utility.Vector3dVector(inst_points[sampled_idxs])
+        
+        # TODO: parameter for kinect need to be tuned 
+        _, ind_1 = sampled_pcd.remove_statistical_outlier(nb_neighbors=80, std_ratio=1.5)
+        inst_inler1 = sampled_pcd.select_by_index(ind_1)
+        _, ind_2 = inst_inler1.remove_statistical_outlier(nb_neighbors=1000, std_ratio=4.5)
+        choose_idx = sampled_idxs[ind_1][ind_2]
+        return choose_idx
+    
+    def get_data(self, index):
         color = np.array(Image.open(self.colorpath[index]), dtype=np.float32) / 255.0
         depth = np.array(Image.open(self.depthpath[index]))
         seg = np.array(Image.open(self.labelpath[index]))
@@ -155,7 +180,6 @@ class GraspNetDataset(Dataset):
         cloud_masked = cloud[mask]
         color_masked = color[mask]
         seg_masked = seg[mask]
-        # normal_masked = normal
         
         while 1:
             choose_idx = np.random.choice(np.arange(len(obj_idxs)))
@@ -165,25 +189,19 @@ class GraspNetDataset(Dataset):
             if inst_mask_len > self.minimum_num_pt and inst_visib_fract > self.visib_threshold:
                 break
         
-        # if return_raw_cloud:
-        #     return cloud_masked, color_masked
+        inst_cloud = cloud_masked[inst_mask]
+        inst_color = color_masked[inst_mask]
 
-        # sample points
-        if len(cloud_masked) >= self.num_points:
-            idxs = np.random.choice(len(cloud_masked), self.num_points, replace=False)
+        if self.denoise and self.real_flags[index]:
+            inst_cloud_clear_idx = self.inst_pc_denoise(inst_cloud)
+            idxs = self.sample_points(len(inst_cloud_clear_idx), self.num_points)
+            idxs = inst_cloud_clear_idx[idxs]
         else:
-            idxs1 = np.arange(len(cloud_masked))
-            idxs2 = np.random.choice(len(cloud_masked), self.num_points-len(cloud_masked), replace=True)
-            idxs = np.concatenate([idxs1, idxs2], axis=0)
+            idxs = self.sample_points(len(inst_cloud), self.num_points)
 
-        inst_cloud = cloud_masked[inst_mask][idxs]
-        inst_color = color_masked[inst_mask][idxs]
-        # inst_normal = normal_masked[inst_mask][idxs]
-        # inst_seal_score = seal_score[inst_mask][idxs]
-        # cloud_sampled = cloud_masked[idxs]
-        # color_sampled = color_masked[idxs]
-        # inst_normal = normal[idxs]
-        
+        inst_cloud = inst_cloud[idxs]
+        inst_color = inst_color[idxs]
+                
         ret_dict = {}
         ret_dict['point_clouds'] = inst_cloud.astype(np.float32)
         ret_dict['cloud_colors'] = inst_color.astype(np.float32)
@@ -202,7 +220,6 @@ class GraspNetDataset(Dataset):
         visib_info = scio.loadmat(self.visibpath[index])
         scene = self.scenename[index]
         # graspness = np.load(self.graspnesspath[index])  # for each point in workspace masked point cloud
-        # normal = np.load(self.normalpath[index])['normals']
         
         try:
             obj_idxs = meta['cls_indexes'].flatten().astype(np.int32)
@@ -241,23 +258,23 @@ class GraspNetDataset(Dataset):
             if inst_mask_len > self.minimum_num_pt and inst_visib_fract > self.visib_threshold:
                 break
             
-        # sample points
-        if inst_mask_len >= self.num_points:
-            idxs = np.random.choice(inst_mask_len, self.num_points, replace=False)
+        inst_cloud = cloud_masked[inst_mask]
+        inst_color = color_masked[inst_mask]
+          
+        if self.denoise and self.real_flags[index]:
+            inst_cloud_clear_idx = self.inst_pc_denoise(inst_cloud)
+            idxs = self.sample_points(len(inst_cloud_clear_idx), self.num_points)
+            idxs = inst_cloud_clear_idx[idxs]
         else:
-            idxs1 = np.arange(inst_mask_len)
-            idxs2 = np.random.choice(inst_mask_len, self.num_points - inst_mask_len, replace=True)
-            idxs = np.concatenate([idxs1, idxs2], axis=0)
+            idxs = self.sample_points(len(inst_cloud), self.num_points)
             
-        inst_cloud = cloud_masked[inst_mask][idxs]
-        inst_color = color_masked[inst_mask][idxs]
-        # inst_normal = normal_masked[inst_mask][idxs]
+        inst_cloud = inst_cloud[idxs]
+        inst_color = inst_color[idxs]
         
         points, offsets, scores = self.grasp_labels[obj_idxs[choose_idx]]
         object_pose = poses[:, :, choose_idx]
         collision = self.collision_labels[scene][choose_idx] #(Np, V, A, D)
-        # grasp_idxs = np.random.choice(len(points), min(max(int(len(points)/4), 300),len(points)), replace=False)
-        
+
         if self.augment:
             inst_cloud, object_poses_list = self.augment_data(inst_cloud, [object_pose])
             object_pose = object_poses_list[0]
@@ -271,46 +288,6 @@ class GraspNetDataset(Dataset):
         scores[collision] = 0
         grasp_scores = scores
         
-        # seg_sampled = seg_masked[idxs]
-        # graspness_sampled = graspness[idxs]
-
-        # objectness_label = seg_sampled.copy()
-        # objectness_label[objectness_label>1] = 1
-        
-        # object_poses_list = []
-        # grasp_points_list = []
-        # grasp_offsets_list = []
-        # grasp_scores_list = []
-        # grasp_tolerance_list = []
-        # for i, obj_idx in enumerate(obj_idxs):
-        #     # if obj_idx not in self.valid_obj_idxs:
-        #     #     continue
-        #     # if (seg_sampled == obj_idx).sum() < 50:
-        #     #     continue
-        #     # object_poses_list.append(poses[:, :, i])
-        #     # points, offsets, scores, tolerance = self.grasp_labels[obj_idx]
-        #     points, offsets, scores = self.grasp_labels[obj_idx]
-        #     collision = self.collision_labels[scene][i] #(Np, V, A, D)
-
-        #     # remove invisible grasp points
-        #     # if self.remove_invisible:
-        #     #     visible_mask = remove_invisible_grasp_points(cloud_sampled[seg_sampled==obj_idx], points, poses[:,:,i], th=0.01)
-        #     #     points = points[visible_mask]
-        #     #     offsets = offsets[visible_mask]
-        #     #     scores = scores[visible_mask]
-        #     #     # tolerance = tolerance[visible_mask]
-        #     #     collision = collision[visible_mask]
-
-        #     # idxs = np.random.choice(len(points), min(max(int(len(points)/4),300),len(points)), replace=False)
-        #     grasp_points_list.append(points[idxs])
-        #     grasp_offsets_list.append(offsets[idxs])
-        #     collision = collision[idxs].copy()
-        #     scores = scores[idxs].copy()
-        #     scores[collision] = 0
-        #     grasp_scores_list.append(scores)
-        #     # tolerance = tolerance[idxs].copy()
-        #     # tolerance[collision] = 0
-        #     # grasp_tolerance_list.append(tolerance)
         ret_dict = {}
         ret_dict['point_clouds'] = inst_cloud.astype(np.float32)
         ret_dict['cloud_colors'] = inst_color.astype(np.float32)
@@ -320,12 +297,6 @@ class GraspNetDataset(Dataset):
         # ret_dict['feats'] = inst_color.astype(np.float32)
         ret_dict['feats'] = np.ones_like(inst_cloud).astype(np.float32)
         
-        # ret_dict['graspness_label'] = graspness_sampled.astype(np.float32)
-        # ret_dict['objectness_label'] = objectness_label.astype(np.int64)
-        # ret_dict['object_poses_list'] = object_poses_list
-        # ret_dict['grasp_points_list'] = grasp_points_list
-        # ret_dict['grasp_offsets_list'] = grasp_offsets_list
-        # ret_dict['grasp_labels_list'] = grasp_scores_list
         ret_dict['object_pose'] = object_pose.astype(np.float32)
         ret_dict['grasp_points'] = grasp_points.astype(np.float32)
         ret_dict['grasp_offsets'] = grasp_offsets.astype(np.float32)
@@ -419,20 +390,28 @@ def pt_collate_fn(list_data):
 
 
 if __name__ == "__main__":
-    root = '/data/Benchmark/graspnet'
-    valid_obj_idxs, grasp_labels = load_grasp_labels(root)
-    train_dataset = GraspNetDataset(root, valid_obj_idxs, grasp_labels, split='train', remove_outlier=True, remove_invisible=True, num_points=20000)
-    print(len(train_dataset))
+    root = '/media/rcao/Data/Dataset/graspnet'
 
-    end_points = train_dataset[233]
-    cloud = end_points['point_clouds']
-    seg = end_points['objectness_label']
-    print(cloud.shape)
-    print(cloud.dtype)
-    print(cloud[:,0].min(), cloud[:,0].max())
-    print(cloud[:,1].min(), cloud[:,1].max())
-    print(cloud[:,2].min(), cloud[:,2].max())
-    print(seg.shape)
-    print((seg>0).sum())
-    print(seg.dtype)
-    print(np.unique(seg))
+    valid_obj_idxs, grasp_labels = load_grasp_labels(root)
+    train_dataset = GraspNetDataset(root, valid_obj_idxs, grasp_labels, num_points=1024, camera='realsense', split='train', augment=False, real_data=True, denoise=True, visib_threshold=0.5, voxel_size=0.002)
+
+    scene_list = list(range(len(train_dataset)))
+    np.random.shuffle(scene_list)
+    for scene_id in scene_list[1000:1010]:
+        end_points = train_dataset[scene_id]
+
+        cloud = end_points['point_clouds']
+        color = end_points['cloud_colors']
+        pose = end_points['object_pose']
+        grasp_point = end_points['grasp_points']
+        grasp_point = transform_point_cloud(grasp_point, pose, '3x4')
+
+        pc = o3d.geometry.PointCloud()
+        pc.points = o3d.utility.Vector3dVector(cloud)
+        pc.colors = o3d.utility.Vector3dVector(color)
+
+        pc_obj = o3d.geometry.PointCloud()
+        pc_obj.points = o3d.utility.Vector3dVector(grasp_point)
+        pc_obj.paint_uniform_color([1, 0, 0])
+
+        o3d.visualization.draw_geometries([pc, pc_obj])

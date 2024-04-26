@@ -49,28 +49,29 @@ setup_seed(0)
 # from models.GSNet_v0_4 import IGNet
 # from models.IGNet_loss import get_loss
 
-from models.IGNet_v0_6 import IGNet
-from models.IGNet_loss_v0_6 import get_loss
+# from models.IGNet_v0_6 import IGNet
+# from models.IGNet_loss_v0_6 import get_loss
 
 # from models.IGNet_v0_7 import IGNet
 # from models.IGNet_loss_v0_7 import get_loss
-from dataset.ignet_dataset import GraspNetDataset, minkowski_collate_fn, collate_fn, load_grasp_labels
+# from dataset.ignet_dataset import GraspNetDataset, minkowski_collate_fn, collate_fn, load_grasp_labels
 
-# from models.IGNet_v0_8 import IGNet
-# from models.IGNet_loss_v0_8 import get_loss
-# from dataset.ignet_multi_dataset import GraspNetDataset, minkowski_collate_fn, collate_fn, load_grasp_labels
+from models.IGNet_v0_8 import IGNet
+from models.IGNet_loss_v0_8 import get_loss
+from dataset.ignet_multi_dataset import GraspNetDataset, minkowski_collate_fn, collate_fn, load_grasp_labels
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--dataset_root', default='/media/user/data1/rcao/graspnet', help='Dataset root')
 parser.add_argument('--camera', default='realsense', help='Camera split [realsense/kinect]')
 parser.add_argument('--resume_checkpoint', default=None, help='Model checkpoint path [default: None]')
 parser.add_argument('--ckpt_root', default='/media/user/data2/result/ignet', help='Checkpoint dir to save model [default: log]')
-parser.add_argument('--method_id', default='ignet_v0.6.2.1', help='Method version')
+parser.add_argument('--method_id', default='ignet_v0.8.2.1', help='Method version')
 parser.add_argument('--log_root', default='log', help='Log dir to save log [default: log]')
 parser.add_argument('--num_point', type=int, default=768, help='Point Number [default: 20000]')
+parser.add_argument('--gpu_id', type=str, default='0', help='GPU ID')
 parser.add_argument('--seed_feat_dim', default=256, type=int, help='Point wise feature dim')
 parser.add_argument('--voxel_size', type=float, default=0.002, help='Voxel Size for Quantize [default: 0.005]')
-parser.add_argument('--visib_threshold', type=int, default=0.5, help='Visibility Threshold [default: 0.5]')
+parser.add_argument('--visib_threshold', type=float, default=0.5, help='Visibility Threshold [default: 0.5]')
 parser.add_argument('--num_view', type=int, default=300, help='View Number [default: 300]')
 parser.add_argument('--max_epoch', type=int, default=61, help='Epoch to run [default: 18]')
 parser.add_argument('--batch_size', type=int, default=22, help='Batch Size during training [default: 2]')
@@ -108,36 +109,34 @@ def my_worker_init_fn(worker_id):
     np.random.seed(np.random.get_state()[1][0] + worker_id)
     pass
 
-device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda:"+cfgs.gpu_id if torch.cuda.is_available() else "cpu")
 torch.cuda.set_device(device)
 
 # Create Dataset and Dataloader
 valid_obj_idxs, grasp_labels = load_grasp_labels(cfgs.dataset_root)
 TRAIN_DATASET = GraspNetDataset(cfgs.dataset_root, valid_obj_idxs, grasp_labels, camera=cfgs.camera, split='train', 
-                                num_points=cfgs.num_point, remove_outlier=True, augment=False, real_data=True, 
-                                syn_data=True, visib_threshold=cfgs.visib_threshold, voxel_size=cfgs.voxel_size)
+                                num_points=cfgs.num_point, remove_outlier=True, augment=False, denoise=True,real_data=True, syn_data=True, visib_threshold=cfgs.visib_threshold, voxel_size=cfgs.voxel_size)
 TEST_DATASET = GraspNetDataset(cfgs.dataset_root, valid_obj_idxs, grasp_labels, camera=cfgs.camera, split='test_seen', 
-                               num_points=cfgs.num_point, remove_outlier=True, augment=False, real_data=True, 
-                               syn_data=False, visib_threshold=cfgs.visib_threshold, voxel_size=cfgs.voxel_size)
+                               num_points=cfgs.num_point, remove_outlier=True, augment=False, denoise=True,real_data=True, syn_data=False, visib_threshold=cfgs.visib_threshold, voxel_size=cfgs.voxel_size)
 
 print(len(TRAIN_DATASET), len(TEST_DATASET))
-TRAIN_DATALOADER = DataLoader(TRAIN_DATASET, batch_size=cfgs.batch_size, shuffle=True,
-    num_workers=cfgs.worker_num, worker_init_fn=my_worker_init_fn, collate_fn=minkowski_collate_fn)
-TEST_DATALOADER = DataLoader(TEST_DATASET, batch_size=cfgs.batch_size, shuffle=False,
-    num_workers=cfgs.worker_num, worker_init_fn=my_worker_init_fn, collate_fn=minkowski_collate_fn)
 # TRAIN_DATALOADER = DataLoader(TRAIN_DATASET, batch_size=cfgs.batch_size, shuffle=True,
-#     num_workers=cfgs.worker_num, worker_init_fn=my_worker_init_fn, collate_fn=collate_fn)
+#     num_workers=cfgs.worker_num, worker_init_fn=my_worker_init_fn, collate_fn=minkowski_collate_fn)
 # TEST_DATALOADER = DataLoader(TEST_DATASET, batch_size=cfgs.batch_size, shuffle=False,
-#     num_workers=cfgs.worker_num, worker_init_fn=my_worker_init_fn, collate_fn=collate_fn)
+#     num_workers=cfgs.worker_num, worker_init_fn=my_worker_init_fn, collate_fn=minkowski_collate_fn)
+TRAIN_DATALOADER = DataLoader(TRAIN_DATASET, batch_size=cfgs.batch_size, shuffle=True,
+    num_workers=cfgs.worker_num, worker_init_fn=my_worker_init_fn, collate_fn=collate_fn)
+TEST_DATALOADER = DataLoader(TEST_DATASET, batch_size=cfgs.batch_size, shuffle=False,
+    num_workers=cfgs.worker_num, worker_init_fn=my_worker_init_fn, collate_fn=collate_fn)
 print(len(TRAIN_DATALOADER), len(TEST_DATALOADER))
 # Init the model and optimzier
 # net = GraspNet(input_feature_dim=0, num_view=cfgs.num_view, num_angle=12, num_depth=4,
 #                         cylinder_radius=0.05, hmin=-0.02, hmax_list=[0.01,0.02,0.03,0.04])
 
-net = IGNet(num_view=cfgs.num_view, seed_feat_dim=cfgs.seed_feat_dim, is_training=True)
-net.to(device)
-# net = IGNet(num_view=cfgs.num_view, seed_feat_dim=cfgs.seed_feat_dim, img_feat_dim=64, is_training=True)
+# net = IGNet(num_view=cfgs.num_view, seed_feat_dim=cfgs.seed_feat_dim, is_training=True)
 # net.to(device)
+net = IGNet(num_view=cfgs.num_view, seed_feat_dim=cfgs.seed_feat_dim, img_feat_dim=64, is_training=True)
+net.to(device)
 
 # Load the Adam optimizer
 # optimizer = optim.Adam(net.parameters(), lr=cfgs.learning_rate, weight_decay=cfgs.weight_decay)
