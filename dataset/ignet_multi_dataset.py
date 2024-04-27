@@ -343,10 +343,10 @@ class GraspNetDataset(Dataset):
         orig_width, orig_length, _ = img.shape
         resized_idxs = self.get_resized_idxs(inst_mask_choose[idxs], (orig_width, orig_length))
         img = self.img_transforms(img)
-                
+        
         # inst_idxs_img = np.zeros_like(img)
         # inst_idxs_img = inst_idxs_img.reshape(-1, 3)
-        # inst_idxs_img[inst_mask_choose[idxs]] = inst_color
+        # inst_idxs_img[resized_idxs] = inst_color
         # inst_idxs_img = inst_idxs_img.reshape(img.shape)
         # cv2.imwrite("{}_inst_input.png".format(index), inst_idxs_img*255.)
         
