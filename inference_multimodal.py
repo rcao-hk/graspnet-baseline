@@ -28,7 +28,7 @@ import MinkowskiEngine as ME
 from graspnetAPI import GraspGroup
 
 from utils.collision_detector import ModelFreeCollisionDetector
-from utils.data_utils import CameraInfo, create_point_cloud_from_depth_image, get_workspace_mask
+from utils.data_utils import CameraInfo, create_point_cloud_from_depth_image, get_workspace_mask, sample_points, points_denoise
 from torchvision import transforms
 
 import cv2
@@ -131,6 +131,8 @@ use_gt_mask = False
 inst_denoise = False
 seg_model = 'uois'
 num_pt = cfgs.inst_pt_num
+denoise_pre_sample_num = int(num_pt * 1.5)
+
 split = cfgs.split
 camera = cfgs.camera
 dataset_root = cfgs.dataset_root
@@ -254,14 +256,17 @@ def inference(scene_idx):
             if inst_mask_len < minimum_num_pt:
                 continue
             inst_mask_org = seg_masked_org == obj_idx
-            
-            if inst_mask_len >= num_pt:
-                idxs = np.random.choice(inst_mask_len, num_pt, replace=False)
-            else:
-                idxs1 = np.arange(inst_mask_len)
-                idxs2 = np.random.choice(inst_mask_len, num_pt - inst_mask_len, replace=True)
-                idxs = np.concatenate([idxs1, idxs2], axis=0)
 
+            inst_cloud = cloud_masked[inst_mask]
+            inst_color = color_masked[inst_mask]
+
+            if inst_denoise:
+                inst_cloud_clear_idx = points_denoise(inst_cloud, denoise_pre_sample_num)
+                idxs = sample_points(len(inst_cloud_clear_idx), num_pt)
+                idxs = inst_cloud_clear_idx[idxs]
+            else:
+                idxs = sample_points(len(inst_cloud), num_pt)
+            
             rmin, rmax, cmin, cmax = get_bbox(inst_mask_org.astype(np.uint8))
             img = color[rmin:rmax, cmin:cmax, :]
             inst_mask_org = inst_mask_org[rmin:rmax, cmin:cmax]
@@ -270,11 +275,11 @@ def inference(scene_idx):
             resized_idxs = get_resized_idxs(inst_mask_choose[idxs], (orig_width, orig_length), resize_shape)
             img = img_transforms(img)
         
-            inst_cloud_list.append(cloud_masked[inst_mask][idxs].astype(np.float32))
-            inst_color_list.append(color_masked[inst_mask][idxs].astype(np.float32))
-            inst_coors_list.append(cloud_masked[inst_mask][idxs].astype(np.float32) / voxel_size)
+            inst_cloud_list.append(inst_cloud[idxs].astype(np.float32))
+            inst_color_list.append(inst_color[idxs].astype(np.float32))
+            inst_coors_list.append(inst_cloud[idxs].astype(np.float32) / voxel_size)
             # inst_feats_list.append(color_masked[inst_mask][idxs].astype(np.float32))
-            inst_feats_list.append(np.ones_like(cloud_masked[inst_mask][idxs]).astype(np.float32))            
+            inst_feats_list.append(np.ones_like(inst_cloud[idxs]).astype(np.float32))            
             inst_imgs_list.append(img)
             inst_img_idxs_list.append(resized_idxs.astype(np.int64))
         

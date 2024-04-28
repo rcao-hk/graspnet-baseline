@@ -1,1 +1,1 @@
-python train_ignet.py
+python train_ignet.py --method_id 'ignet_v0.8.3' --gpu_id '2' --batch_size 20 --camera 'realsense' --voxel_size 0.002 --dataset_root '/media/gpuadmin/rcao/dataset/graspnet' --ckpt_root '/media/gpuadmin/rcao/result/ignet' --num_point 1024 --visib_threshold 0.5 --learning_rate 0.002

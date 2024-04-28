@@ -165,8 +165,8 @@ def points_denoise(points, pre_sample_num):
     sampled_pcd = o3d.geometry.PointCloud()
     sampled_pcd.points = o3d.utility.Vector3dVector(points[sampled_idxs])
     
-    cl, ind_1 = sampled_pcd.remove_statistical_outlier(nb_neighbors=80, std_ratio=1.5)
+    cl, ind_1 = sampled_pcd.remove_statistical_outlier(nb_neighbors=80, std_ratio=2)  # default 80, 2.0
     inst_inler1 = sampled_pcd.select_by_index(ind_1)
-    cl, ind_2 = inst_inler1.remove_statistical_outlier(nb_neighbors=1000, std_ratio=4.5)
+    cl, ind_2 = inst_inler1.remove_statistical_outlier(nb_neighbors=1000, std_ratio=4.5) # 1000, 4.5
     choose_idx = sampled_idxs[ind_1][ind_2]
     return choose_idx
