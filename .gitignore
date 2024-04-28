@@ -15,4 +15,7 @@
 log
 dataset/tolerance
 .vscode
-scripts/*.sh
+scripts/eval_novel.sh
+scripts/eval_seen.sh
+scripts/eval_similar.sh
+scripts/train.sh

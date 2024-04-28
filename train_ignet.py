@@ -3,6 +3,7 @@
 import sys
 import os
 # os.environ['CUDA_VISIBLE_DEVICES'] = '1'
+os.environ['OMP_NUM_THREADS'] = '18'
 
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(ROOT_DIR, 'pointnet2'))
@@ -74,9 +75,9 @@ parser.add_argument('--voxel_size', type=float, default=0.002, help='Voxel Size 
 parser.add_argument('--visib_threshold', type=float, default=0.5, help='Visibility Threshold [default: 0.5]')
 parser.add_argument('--num_view', type=int, default=300, help='View Number [default: 300]')
 parser.add_argument('--max_epoch', type=int, default=61, help='Epoch to run [default: 18]')
-parser.add_argument('--batch_size', type=int, default=22, help='Batch Size during training [default: 2]')
-parser.add_argument('--learning_rate', type=float, default=0.002, help='Initial learning rate [default: 0.001]')
-parser.add_argument('--worker_num', type=int, default=18, help='Worker number for dataloader [default: 4]')
+parser.add_argument('--batch_size', type=int, default=24, help='Batch Size during training [default: 2]')
+parser.add_argument('--learning_rate', type=float, default=0.002, help='Initial learning rate [default: 0.002]')
+parser.add_argument('--worker_num', type=int, default=24, help='Worker number for dataloader [default: 4]')
 parser.add_argument('--ckpt_save_interval', type=int, default=5, help='Number for save checkpoint[default: 5]')
 parser.add_argument('--weight_decay', type=float, default=0.001, help='Optimization L2 weight decay [default: 0]')
 parser.add_argument('--inst_denoise', action='store_true', help='Denoise instance points during training and testing [default: False]')
@@ -120,15 +121,15 @@ TEST_DATASET = GraspNetDataset(cfgs.dataset_root, valid_obj_idxs, grasp_labels, 
                                num_points=cfgs.num_point, remove_outlier=True, augment=False, denoise=cfgs.inst_denoise,real_data=True, syn_data=False, visib_threshold=cfgs.visib_threshold, voxel_size=cfgs.voxel_size)
 
 print(len(TRAIN_DATASET), len(TEST_DATASET))
-TRAIN_DATALOADER = DataLoader(TRAIN_DATASET, batch_size=cfgs.batch_size, shuffle=True,
-    num_workers=cfgs.worker_num, worker_init_fn=my_worker_init_fn, collate_fn=minkowski_collate_fn)
-TEST_DATALOADER = DataLoader(TEST_DATASET, batch_size=cfgs.batch_size, shuffle=False,
-    num_workers=cfgs.worker_num, worker_init_fn=my_worker_init_fn, collate_fn=minkowski_collate_fn)
-
 # TRAIN_DATALOADER = DataLoader(TRAIN_DATASET, batch_size=cfgs.batch_size, shuffle=True,
-#     num_workers=cfgs.worker_num, worker_init_fn=my_worker_init_fn, collate_fn=collate_fn)
+#     num_workers=cfgs.worker_num, worker_init_fn=my_worker_init_fn, collate_fn=minkowski_collate_fn)
 # TEST_DATALOADER = DataLoader(TEST_DATASET, batch_size=cfgs.batch_size, shuffle=False,
-#     num_workers=cfgs.worker_num, worker_init_fn=my_worker_init_fn, collate_fn=collate_fn)
+#     num_workers=cfgs.worker_num, worker_init_fn=my_worker_init_fn, collate_fn=minkowski_collate_fn)
+
+TRAIN_DATALOADER = DataLoader(TRAIN_DATASET, batch_size=cfgs.batch_size, shuffle=True,
+    num_workers=cfgs.worker_num, worker_init_fn=my_worker_init_fn, collate_fn=collate_fn)
+TEST_DATALOADER = DataLoader(TEST_DATASET, batch_size=cfgs.batch_size, shuffle=False,
+    num_workers=cfgs.worker_num, worker_init_fn=my_worker_init_fn, collate_fn=collate_fn)
 
 print(len(TRAIN_DATALOADER), len(TEST_DATALOADER))
 

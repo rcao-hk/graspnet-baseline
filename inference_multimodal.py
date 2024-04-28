@@ -151,7 +151,7 @@ else:
 # from models.GSNet_v0_4 import IGNet, pred_decode
 
 pattern = re.compile(rf'(epoch_{ckpt_epoch}_.+\.tar|checkpoint_{ckpt_epoch}\.tar)$')
-ckpt_files = glob.glob(os.path.join(ckpt_root, 'ignet_' + network_ver, '*.tar'))
+ckpt_files = glob.glob(os.path.join(ckpt_root, 'ignet_' + network_ver, cfgs.camera, '*.tar'))
 
 ckpt_name = None
 for ckpt_path in ckpt_files:
@@ -290,21 +290,24 @@ def inference(scene_idx):
         
         inst_coors_tensor = torch.tensor(np.array(inst_coors_list), dtype=torch.float32, device=device)
         inst_feats_tensor = torch.tensor(np.array(inst_feats_list), dtype=torch.float32, device=device)
-        # coordinates_batch, features_batch = ME.utils.sparse_collate(inst_coors_list, inst_feats_list,
-        #                                                             dtype=torch.float32)
-        # coordinates_batch, features_batch, _, quantize2original = ME.utils.sparse_quantize(
-        #     coordinates_batch, features_batch, return_index=True, return_inverse=True, device=device)
+        
+        coordinates_batch, features_batch = ME.utils.sparse_collate(inst_coors_list, inst_feats_list,
+                                                                    dtype=torch.float32)
+        coordinates_batch = coordinates_batch.to(device)
+        features_batch = features_batch.to(device)
+        coordinates_batch, features_batch, _, quantize2original = ME.utils.sparse_quantize(
+            coordinates_batch, features_batch, return_index=True, return_inverse=True, device=device)
 
         batch_data_label = {"point_clouds": inst_cloud_tensor,
                             "cloud_colors": inst_colors_tensor,
                             # "cloud_normals": inst_normals_tensor,
                             "img": inst_imgs_tensor,
                             "img_idxs": inst_img_idxs_tensor,
-                            # "coors": coordinates_batch,
-                            # "feats": features_batch,
-                            "coors": inst_coors_tensor,
-                            "feats": inst_feats_tensor,
-                            # "quantize2original": quantize2original.to(device)
+                            # "coors": inst_coors_tensor,
+                            # "feats": inst_feats_tensor,
+                            "coors": coordinates_batch,
+                            "feats": features_batch,
+                            "quantize2original": quantize2original,
                             }
 
         end_points = net(batch_data_label)

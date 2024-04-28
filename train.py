@@ -37,17 +37,12 @@ setup_seed(0)
 
 
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
-sys.path.append(os.path.join(ROOT_DIR, 'utils'))
 sys.path.append(os.path.join(ROOT_DIR, 'pointnet2'))
-sys.path.append(os.path.join(ROOT_DIR, 'models'))
-sys.path.append(os.path.join(ROOT_DIR, 'dataset'))
 
 # from graspnet import GraspNet, get_loss
-from GSNet import GraspNet
-from GSNet_loss import get_loss
-from pytorch_utils import BNMomentumScheduler
-from graspnet_dataset import GraspNetDataset, collate_fn, minkowski_collate_fn, load_grasp_labels
-from label_generation import process_grasp_labels
+from models.GSNet import GraspNet
+from models.GSNet_loss import get_loss
+from dataset.graspnet_dataset import GraspNetDataset, collate_fn, minkowski_collate_fn, load_grasp_labels
 
 
 parser = argparse.ArgumentParser()
