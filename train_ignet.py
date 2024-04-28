@@ -308,7 +308,7 @@ def train(start_epoch):
             ckpt_name = "epoch_" + str(best_epoch) \
                         + "_train_" + str(train_loss) \
                         + "_val_" + str(eval_loss)
-            torch.save(save_dict, os.path.join(cfgs.ckpt_dir, ckpt_name + '.tar'))
+            torch.save(save_dict['model_state_dict'], os.path.join(cfgs.ckpt_dir, ckpt_name + '.tar'))
         elif not EPOCH_CNT % cfgs.ckpt_save_interval:
             torch.save(save_dict, os.path.join(cfgs.ckpt_dir, 'checkpoint_{}.tar'.format(EPOCH_CNT)))
         torch.save(save_dict, os.path.join(cfgs.ckpt_dir, 'checkpoint.tar'))
