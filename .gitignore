@@ -15,4 +15,4 @@
 log
 dataset/tolerance
 .vscode
-scripts
+scripts/*.sh
