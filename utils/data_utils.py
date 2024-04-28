@@ -3,6 +3,7 @@
 """
 
 import numpy as np
+import open3d as o3d
 
 class CameraInfo():
     """ Camera intrisics for point cloud creation. """
@@ -147,3 +148,25 @@ def get_workspace_mask(cloud, seg, trans=None, organized=True, outlier=0):
         workspace_mask = workspace_mask.reshape([h, w])
 
     return workspace_mask
+
+
+def sample_points(points_len, sample_num):
+    if points_len >= sample_num:
+        idxs = np.random.choice(points_len, sample_num, replace=False)
+    else:
+        idxs1 = np.arange(points_len)
+        idxs2 = np.random.choice(points_len, sample_num - points_len, replace=True)
+        idxs = np.concatenate([idxs1, idxs2], axis=0)
+    return idxs
+
+
+def points_denoise(points, pre_sample_num):
+    sampled_idxs = sample_points(len(points), pre_sample_num)
+    sampled_pcd = o3d.geometry.PointCloud()
+    sampled_pcd.points = o3d.utility.Vector3dVector(points[sampled_idxs])
+    
+    cl, ind_1 = sampled_pcd.remove_statistical_outlier(nb_neighbors=80, std_ratio=1.5)
+    inst_inler1 = sampled_pcd.select_by_index(ind_1)
+    cl, ind_2 = inst_inler1.remove_statistical_outlier(nb_neighbors=1000, std_ratio=4.5)
+    choose_idx = sampled_idxs[ind_1][ind_2]
+    return choose_idx

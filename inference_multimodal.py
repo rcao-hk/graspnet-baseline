@@ -128,6 +128,7 @@ def get_resized_idxs(idxs, orig_shape, resize_shape):
 data_type = 'real' # syn
 restored_depth = False
 use_gt_mask = False
+inst_denoise = False
 seg_model = 'uois'
 num_pt = cfgs.inst_pt_num
 split = cfgs.split
@@ -138,7 +139,6 @@ network_ver = cfgs.network_ver
 ckpt_root = cfgs.ckpt_root
 dump_dir = os.path.join('experiment', cfgs.dump_dir)
 ckpt_epoch = cfgs.ckpt_epoch
-
 device = torch.device("cuda:"+cfgs.gpu_id if torch.cuda.is_available() else "cpu")
 torch.cuda.set_device(device)
 

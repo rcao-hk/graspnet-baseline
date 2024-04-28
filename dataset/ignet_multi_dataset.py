@@ -17,7 +17,7 @@ from tqdm import tqdm
 from torchvision import transforms
 
 from utils.data_utils import CameraInfo, transform_point_cloud, create_point_cloud_from_depth_image,\
-                            get_workspace_mask, remove_invisible_grasp_points
+                            get_workspace_mask, remove_invisible_grasp_points, points_denoise, sample_points
 
 img_width = 720
 img_length = 1280
@@ -187,26 +187,6 @@ class GraspNetDataset(Dataset):
         new_idxs = np.ravel_multi_index((new_coords_y, new_coords_x), self.resize_shape)
         return new_idxs
 
-        # sample points
-    def sample_points(self, points_len, sample_num):
-        if points_len >= sample_num:
-            idxs = np.random.choice(points_len, sample_num, replace=False)
-        else:
-            idxs1 = np.arange(points_len)
-            idxs2 = np.random.choice(points_len, sample_num - points_len, replace=True)
-            idxs = np.concatenate([idxs1, idxs2], axis=0)
-        return idxs
-    
-    def inst_pc_denoise(self, inst_points):
-        sampled_idxs = self.sample_points(len(inst_points), self.denoise_pre_sample_num)
-        sampled_pcd = o3d.geometry.PointCloud()
-        sampled_pcd.points = o3d.utility.Vector3dVector(inst_points[sampled_idxs])
-        
-        cl, ind_1 = sampled_pcd.remove_statistical_outlier(nb_neighbors=80, std_ratio=1.5)
-        inst_inler1 = sampled_pcd.select_by_index(ind_1)
-        cl, ind_2 = inst_inler1.remove_statistical_outlier(nb_neighbors=1000, std_ratio=4.5)
-        choose_idx = sampled_idxs[ind_1][ind_2]
-        return choose_idx
 
     def get_data(self, index):
         color = np.array(Image.open(self.colorpath[index]), dtype=np.float32) / 255.0
@@ -255,13 +235,13 @@ class GraspNetDataset(Dataset):
 
         inst_cloud = cloud_masked[inst_mask]
         inst_color = color_masked[inst_mask]
-
+        # sample points
         if self.denoise and self.real_flags[index]:
-            inst_cloud_clear_idx = self.inst_pc_denoise(inst_cloud)
-            idxs = self.sample_points(len(inst_cloud_clear_idx), self.num_points)
+            inst_cloud_clear_idx = points_denoise(inst_cloud, self.denoise_pre_sample_num)
+            idxs = sample_points(len(inst_cloud_clear_idx), self.num_points)
             idxs = inst_cloud_clear_idx[idxs]
         else:
-            idxs = self.sample_points(len(inst_cloud), self.num_points)
+            idxs = sample_points(len(inst_cloud), self.num_points)
         
         inst_cloud = inst_cloud[idxs]
         inst_color = inst_color[idxs]
@@ -326,12 +306,13 @@ class GraspNetDataset(Dataset):
         inst_cloud = cloud_masked[inst_mask]
         inst_color = color_masked[inst_mask]
           
+        # sample points
         if self.denoise and self.real_flags[index]:
-            inst_cloud_clear_idx = self.inst_pc_denoise(inst_cloud)
-            idxs = self.sample_points(len(inst_cloud_clear_idx), self.num_points)
+            inst_cloud_clear_idx = points_denoise(inst_cloud, self.denoise_pre_sample_num)
+            idxs = sample_points(len(inst_cloud_clear_idx), self.num_points)
             idxs = inst_cloud_clear_idx[idxs]
         else:
-            idxs = self.sample_points(len(inst_cloud), self.num_points)
+            idxs = sample_points(len(inst_cloud), self.num_points)
             
         inst_cloud = inst_cloud[idxs]
         inst_color = inst_color[idxs]
