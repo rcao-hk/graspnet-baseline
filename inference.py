@@ -229,12 +229,13 @@ def inference(scene_idx):
                             "coors": coordinates_batch,
                             "feats": features_batch,
                             "quantize2original": quantize2original}
-
-        end_points = net(batch_data_label)
-        grasp_preds = pred_decode(end_points, normalize=False)
-        preds = np.stack(grasp_preds).reshape(-1, 17)
-        gg = GraspGroup(preds)
-        torch.cuda.empty_cache()
+        
+        with torch.no_grad():
+            end_points = net(batch_data_label)
+            grasp_preds = pred_decode(end_points, normalize=False)
+            preds = np.stack(grasp_preds).reshape(-1, 17)
+            gg = GraspGroup(preds)
+            # torch.cuda.empty_cache()
         
         # collision detection
         if cfgs.collision_thresh > 0:

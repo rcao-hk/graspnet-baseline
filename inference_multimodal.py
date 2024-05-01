@@ -49,6 +49,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--split', default='test_seen', help='Dataset split [default: test_seen]')
 parser.add_argument('--camera', default='realsense', help='Camera to use [kinect | realsense]')
 parser.add_argument('--seed_feat_dim', default=256, type=int, help='Point wise feature dim')
+parser.add_argument('--img_feat_dim', default=256, type=int, help='Image feature dim')
 parser.add_argument('--dataset_root', default='/media/gpuadmin/rcao/dataset/graspnet', help='Where dataset is')
 parser.add_argument('--ckpt_root', default='/media/gpuadmin/rcao/result/ignet', help='Where checkpoint is')
 parser.add_argument('--network_ver', type=str, default='v0.8.0', help='Network version')
@@ -56,11 +57,13 @@ parser.add_argument('--dump_dir', type=str, default='ignet_v0.8.0', help='Dump d
 parser.add_argument('--inst_pt_num', type=int, default=1024, help='Dump dir to save outputs')
 parser.add_argument('--gpu_id', type=str, default='0', help='GPU ID')
 parser.add_argument('--ckpt_epoch', type=int, default=48, help='Checkpoint epoch name of trained model')
+parser.add_argument('--inst_denoise', action='store_true', help='Denoise instance points during training and testing [default: False]')
 parser.add_argument('--voxel_size', type=float, default=0.002, help='Voxel Size to quantize point cloud [default: 0.005]')
 parser.add_argument('--collision_voxel_size', type=float, default=0.01, help='Voxel Size to process point clouds before collision detection [default: 0.01]')
 parser.add_argument('--collision_thresh', type=float, default=0.01, help='Collision Threshold in collision detection [default: 0.01]')
 cfgs = parser.parse_args()
 
+print(cfgs)
 minimum_num_pt = 50
 img_width = 720
 img_length = 1280
@@ -128,7 +131,7 @@ def get_resized_idxs(idxs, orig_shape, resize_shape):
 data_type = 'real' # syn
 restored_depth = False
 use_gt_mask = False
-inst_denoise = False
+inst_denoise = cfgs.inst_denoise
 seg_model = 'uois'
 num_pt = cfgs.inst_pt_num
 denoise_pre_sample_num = int(num_pt * 1.5)
@@ -165,12 +168,15 @@ try :
 except :
     raise FileNotFoundError
 
-net = IGNet(num_view=300, seed_feat_dim=cfgs.seed_feat_dim, img_feat_dim=64, is_training=False)
+net = IGNet(num_view=300, seed_feat_dim=cfgs.seed_feat_dim, img_feat_dim=cfgs.img_feat_dim, is_training=False)
 net.to(device)
 net.eval()
 checkpoint = torch.load(ckpt_name, map_location=device)
 
-net.load_state_dict(checkpoint['model_state_dict'])
+try:
+    net.load_state_dict(checkpoint['model_state_dict'])
+except:
+    net.load_state_dict(checkpoint)
 eps = 1e-8
 
 def inference(scene_idx):
@@ -291,30 +297,31 @@ def inference(scene_idx):
         inst_coors_tensor = torch.tensor(np.array(inst_coors_list), dtype=torch.float32, device=device)
         inst_feats_tensor = torch.tensor(np.array(inst_feats_list), dtype=torch.float32, device=device)
         
-        coordinates_batch, features_batch = ME.utils.sparse_collate(inst_coors_list, inst_feats_list,
-                                                                    dtype=torch.float32)
-        coordinates_batch = coordinates_batch.to(device)
-        features_batch = features_batch.to(device)
-        coordinates_batch, features_batch, _, quantize2original = ME.utils.sparse_quantize(
-            coordinates_batch, features_batch, return_index=True, return_inverse=True, device=device)
+        # coordinates_batch, features_batch = ME.utils.sparse_collate(inst_coors_list, inst_feats_list,
+        #                                                             dtype=torch.float32)
+        # coordinates_batch = coordinates_batch.to(device)
+        # features_batch = features_batch.to(device)
+        # coordinates_batch, features_batch, _, quantize2original = ME.utils.sparse_quantize(
+        #     coordinates_batch, features_batch, return_index=True, return_inverse=True, device=device)
 
         batch_data_label = {"point_clouds": inst_cloud_tensor,
                             "cloud_colors": inst_colors_tensor,
                             # "cloud_normals": inst_normals_tensor,
                             "img": inst_imgs_tensor,
                             "img_idxs": inst_img_idxs_tensor,
-                            # "coors": inst_coors_tensor,
-                            # "feats": inst_feats_tensor,
-                            "coors": coordinates_batch,
-                            "feats": features_batch,
-                            "quantize2original": quantize2original,
+                            "coors": inst_coors_tensor,
+                            "feats": inst_feats_tensor,
+                            # "coors": coordinates_batch,
+                            # "feats": features_batch,
+                            # "quantize2original": quantize2original,
                             }
 
-        end_points = net(batch_data_label)
-        grasp_preds = pred_decode(end_points, normalize=False)
-        preds = np.stack(grasp_preds).reshape(-1, 17)
-        gg = GraspGroup(preds)
-        torch.cuda.empty_cache()
+        with torch.no_grad(): 
+            end_points = net(batch_data_label)
+            grasp_preds = pred_decode(end_points, normalize=False)
+            preds = np.stack(grasp_preds).reshape(-1, 17)
+            gg = GraspGroup(preds)
+            # torch.cuda.empty_cache()
         
         # collision detection
         if cfgs.collision_thresh > 0:

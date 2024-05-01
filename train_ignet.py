@@ -3,6 +3,7 @@
 import sys
 import os
 # os.environ['CUDA_VISIBLE_DEVICES'] = '1'
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:512"
 os.environ['OMP_NUM_THREADS'] = '18'
 
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -137,10 +138,10 @@ print(len(TRAIN_DATALOADER), len(TEST_DATALOADER))
 # net = GraspNet(input_feature_dim=0, num_view=cfgs.num_view, num_angle=12, num_depth=4,
 #                         cylinder_radius=0.05, hmin=-0.02, hmax_list=[0.01,0.02,0.03,0.04])
 
-# net = IGNet(num_view=cfgs.num_view, seed_feat_dim=cfgs.seed_feat_dim, is_training=True)
-# net.to(device)
-net = IGNet(num_view=cfgs.num_view, seed_feat_dim=cfgs.seed_feat_dim, img_feat_dim=64, is_training=True)
+net = IGNet(num_view=cfgs.num_view, seed_feat_dim=cfgs.seed_feat_dim, is_training=True)
 net.to(device)
+# net = IGNet(num_view=cfgs.num_view, seed_feat_dim=cfgs.seed_feat_dim, img_feat_dim=cfgs.seed_feat_dim, is_training=True)
+# net.to(device)
 
 # Load the Adam optimizer
 # optimizer = optim.Adam(net.parameters(), lr=cfgs.learning_rate, weight_decay=cfgs.weight_decay)
