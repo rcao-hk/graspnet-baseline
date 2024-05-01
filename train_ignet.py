@@ -72,6 +72,7 @@ parser.add_argument('--log_root', default='log', help='Log dir to save log [defa
 parser.add_argument('--num_point', type=int, default=768, help='Point Number [default: 20000]')
 parser.add_argument('--gpu_id', type=str, default='0', help='GPU ID')
 parser.add_argument('--seed_feat_dim', default=256, type=int, help='Point wise feature dim')
+parser.add_argument('--img_feat_dim', default=64, type=int, help='Image feature dim')
 parser.add_argument('--voxel_size', type=float, default=0.002, help='Voxel Size for Quantize [default: 0.005]')
 parser.add_argument('--visib_threshold', type=float, default=0.5, help='Visibility Threshold [default: 0.5]')
 parser.add_argument('--num_view', type=int, default=300, help='View Number [default: 300]')
@@ -138,10 +139,10 @@ print(len(TRAIN_DATALOADER), len(TEST_DATALOADER))
 # net = GraspNet(input_feature_dim=0, num_view=cfgs.num_view, num_angle=12, num_depth=4,
 #                         cylinder_radius=0.05, hmin=-0.02, hmax_list=[0.01,0.02,0.03,0.04])
 
-net = IGNet(num_view=cfgs.num_view, seed_feat_dim=cfgs.seed_feat_dim, is_training=True)
-net.to(device)
-# net = IGNet(num_view=cfgs.num_view, seed_feat_dim=cfgs.seed_feat_dim, img_feat_dim=cfgs.seed_feat_dim, is_training=True)
+# net = IGNet(num_view=cfgs.num_view, seed_feat_dim=cfgs.seed_feat_dim, is_training=True)
 # net.to(device)
+net = IGNet(num_view=cfgs.num_view, seed_feat_dim=cfgs.seed_feat_dim, img_feat_dim=cfgs.img_feat_dim, is_training=True)
+net.to(device)
 
 # Load the Adam optimizer
 # optimizer = optim.Adam(net.parameters(), lr=cfgs.learning_rate, weight_decay=cfgs.weight_decay)
