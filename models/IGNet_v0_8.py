@@ -611,14 +611,14 @@ def match_grasp_view_and_label(end_points):
         top_rot_grasp_scores[po_mask] = torch.log(u_max / top_rot_grasp_scores[po_mask]) / \
             (torch.log(u_max / u_min) + 1e-8)
 
-    batch_grasp_scores_ids = torch.bucketize(top_rot_grasp_scores, score_bins.to(grasp_widths.device))
-    batch_grasp_widths_ids = torch.bucketize(top_rot_grasp_scores, width_bins.to(grasp_scores.device))
+    # batch_grasp_scores_ids = torch.bucketize(top_rot_grasp_scores, score_bins.to(grasp_widths.device))
+    # batch_grasp_widths_ids = torch.bucketize(top_rot_grasp_scores, width_bins.to(grasp_scores.device))
 
     end_points['batch_grasp_score'] = top_rot_grasp_scores  # (B, Ns, D)
     end_points['batch_grasp_width'] = top_rot_grasp_widths  # (B, Ns, D)
     
-    end_points['batch_grasp_score_ids'] = batch_grasp_scores_ids  # (B, Ns, D, score_bin_num)
-    end_points['batch_grasp_width_ids'] = batch_grasp_widths_ids  # (B, Ns, D, width_bin_num)
+    # end_points['batch_grasp_score_ids'] = batch_grasp_scores_ids  # (B, Ns, D, score_bin_num)
+    # end_points['batch_grasp_width_ids'] = batch_grasp_widths_ids  # (B, Ns, D, width_bin_num)
     return top_template_rot_mat, end_points
 
 

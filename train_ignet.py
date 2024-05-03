@@ -3,8 +3,8 @@
 import sys
 import os
 # os.environ['CUDA_VISIBLE_DEVICES'] = '1'
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:512"
-os.environ['OMP_NUM_THREADS'] = '18'
+# os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:512"
+# os.environ['OMP_NUM_THREADS'] = '18'
 
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(ROOT_DIR, 'pointnet2'))
@@ -63,10 +63,10 @@ from models.IGNet_loss_v0_8 import get_loss
 from dataset.ignet_multi_dataset import GraspNetDataset, minkowski_collate_fn, collate_fn, load_grasp_labels
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--dataset_root', default='/media/user/data1/rcao/graspnet', help='Dataset root')
+parser.add_argument('--dataset_root', default='/media/gpuadmin/rcao/dataset/graspnet', help='Dataset root')
 parser.add_argument('--camera', default='realsense', help='Camera split [realsense/kinect]')
 parser.add_argument('--resume_checkpoint', default=None, help='Model checkpoint path [default: None]')
-parser.add_argument('--ckpt_root', default='/media/user/data2/result/ignet', help='Checkpoint dir to save model [default: log]')
+parser.add_argument('--ckpt_root', default='/media/gpuadmin/rcao/result/ignet', help='Checkpoint dir to save model [default: log]')
 parser.add_argument('--method_id', default='ignet_v0.8.0', help='Method version')
 parser.add_argument('--log_root', default='log', help='Log dir to save log [default: log]')
 parser.add_argument('--num_point', type=int, default=768, help='Point Number [default: 20000]')
@@ -118,9 +118,9 @@ torch.cuda.set_device(device)
 # Create Dataset and Dataloader
 valid_obj_idxs, grasp_labels = load_grasp_labels(cfgs.dataset_root)
 TRAIN_DATASET = GraspNetDataset(cfgs.dataset_root, valid_obj_idxs, grasp_labels, camera=cfgs.camera, split='train', 
-                                num_points=cfgs.num_point, remove_outlier=True, augment=False, denoise=cfgs.inst_denoise,real_data=True, syn_data=True, visib_threshold=cfgs.visib_threshold, voxel_size=cfgs.voxel_size)
+                                num_points=cfgs.num_point, remove_outlier=True, augment=False, denoise=cfgs.inst_denoise, real_data=True, syn_data=True, visib_threshold=cfgs.visib_threshold, voxel_size=cfgs.voxel_size)
 TEST_DATASET = GraspNetDataset(cfgs.dataset_root, valid_obj_idxs, grasp_labels, camera=cfgs.camera, split='test_seen', 
-                               num_points=cfgs.num_point, remove_outlier=True, augment=False, denoise=cfgs.inst_denoise,real_data=True, syn_data=False, visib_threshold=cfgs.visib_threshold, voxel_size=cfgs.voxel_size)
+                               num_points=cfgs.num_point, remove_outlier=True, augment=False, denoise=cfgs.inst_denoise, real_data=True, syn_data=False, visib_threshold=cfgs.visib_threshold, voxel_size=cfgs.voxel_size)
 
 print(len(TRAIN_DATASET), len(TEST_DATASET))
 # TRAIN_DATALOADER = DataLoader(TRAIN_DATASET, batch_size=cfgs.batch_size, shuffle=True,

@@ -57,13 +57,13 @@ class PSPNet(nn.Module):
         # self.up_2 = PSPUpsample(256, 64)
         # self.up_3 = PSPUpsample(64, 64)
 
-        # self.up_1 = PSPUpsample(1024, 512)
-        # self.up_2 = PSPUpsample(512, 256)
-        # self.up_3 = PSPUpsample(256, 256)
-
         self.up_1 = PSPUpsample(1024, 512)
         self.up_2 = PSPUpsample(512, 256)
-        self.up_3 = PSPUpsample(256, 128)
+        self.up_3 = PSPUpsample(256, 256)
+
+        # self.up_1 = PSPUpsample(1024, 512)
+        # self.up_2 = PSPUpsample(512, 256)
+        # self.up_3 = PSPUpsample(256, 128)
         
         self.drop_2 = nn.Dropout2d(p=0.15)
         # self.final = nn.Sequential(
