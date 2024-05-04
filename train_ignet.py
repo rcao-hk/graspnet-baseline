@@ -195,59 +195,47 @@ def train_one_epoch():
     net.train()
     overall_loss = 0
     
-    with torch.profiler.profile(
-            activities=[
-                torch.profiler.ProfilerActivity.CPU, 
-                torch.profiler.ProfilerActivity.CUDA
-            ], 
-            schedule=torch.profiler.schedule(
-                wait=2,
-                warmup=2,
-                active=6),
-            on_trace_ready=torch.profiler.tensorboard_trace_handler(os.path.join(cfgs.log_dir))
-        ) as prof:
-        for batch_idx, batch_data_label in enumerate(TRAIN_DATALOADER):
-            for key in batch_data_label:
-                if 'list' in key:
-                    for i in range(len(batch_data_label[key])):
-                        for j in range(len(batch_data_label[key][i])):
-                            batch_data_label[key][i][j] = batch_data_label[key][i][j].cuda()
-                else:
-                    batch_data_label[key] = batch_data_label[key].cuda()
-            # Forward pass
-            end_points = net(batch_data_label)
-            
-            # Compute loss and gradients, update parameters.
-            loss, end_points = get_loss(end_points, device)
-            loss.backward()
-            # if (batch_idx+1) % 1 == 0:
-            # for name, parms in net.named_parameters():
-            #     try:
-            #         print('-->name:', name, '-->grad_requirs:', parms.requires_grad, '--weight', torch.mean(parms.data), ' -->grad_value:', torch.mean(parms.grad))
-            #     except:
-            #         print('error')
-            optimizer.step()
-            optimizer.zero_grad()
-            prof.step()
-            # scheduler.step()
-            
-            # Accumulate statistics and print out
-            for key in end_points:
-                if 'loss' in key or 'acc' in key or 'prec' in key or 'recall' in key or 'count' in key:
-                    if key not in stat_dict: stat_dict[key] = 0
-                    stat_dict[key] += end_points[key].item()
-
-            overall_loss += stat_dict['loss/overall_loss']
-            batch_interval = 10
-            if (batch_idx+1) % batch_interval == 0:
-                log_string(' ---- batch: %03d ----' % (batch_idx+1))
-                for key in sorted(stat_dict.keys()):
-                    log_writer.add_scalar('train_' + key, stat_dict[key]/batch_interval, (EPOCH_CNT*len(TRAIN_DATALOADER)+batch_idx)*cfgs.batch_size)
-                    log_string('mean %s: %f'%(key, stat_dict[key]/batch_interval))
-                    stat_dict[key] = 0
+    for batch_idx, batch_data_label in enumerate(TRAIN_DATALOADER):
+        for key in batch_data_label:
+            if 'list' in key:
+                for i in range(len(batch_data_label[key])):
+                    for j in range(len(batch_data_label[key][i])):
+                        batch_data_label[key][i][j] = batch_data_label[key][i][j].cuda()
+            else:
+                batch_data_label[key] = batch_data_label[key].cuda()
+        # Forward pass
+        end_points = net(batch_data_label)
         
-        log_string('overall loss:{}, batch num:{}'.format(overall_loss, batch_idx+1))
-        mean_loss = overall_loss/float(batch_idx+1)
+        # Compute loss and gradients, update parameters.
+        loss, end_points = get_loss(end_points, device)
+        loss.backward()
+        # if (batch_idx+1) % 1 == 0:
+        # for name, parms in net.named_parameters():
+        #     try:
+        #         print('-->name:', name, '-->grad_requirs:', parms.requires_grad, '--weight', torch.mean(parms.data), ' -->grad_value:', torch.mean(parms.grad))
+        #     except:
+        #         print('error')
+        optimizer.step()
+        optimizer.zero_grad()
+        # scheduler.step()
+        
+        # Accumulate statistics and print out
+        for key in end_points:
+            if 'loss' in key or 'acc' in key or 'prec' in key or 'recall' in key or 'count' in key:
+                if key not in stat_dict: stat_dict[key] = 0
+                stat_dict[key] += end_points[key].item()
+
+        overall_loss += stat_dict['loss/overall_loss']
+        batch_interval = 10
+        if (batch_idx+1) % batch_interval == 0:
+            log_string(' ---- batch: %03d ----' % (batch_idx+1))
+            for key in sorted(stat_dict.keys()):
+                log_writer.add_scalar('train_' + key, stat_dict[key]/batch_interval, (EPOCH_CNT*len(TRAIN_DATALOADER)+batch_idx)*cfgs.batch_size)
+                log_string('mean %s: %f'%(key, stat_dict[key]/batch_interval))
+                stat_dict[key] = 0
+        
+    log_string('overall loss:{}, batch num:{}'.format(overall_loss, batch_idx+1))
+    mean_loss = overall_loss/float(batch_idx+1)
     return mean_loss
 
 def evaluate_one_epoch():

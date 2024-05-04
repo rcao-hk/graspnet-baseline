@@ -160,13 +160,23 @@ def sample_points(points_len, sample_num):
     return idxs
 
 
+# def points_denoise(points, pre_sample_num):
+#     sampled_idxs = sample_points(len(points), pre_sample_num)
+#     sampled_pcd = o3d.geometry.PointCloud()
+#     sampled_pcd.points = o3d.utility.Vector3dVector(points[sampled_idxs])
+    
+#     cl, ind_1 = sampled_pcd.remove_statistical_outlier(nb_neighbors=80, std_ratio=2)  # default 80, 2.0
+#     inst_inler1 = sampled_pcd.select_by_index(ind_1)
+#     cl, ind_2 = inst_inler1.remove_statistical_outlier(nb_neighbors=1000, std_ratio=4.5) # 1000, 4.5
+#     choose_idx = sampled_idxs[ind_1][ind_2]
+#     return choose_idx
+
+
 def points_denoise(points, pre_sample_num):
     sampled_idxs = sample_points(len(points), pre_sample_num)
     sampled_pcd = o3d.geometry.PointCloud()
     sampled_pcd.points = o3d.utility.Vector3dVector(points[sampled_idxs])
     
-    cl, ind_1 = sampled_pcd.remove_statistical_outlier(nb_neighbors=80, std_ratio=2)  # default 80, 2.0
-    inst_inler1 = sampled_pcd.select_by_index(ind_1)
-    cl, ind_2 = inst_inler1.remove_statistical_outlier(nb_neighbors=1000, std_ratio=4.5) # 1000, 4.5
-    choose_idx = sampled_idxs[ind_1][ind_2]
+    cl, ind_1 = sampled_pcd.remove_statistical_outlier(nb_neighbors=80, std_ratio=3.5)  # default 80, 2.0
+    choose_idx = sampled_idxs[ind_1]
     return choose_idx

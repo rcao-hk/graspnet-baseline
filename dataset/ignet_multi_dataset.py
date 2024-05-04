@@ -356,7 +356,7 @@ class GraspNetDataset(Dataset):
         
         ret_dict = {}
         ret_dict['point_clouds'] = inst_cloud.astype(np.float32)
-        ret_dict['cloud_colors'] = inst_color.astype(np.float32)
+        # ret_dict['cloud_colors'] = inst_color.astype(np.float32)
         
         # ret_dict['cloud_normals'] = inst_normal.astype(np.float32)
         ret_dict['coors'] = inst_cloud.astype(np.float32) / self.voxel_size
