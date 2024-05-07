@@ -148,7 +148,7 @@ net.to(device)
 # Load the Adam optimizer
 # optimizer = optim.Adam(net.parameters(), lr=cfgs.learning_rate, weight_decay=cfgs.weight_decay)
 optimizer = optim.AdamW(net.parameters(), lr=cfgs.learning_rate, weight_decay=cfgs.weight_decay)
-lr_scheduler = CosineAnnealingLR(optimizer, T_max=16, eta_min=5e-5)
+lr_scheduler = CosineAnnealingLR(optimizer, T_max=16, eta_min=1e-4)
 
 # Load checkpoint if there is any
 it = -1 # for the initialize value of `LambdaLR` and `BNMomentumScheduler`
