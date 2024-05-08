@@ -336,7 +336,9 @@ class IGNet(nn.Module):
         # self.fusion_module = FeatureFusionModule(self.seed_feature_dim, img_feat_dim, self.seed_feature_dim, 
         #                                          num_heads=8, normalize=True)
         
-        self.img_backbone = psp_models['resnet34'.lower()]()
+        # self.img_backbone = psp_models['resnet34'.lower()]()
+        self.img_backbone = PSPNet(sizes=(1, 2, 3, 6), psp_size=512, 
+                                   deep_features_size=img_feat_dim, backend='resnet34')
         self.rot_head = RotationScoringNet(self.num_view, num_angle=self.num_angle,
                                                 num_depth=self.num_depth,
                                                 seed_feature_dim=self.seed_feature_dim + self.img_feature_dim, 

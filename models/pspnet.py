@@ -53,18 +53,19 @@ class PSPNet(nn.Module):
         self.psp = PSPModule(psp_size, 1024, sizes)
         self.drop_1 = nn.Dropout2d(p=0.3)
 
-        self.up_1 = PSPUpsample(1024, 256)
-        self.up_2 = PSPUpsample(256, 64)
-        self.up_3 = PSPUpsample(64, 64)
+        if deep_features_size == 64:
+            self.up_1 = PSPUpsample(1024, 256)
+            self.up_2 = PSPUpsample(256, 64)
+            self.up_3 = PSPUpsample(64, 64)
+        elif deep_features_size == 128:
+            self.up_1 = PSPUpsample(1024, 512)
+            self.up_2 = PSPUpsample(512, 256)
+            self.up_3 = PSPUpsample(256, 128)
+        elif deep_features_size == 256:
+            self.up_1 = PSPUpsample(1024, 512)
+            self.up_2 = PSPUpsample(512, 256)
+            self.up_3 = PSPUpsample(256, 256)
 
-        # self.up_1 = PSPUpsample(1024, 512)
-        # self.up_2 = PSPUpsample(512, 256)
-        # self.up_3 = PSPUpsample(256, 256)
-
-        # self.up_1 = PSPUpsample(1024, 512)
-        # self.up_2 = PSPUpsample(512, 256)
-        # self.up_3 = PSPUpsample(256, 128)
-        
         self.drop_2 = nn.Dropout2d(p=0.15)
         # self.final = nn.Sequential(
         #     # nn.Conv2d(64, 32, kernel_size=1),
