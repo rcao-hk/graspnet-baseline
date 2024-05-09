@@ -323,12 +323,12 @@ class IGNet(nn.Module):
         self.num_view = num_view
 
         # early fusion
-        self.img_feature_dim = 0
-        self.point_backbone = MinkUNet14D(in_channels=img_feat_dim, out_channels=self.seed_feature_dim, D=3)
+        # self.img_feature_dim = 0
+        # self.point_backbone = MinkUNet14D(in_channels=img_feat_dim, out_channels=self.seed_feature_dim, D=3)
         
         # # late fusion (concatentation)
-        # self.img_feature_dim = img_feat_dim
-        # self.point_backbone = MinkUNet14D(in_channels=3, out_channels=self.seed_feature_dim, D=3)
+        self.img_feature_dim = img_feat_dim
+        self.point_backbone = MinkUNet14D(in_channels=3, out_channels=self.seed_feature_dim, D=3)
 
         # late fusion (multi-head attention)
         # self.img_feature_dim = 0
@@ -376,23 +376,23 @@ class IGNet(nn.Module):
         image_features = torch.gather(img_feat, 2, img_idxs).contiguous()
         
         # early fusion
-        image_features = image_features.transpose(1, 2)
-        coordinates_batch, features_batch = ME.utils.sparse_collate(coords=[c for c in end_points['coors']], 
-                                                                    feats=[f for f in image_features], 
-                                                                    dtype=torch.float32)
-        coordinates_batch, features_batch, _, quantize2original = ME.utils.sparse_quantize(
-            coordinates_batch, features_batch, return_index=True, return_inverse=True, device=seed_xyz.device)
-        mink_input = ME.SparseTensor(coordinates=coordinates_batch, features=features_batch)
-        point_features = self.point_backbone(mink_input).F
-        seed_features = point_features[quantize2original].view(B, point_num, -1).transpose(1, 2)
+        # image_features = image_features.transpose(1, 2)
+        # coordinates_batch, features_batch = ME.utils.sparse_collate(coords=[c for c in end_points['coors']], 
+        #                                                             feats=[f for f in image_features], 
+        #                                                             dtype=torch.float32)
+        # coordinates_batch, features_batch, _, quantize2original = ME.utils.sparse_quantize(
+        #     coordinates_batch, features_batch, return_index=True, return_inverse=True, device=seed_xyz.device)
+        # mink_input = ME.SparseTensor(coordinates=coordinates_batch, features=features_batch)
+        # point_features = self.point_backbone(mink_input).F
+        # seed_features = point_features[quantize2original].view(B, point_num, -1).transpose(1, 2)
 
         # late fusion (concatentation)
-        # coordinates_batch = end_points['coors']
-        # features_batch = end_points['feats']
-        # mink_input = ME.SparseTensor(features_batch, coordinates=coordinates_batch)
-        # point_features = self.point_backbone(mink_input).F
-        # point_features = point_features[end_points['quantize2original']].view(B, point_num, -1).transpose(1, 2)
-        # seed_features = torch.concat([point_features, image_features], dim=1)
+        coordinates_batch = end_points['coors']
+        features_batch = end_points['feats']
+        mink_input = ME.SparseTensor(features_batch, coordinates=coordinates_batch)
+        point_features = self.point_backbone(mink_input).F
+        point_features = point_features[end_points['quantize2original']].view(B, point_num, -1).transpose(1, 2)
+        seed_features = torch.concat([point_features, image_features], dim=1)
     
         # late fusion (multi-head attention)
         # coordinates_batch = end_points['coors']

@@ -6,7 +6,8 @@ import os
 import sys
 import numpy as np
 import scipy.io as scio
-import cv2
+# import cv2
+import h5py
 import open3d as o3d
 from PIL import Image
 
@@ -138,7 +139,8 @@ class GraspNetDataset(Dataset):
                     self.real_flags.append(False)
                     
             if self.load_label:
-                collision_labels = np.load(os.path.join(root, 'collision_label', x.strip(),  'collision_labels.npz'))
+                collision_labels = np.load(os.path.join(root, 'collision_label', x.strip(), 'collision_labels.npz'))
+                # collision_labels = h5py.File(os.path.join(root, 'collision_label_hdf5', x.strip(), 'collision_labels.hdf5'), "r")
                 self.collision_labels[x.strip()] = {}
                 for i in range(len(collision_labels)):
                     self.collision_labels[x.strip()][i] = collision_labels['arr_{}'.format(i)]
@@ -345,7 +347,7 @@ class GraspNetDataset(Dataset):
             inst_cloud, object_poses_list = self.augment_data(inst_cloud, [object_pose])
             object_pose = object_poses_list[0]
         
-        grasp_idxs = np.random.choice(len(points), 350, replace=False)
+        grasp_idxs = np.sort(np.random.choice(len(points), 350, replace=False))
         # grasp_idxs = np.random.choice(len(points), min(max(int(len(points) / 4), 350), len(points)), replace=False)
         grasp_points = points[grasp_idxs]
         grasp_offsets = offsets[grasp_idxs]
@@ -391,6 +393,7 @@ def load_grasp_labels(root):
         # label = np.load(os.path.join(root, 'grasp_label', '{}_labels.npz'.format(str(obj_idx).zfill(3))))
         # grasp_labels[obj_idx+1] = (label['points'].astype(np.float32), label['offsets'].astype(np.float32),
         #                           label['scores'].astype(np.float32), tolerance)
+        # label = h5py.File(os.path.join(root, 'grasp_label_simplified_hdf5', '{}_labels.hdf5'.format(str(obj_idx).zfill(3))), "r")
         label = np.load(os.path.join(root, 'grasp_label_simplified', '{}_labels.npz'.format(str(obj_idx).zfill(3))))
         grasp_labels[obj_idx+1] = (label['points'].astype(np.float32), label['width'].astype(np.float32),
                                   label['scores'].astype(np.float32))
