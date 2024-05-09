@@ -471,10 +471,8 @@ def pt_collate_fn(list_data):
 
 
 if __name__ == "__main__":
-
     root = '/media/rcao/Data/Dataset/graspnet'
     valid_obj_idxs, grasp_labels = load_grasp_labels(root)
-
     train_dataset = GraspNetDataset(root, valid_obj_idxs, grasp_labels, num_points=1024, camera='realsense', split='train', augment=False, real_data=True, syn_data=True, visib_threshold=0.5, denoise=True, voxel_size=0.002)
     # print(len(train_dataset))
 
@@ -496,4 +494,4 @@ if __name__ == "__main__":
         pc_obj.points = o3d.utility.Vector3dVector(grasp_point)
         pc_obj.paint_uniform_color([1, 0, 0])
 
-        o3d.visualization.draw_geometries([pc, pc_obj])
+        # o3d.visualization.draw_geometries([pc, pc_obj])
