@@ -55,7 +55,6 @@ parser.add_argument('--ckpt_root', default='/media/gpuadmin/rcao/result/ignet', 
 parser.add_argument('--network_ver', type=str, default='v0.8.0', help='Network version')
 parser.add_argument('--dump_dir', type=str, default='ignet_v0.8.0', help='Dump dir to save outputs')
 parser.add_argument('--inst_pt_num', type=int, default=1024, help='Dump dir to save outputs')
-parser.add_argument('--gpu_id', type=str, default='0', help='GPU ID')
 parser.add_argument('--ckpt_epoch', type=int, default=48, help='Checkpoint epoch name of trained model')
 parser.add_argument('--inst_denoise', action='store_true', help='Denoise instance points during training and testing [default: False]')
 parser.add_argument('--voxel_size', type=float, default=0.002, help='Voxel Size to quantize point cloud [default: 0.005]')
@@ -144,7 +143,7 @@ network_ver = cfgs.network_ver
 ckpt_root = cfgs.ckpt_root
 dump_dir = os.path.join('experiment', cfgs.dump_dir)
 ckpt_epoch = cfgs.ckpt_epoch
-device = torch.device("cuda:"+cfgs.gpu_id if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 torch.cuda.set_device(device)
 
 if network_ver.startswith('v0.8'):
