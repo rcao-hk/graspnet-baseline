@@ -320,8 +320,8 @@ def inference(scene_idx):
             grasp_preds = pred_decode(end_points, normalize=False)
             preds = np.stack(grasp_preds).reshape(-1, 17)
             gg = GraspGroup(preds)
-            # torch.cuda.empty_cache()
-        
+            
+        torch.cuda.empty_cache()
         # collision detection
         if cfgs.collision_thresh > 0:
             # cloud, _ = TEST_DATASET.get_data(data_idx, return_raw_cloud=True)
