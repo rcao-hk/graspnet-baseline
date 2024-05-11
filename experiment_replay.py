@@ -6,7 +6,7 @@ import pandas as pd
 # epoch_list = ['40', '45', '50', '55', '60']
 # model_list = [method + '_' + i for i in epoch_list]
 # model_list = [method]
-model_list = ['ignet_v0.8.1', 'ignet_v0.8.2']
+model_list = ['ignet_v0.8.2', 'ignet_v0.8.2.1']
 column = ['AP', 'AP0.8', 'AP0.4', 'AP', 'AP0.8', 'AP0.4', 'AP', 'AP0.8', 'AP0.4', 'AP_mean']
 camera_type = 'realsense'
 epoch_data = []
@@ -39,4 +39,6 @@ for model in model_list:
     epoch_data.append(data)
 data_table = pd.DataFrame(columns=column, index=model_list, data=epoch_data)
 # data_table.to_csv('epoch_experiment.csv')
-print(epoch_data)
+for model_name, data in zip(model_list, epoch_data):
+    print(model_name, data)
+    print("\t")
