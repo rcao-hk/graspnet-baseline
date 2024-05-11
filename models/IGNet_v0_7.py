@@ -239,8 +239,65 @@ class ApproachNet(nn.Module):
         return end_points, res_features
 
 
+# class IGNet(nn.Module):
+#     def __init__(self,  num_view=300, num_angle=12, num_depth=4, seed_feat_dim=512, is_training=True):
+#         super().__init__()
+#         self.is_training = is_training
+#         self.seed_feature_dim = seed_feat_dim
+#         self.num_depth = num_depth
+#         self.num_angle = num_angle
+#         self.num_view = num_view
+
+#         self.backbone = MinkUNet14D(in_channels=3, out_channels=self.seed_feature_dim, D=3)
+#         self.view_head = ApproachNet(self.num_view, num_angle=self.num_angle,
+#                                                 num_depth=self.num_depth,
+#                                                 seed_feature_dim=self.seed_feature_dim, 
+#                                                 is_training=self.is_training)
+#         self.crop = CloudCrop(nsample=16, seed_feature_dim=self.seed_feature_dim)
+#         self.swad_head = SWADNet(self.num_view, num_angle=self.num_angle, 
+#                                    num_depth=self.num_depth,
+#                                    seed_feature_dim=self.seed_feature_dim)
+
+#         self.apply(self._init_weights)
+
+#     def _init_weights(self, m):
+#         if isinstance(m, nn.BatchNorm1d):
+#             nn.init.constant_(m.bias, 0)
+#             nn.init.constant_(m.weight, 1.0)
+#         elif isinstance(m, nn.Conv1d):
+#             trunc_normal_(m.weight, std=.02)
+#             if m.bias is not None:
+#                 nn.init.constant_(m.bias, 0)
+                
+#     def forward(self, end_points):
+#         # use all sampled point cloud, B*Ns*3
+#         seed_xyz = end_points['point_clouds']
+#         B, point_num, _ = seed_xyz.shape  # batch _size
+
+#         # point-wise features
+#         coordinates_batch = end_points['coors']
+#         features_batch = end_points['feats']
+#         mink_input = ME.SparseTensor(features_batch, coordinates=coordinates_batch)
+#         seed_features = self.backbone(mink_input).F
+#         seed_features = seed_features[end_points['quantize2original']].view(B, point_num, -1).transpose(1, 2)
+
+#         end_points['seed_features'] = seed_features  # (B, seed_feature_dim, num_seed)
+#         end_points, rot_features = self.view_head(seed_features, end_points)
+#         seed_features = seed_features + rot_features
+
+#         if self.is_training:
+#             end_points = process_grasp_labels(end_points)
+#             grasp_top_views_rot, end_points = match_grasp_view_and_label(end_points)
+#         else:
+#             grasp_top_views_rot = end_points['grasp_top_view_rot']
+
+#         group_features = self.crop(seed_xyz.contiguous(), seed_features.contiguous(), grasp_top_views_rot.contiguous())
+#         end_points = self.swad_head(group_features, end_points)
+#         return end_points
+
+from models.pspnet import PSPNet
 class IGNet(nn.Module):
-    def __init__(self,  num_view=300, num_angle=12, num_depth=4, seed_feat_dim=512, is_training=True):
+    def __init__(self,  num_view=300, num_angle=12, num_depth=4, seed_feat_dim=512, img_feat_dim=64, is_training=True):
         super().__init__()
         self.is_training = is_training
         self.seed_feature_dim = seed_feat_dim
@@ -248,18 +305,16 @@ class IGNet(nn.Module):
         self.num_angle = num_angle
         self.num_view = num_view
 
-        self.backbone = MinkUNet14D(in_channels=3, out_channels=self.seed_feature_dim, D=3)
+        self.img_feature_dim = 0
+        self.point_backbone = MinkUNet14D(in_channels=img_feat_dim, out_channels=self.seed_feature_dim, D=3)
+        self.img_backbone = PSPNet(sizes=(1, 2, 3, 6), psp_size=512, 
+                                   deep_features_size=img_feat_dim, backend='resnet34')
+        
         self.view_head = ApproachNet(self.num_view, num_angle=self.num_angle,
                                                 num_depth=self.num_depth,
-                                                seed_feature_dim=self.seed_feature_dim, 
+                                                seed_feature_dim=self.seed_feature_dim + self.img_feature_dim,
                                                 is_training=self.is_training)
-        self.crop = CloudCrop(nsample=16, seed_feature_dim=self.seed_feature_dim)
-        # self.width_head = WidthNet(self.num_view, num_angle=self.num_angle, 
-        #                            num_depth=self.num_depth,
-        #                            seed_feature_dim=self.seed_feature_dim)
-        # self.depth_head = DepthScoringNet(self.num_view, num_angle=self.num_angle, 
-        #                            num_depth=self.num_depth,
-        #                            seed_feature_dim=self.seed_feature_dim)
+        self.crop = CloudCrop(nsample=32, seed_feature_dim=self.seed_feature_dim + self.img_feature_dim,)
         self.swad_head = SWADNet(self.num_view, num_angle=self.num_angle, 
                                    num_depth=self.num_depth,
                                    seed_feature_dim=self.seed_feature_dim)
@@ -279,14 +334,27 @@ class IGNet(nn.Module):
         # use all sampled point cloud, B*Ns*3
         seed_xyz = end_points['point_clouds']
         B, point_num, _ = seed_xyz.shape  # batch _size
-
-        # point-wise features
-        coordinates_batch = end_points['coors']
-        features_batch = end_points['feats']
-        mink_input = ME.SparseTensor(features_batch, coordinates=coordinates_batch)
-        seed_features = self.backbone(mink_input).F
-        seed_features = seed_features[end_points['quantize2original']].view(B, point_num, -1).transpose(1, 2)
-
+        
+        img = end_points['img']
+        img_idxs = end_points['img_idxs']
+        
+        img_feat = self.img_backbone(img)
+        _, img_dim, _ , _ = img_feat.size()
+        
+        img_feat = img_feat.view(B, img_dim, -1)
+        img_idxs = img_idxs.unsqueeze(1).repeat(1, img_dim, 1)
+        image_features = torch.gather(img_feat, 2, img_idxs).contiguous()
+        
+        image_features = image_features.transpose(1, 2)
+        coordinates_batch, features_batch = ME.utils.sparse_collate(coords=[c for c in end_points['coors']], 
+                                                                    feats=[f for f in image_features], 
+                                                                    dtype=torch.float32)
+        coordinates_batch, features_batch, _, quantize2original = ME.utils.sparse_quantize(
+            coordinates_batch, features_batch, return_index=True, return_inverse=True, device=seed_xyz.device)
+        mink_input = ME.SparseTensor(coordinates=coordinates_batch, features=features_batch)
+        point_features = self.point_backbone(mink_input).F
+        seed_features = point_features[quantize2original].view(B, point_num, -1).transpose(1, 2)
+        
         end_points['seed_features'] = seed_features  # (B, seed_feature_dim, num_seed)
         end_points, rot_features = self.view_head(seed_features, end_points)
         seed_features = seed_features + rot_features
@@ -300,8 +368,8 @@ class IGNet(nn.Module):
         group_features = self.crop(seed_xyz.contiguous(), seed_features.contiguous(), grasp_top_views_rot.contiguous())
         end_points = self.swad_head(group_features, end_points)
         return end_points
-
-
+    
+    
 def process_grasp_labels(end_points):
     """ Process labels according to scene points and object poses. """
     seed_xyzs = end_points['point_clouds']  # (B, M_point, 3)
