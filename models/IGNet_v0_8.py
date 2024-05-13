@@ -391,7 +391,7 @@ class IGNet(nn.Module):
         # point_features = point_features[quantize2original].view(B, point_num, -1).transpose(1, 2)
         # seed_features = torch.concat([point_features, image_features], dim=1)
     
-        # late fusion (multi-head attention, Transformer block)
+        # late fusion (multi-head attention)
         # coordinates_batch, features_batch = ME.utils.sparse_collate(coords=[c for c in end_points['coors']], 
         #                                                             feats=[f for f in end_points['feats']], 
         #                                                             dtype=torch.float32)

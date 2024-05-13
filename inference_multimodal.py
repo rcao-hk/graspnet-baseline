@@ -148,6 +148,8 @@ torch.cuda.set_device(device)
 
 if network_ver.startswith('v0.8'):
     from models.IGNet_v0_8 import IGNet, pred_decode
+elif network_ver.startswith('v0.7'):
+    from models.IGNet_v0_7 import IGNet, pred_decode
 else:
     raise NotImplementedError
 # from models.GSNet_v0_4 import IGNet, pred_decode

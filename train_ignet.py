@@ -59,6 +59,8 @@ setup_seed(0)
 # from models.IGNet_loss_v0_7 import get_loss
 # from dataset.ignet_dataset import GraspNetDataset, minkowski_collate_fn, collate_fn, load_grasp_labels
 
+# from models.IGNet_v0_7 import IGNet
+# from models.IGNet_loss_v0_7 import get_loss
 from models.IGNet_v0_8 import IGNet
 from models.IGNet_loss_v0_8 import get_loss
 from dataset.ignet_multi_dataset import GraspNetDataset, minkowski_collate_fn, collate_fn, load_grasp_labels
@@ -168,7 +170,6 @@ if CHECKPOINT_PATH is not None and os.path.isfile(CHECKPOINT_PATH):
 # bnm_scheduler = BNMomentumScheduler(net, bn_lambda=bn_lbmd, last_epoch=start_epoch-1)
 # scheduler = OneCycleLR(optimizer, max_lr=cfgs.learning_rate, steps_per_epoch=len(TRAIN_DATALOADER),
                     #    epochs=cfgs.max_epoch, last_epoch=start_epoch * len(TRAIN_DATALOADER)-1)
-
 
 # def get_current_lr(epoch):
 #     lr = cfgs.learning_rate
