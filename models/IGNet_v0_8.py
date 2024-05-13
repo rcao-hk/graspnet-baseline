@@ -270,6 +270,41 @@ class RotationScoringNet(nn.Module):
         return end_points, res_features
 
 
+# Proposed by Multi-Source Fusion for Voxel-Based 7-DoF Grasping Pose Estimation
+class GatedFusion(nn.Module):
+    def __init__(self, point_dim, img_dim):
+        super(GatedFusion, self).__init__()
+        self.point_dim = point_dim
+        self.img_dim = img_dim
+        self.expand_img = nn.Sequential(
+            nn.Conv1d(img_dim, 128, 1),
+            nn.BatchNorm1d(128), 
+            nn.ReLU(inplace=True),
+            nn.Conv1d(128, point_dim, 1)
+        )
+        
+        self.img_mlp = nn.Conv1d(self.point_dim, self.point_dim, 1)
+        self.point_mlp = nn.Conv1d(self.point_dim, self.point_dim, 1)
+        
+        # Decoders
+        self.gate_mlp = nn.Sequential(
+            nn.Conv1d(self.point_dim, self.point_dim, 1),
+            nn.Sigmoid()
+        )
+        
+    def forward(self, point_feat, img_feat):
+        point_feat = point_feat.transpose(1, 2)
+        img_feat = img_feat.transpose(1, 2)
+        
+        img_feat = self.expand_img(img_feat)
+        img_feat = self.img_mlp(img_feat)
+        point_fuse_feat = self.point_mlp(point_feat)
+        gate_feat = self.gate_mlp(F.relu(img_feat+point_fuse_feat))
+        img_feat = gate_feat * img_feat
+        fused_feat = img_feat + point_feat
+        return fused_feat
+    
+    
 class CrossAttentionConcat(nn.Module):
     def __init__(self, point_dim, img_dim, dropout, num_heads, normalize=False):
         super(CrossAttentionConcat, self).__init__()
@@ -317,8 +352,8 @@ class IGNet(nn.Module):
         self.num_view = num_view
 
         # early fusion
-        self.img_feature_dim = 0
-        self.point_backbone = MinkUNet14D(in_channels=img_feat_dim, out_channels=self.seed_feature_dim, D=3)
+        # self.img_feature_dim = 0
+        # self.point_backbone = MinkUNet14D(in_channels=img_feat_dim, out_channels=self.seed_feature_dim, D=3)
         
         # # late fusion (concatentation)
         # self.img_feature_dim = img_feat_dim
@@ -330,6 +365,11 @@ class IGNet(nn.Module):
         # self.fusion_module = CrossAttentionConcat(self.seed_feature_dim, img_feat_dim,
         #                                           num_heads=8, dropout=0.1, normalize=False)
 
+        # late fusion (Gated fusion)        
+        self.img_feature_dim = 0
+        self.point_backbone = MinkUNet14D(in_channels=3, out_channels=self.seed_feature_dim, D=3)
+        self.fusion_module = GatedFusion(point_dim=self.seed_feature_dim, img_dim=img_feat_dim)
+        
         # self.img_backbone = psp_models['resnet34'.lower()]()
         self.img_backbone = PSPNet(sizes=(1, 2, 3, 6), psp_size=512, 
                                    deep_features_size=img_feat_dim, backend='resnet34')
@@ -370,15 +410,15 @@ class IGNet(nn.Module):
         image_features = torch.gather(img_feat, 2, img_idxs).contiguous()
         
         # early fusion
-        image_features = image_features.transpose(1, 2)
-        coordinates_batch, features_batch = ME.utils.sparse_collate(coords=[c for c in end_points['coors']], 
-                                                                    feats=[f for f in image_features], 
-                                                                    dtype=torch.float32)
-        coordinates_batch, features_batch, _, quantize2original = ME.utils.sparse_quantize(
-            coordinates_batch, features_batch, return_index=True, return_inverse=True, device=seed_xyz.device)
-        mink_input = ME.SparseTensor(coordinates=coordinates_batch, features=features_batch)
-        point_features = self.point_backbone(mink_input).F
-        seed_features = point_features[quantize2original].view(B, point_num, -1).transpose(1, 2)
+        # image_features = image_features.transpose(1, 2)
+        # coordinates_batch, features_batch = ME.utils.sparse_collate(coords=[c for c in end_points['coors']], 
+        #                                                             feats=[f for f in image_features], 
+        #                                                             dtype=torch.float32)
+        # coordinates_batch, features_batch, _, quantize2original = ME.utils.sparse_quantize(
+        #     coordinates_batch, features_batch, return_index=True, return_inverse=True, device=seed_xyz.device)
+        # mink_input = ME.SparseTensor(coordinates=coordinates_batch, features=features_batch)
+        # point_features = self.point_backbone(mink_input).F
+        # seed_features = point_features[quantize2original].view(B, point_num, -1).transpose(1, 2)
 
         # late fusion (concatentation)
         # coordinates_batch, features_batch = ME.utils.sparse_collate(coords=[c for c in end_points['coors']], 
@@ -391,17 +431,17 @@ class IGNet(nn.Module):
         # point_features = point_features[quantize2original].view(B, point_num, -1).transpose(1, 2)
         # seed_features = torch.concat([point_features, image_features], dim=1)
     
-        # late fusion (multi-head attention)
-        # coordinates_batch, features_batch = ME.utils.sparse_collate(coords=[c for c in end_points['coors']], 
-        #                                                             feats=[f for f in end_points['feats']], 
-        #                                                             dtype=torch.float32)
-        # coordinates_batch, features_batch, _, quantize2original = ME.utils.sparse_quantize(
-        #     coordinates_batch, features_batch, return_index=True, return_inverse=True, device=seed_xyz.device)
-        # mink_input = ME.SparseTensor(features_batch, coordinates=coordinates_batch)
-        # point_features = self.point_backbone(mink_input).F
-        # point_features = point_features[quantize2original].view(B, point_num, -1)
-        # image_features = image_features.transpose(1, 2)
-        # seed_features = self.fusion_module(point_features, image_features)
+        # late fusion (multi-head attention, gated fusion)
+        coordinates_batch, features_batch = ME.utils.sparse_collate(coords=[c for c in end_points['coors']], 
+                                                                    feats=[f for f in end_points['feats']], 
+                                                                    dtype=torch.float32)
+        coordinates_batch, features_batch, _, quantize2original = ME.utils.sparse_quantize(
+            coordinates_batch, features_batch, return_index=True, return_inverse=True, device=seed_xyz.device)
+        mink_input = ME.SparseTensor(features_batch, coordinates=coordinates_batch)
+        point_features = self.point_backbone(mink_input).F
+        point_features = point_features[quantize2original].view(B, point_num, -1)
+        image_features = image_features.transpose(1, 2)
+        seed_features = self.fusion_module(point_features, image_features)
         
         end_points['seed_features'] = seed_features  # (B, seed_feature_dim, num_seed)
         end_points, rot_features = self.rot_head(seed_features, end_points)
