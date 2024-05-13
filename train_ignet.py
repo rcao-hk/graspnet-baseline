@@ -3,7 +3,7 @@
 import sys
 import os
 # os.environ['CUDA_VISIBLE_DEVICES'] = '0'
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:512"
+# os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:512"
 # os.environ['OMP_NUM_THREADS'] = '18'
 
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
