@@ -78,7 +78,8 @@ parser.add_argument('--img_feat_dim', default=64, type=int, help='Image feature 
 parser.add_argument('--voxel_size', type=float, default=0.002, help='Voxel Size for Quantize [default: 0.005]')
 parser.add_argument('--visib_threshold', type=float, default=0.5, help='Visibility Threshold [default: 0.5]')
 parser.add_argument('--num_view', type=int, default=300, help='View Number [default: 300]')
-parser.add_argument('--max_epoch', type=int, default=61, help='Epoch to run [default: 18]')
+parser.add_argument('--max_epoch', type=int, default=61, help='Epoch to run [default: 61]')
+parser.add_argument('--lr_sched_period', type=int, default=16, help='T_max of cosine learing rate scheduler [default: 16]')
 parser.add_argument('--batch_size', type=int, default=22, help='Batch Size during training [default: 2]')
 parser.add_argument('--learning_rate', type=float, default=0.002, help='Initial learning rate [default: 0.002]')
 parser.add_argument('--worker_num', type=int, default=18, help='Worker number for dataloader [default: 4]')
@@ -149,7 +150,7 @@ net.to(device)
 # Load the Adam optimizer
 # optimizer = optim.Adam(net.parameters(), lr=cfgs.learning_rate, weight_decay=cfgs.weight_decay)
 optimizer = optim.AdamW(net.parameters(), lr=cfgs.learning_rate, weight_decay=cfgs.weight_decay)
-lr_scheduler = CosineAnnealingLR(optimizer, T_max=16, eta_min=1e-4)
+lr_scheduler = CosineAnnealingLR(optimizer, T_max=cfgs.lr_sched_period, eta_min=1e-4)
 
 # Load checkpoint if there is any
 it = -1 # for the initialize value of `LambdaLR` and `BNMomentumScheduler`
