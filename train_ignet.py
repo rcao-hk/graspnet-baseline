@@ -86,6 +86,7 @@ parser.add_argument('--worker_num', type=int, default=18, help='Worker number fo
 parser.add_argument('--ckpt_save_interval', type=int, default=5, help='Number for save checkpoint[default: 5]')
 parser.add_argument('--weight_decay', type=float, default=0.001, help='Optimization L2 weight decay [default: 0]')
 parser.add_argument('--inst_denoise', action='store_true', help='Denoise instance points during training and testing [default: False]')
+parser.add_argument('--pin_memory', action='store_true', help='set pin_memory for faster training [default: False]')
 # parser.add_argument('--bn_decay_step', type=int, default=2, help='Period of BN decay (in epochs) [default: 2]')
 # parser.add_argument('--bn_decay_rate', type=float, default=0.5, help='Decay rate for BN decay [default: 0.5]')
 # parser.add_argument('--lr_decay_steps', default='8,12,16', help='When to decay the learning rate (in epochs) [default: 8,12,16]')
@@ -132,9 +133,9 @@ print(len(TRAIN_DATASET), len(TEST_DATASET))
 #     num_workers=cfgs.worker_num, worker_init_fn=my_worker_init_fn, collate_fn=minkowski_collate_fn)
 
 TRAIN_DATALOADER = DataLoader(TRAIN_DATASET, batch_size=cfgs.batch_size, shuffle=True,
-    num_workers=cfgs.worker_num, worker_init_fn=my_worker_init_fn, collate_fn=collate_fn)
+    num_workers=cfgs.worker_num, worker_init_fn=my_worker_init_fn, collate_fn=collate_fn, pin_memory=cfgs.pin_memory)
 TEST_DATALOADER = DataLoader(TEST_DATASET, batch_size=cfgs.batch_size, shuffle=False,
-    num_workers=cfgs.worker_num, worker_init_fn=my_worker_init_fn, collate_fn=collate_fn)
+    num_workers=cfgs.worker_num, worker_init_fn=my_worker_init_fn, collate_fn=collate_fn, pin_memory=cfgs.pin_memory)
 
 print(len(TRAIN_DATALOADER), len(TEST_DATALOADER))
 
@@ -201,9 +202,9 @@ def train_one_epoch():
             if 'list' in key:
                 for i in range(len(batch_data_label[key])):
                     for j in range(len(batch_data_label[key][i])):
-                        batch_data_label[key][i][j] = batch_data_label[key][i][j].cuda()
+                        batch_data_label[key][i][j] = batch_data_label[key][i][j].cuda(non_blocking=cfgs.pin_memory)
             else:
-                batch_data_label[key] = batch_data_label[key].cuda()
+                batch_data_label[key] = batch_data_label[key].cuda(non_blocking=cfgs.pin_memory)
         # Forward pass
         end_points = net(batch_data_label)
         
@@ -251,9 +252,9 @@ def evaluate_one_epoch():
             if 'list' in key:
                 for i in range(len(batch_data_label[key])):
                     for j in range(len(batch_data_label[key][i])):
-                        batch_data_label[key][i][j] = batch_data_label[key][i][j].cuda()
+                        batch_data_label[key][i][j] = batch_data_label[key][i][j].cuda(non_blocking=cfgs.pin_memory)
             else:
-                batch_data_label[key] = batch_data_label[key].cuda()
+                batch_data_label[key] = batch_data_label[key].cuda(non_blocking=cfgs.pin_memory)
         # Forward pass
         with torch.no_grad():
             end_points = net(batch_data_label)
