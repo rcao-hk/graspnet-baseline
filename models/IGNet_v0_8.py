@@ -270,6 +270,28 @@ class RotationScoringNet(nn.Module):
         return end_points, res_features
 
 
+# add two features
+class AddFusion(nn.Module):
+    def __init__(self, point_dim, img_dim):
+        super(AddFusion, self).__init__()
+        self.point_dim = point_dim
+        self.img_dim = img_dim
+        self.img_mlp = nn.Sequential(
+            nn.Conv1d(img_dim, 128, 1),
+            nn.BatchNorm1d(128), 
+            nn.ReLU(inplace=True),
+            nn.Conv1d(128, point_dim, 1)
+        )
+        
+    def forward(self, point_feat, img_feat):
+        point_feat = point_feat.transpose(1, 2)
+        img_feat = img_feat.transpose(1, 2)
+        
+        img_feat = self.img_mlp(img_feat)
+        fused_feat = img_feat + point_feat
+        return fused_feat
+    
+
 # Proposed by Multi-Source Fusion for Voxel-Based 7-DoF Grasping Pose Estimation
 class GatedFusion(nn.Module):
     def __init__(self, point_dim, img_dim):
@@ -301,28 +323,6 @@ class GatedFusion(nn.Module):
         point_fuse_feat = self.point_mlp(point_feat)
         gate_feat = self.gate_mlp(F.relu(img_feat+point_fuse_feat))
         img_feat = gate_feat * img_feat
-        fused_feat = img_feat + point_feat
-        return fused_feat
-
-
-# add two features
-class AddFusion(nn.Module):
-    def __init__(self, point_dim, img_dim):
-        super(AddFusion, self).__init__()
-        self.point_dim = point_dim
-        self.img_dim = img_dim
-        self.img_mlp = nn.Sequential(
-            nn.Conv1d(img_dim, 128, 1),
-            nn.BatchNorm1d(128), 
-            nn.ReLU(inplace=True),
-            nn.Conv1d(128, point_dim, 1)
-        )
-        
-    def forward(self, point_feat, img_feat):
-        point_feat = point_feat.transpose(1, 2)
-        img_feat = img_feat.transpose(1, 2)
-        
-        img_feat = self.img_mlp(img_feat)
         fused_feat = img_feat + point_feat
         return fused_feat
 
