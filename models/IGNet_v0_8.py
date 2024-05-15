@@ -303,8 +303,30 @@ class GatedFusion(nn.Module):
         img_feat = gate_feat * img_feat
         fused_feat = img_feat + point_feat
         return fused_feat
-    
-    
+
+
+# add two features
+class AddFusion(nn.Module):
+    def __init__(self, point_dim, img_dim):
+        super(AddFusion, self).__init__()
+        self.point_dim = point_dim
+        self.img_dim = img_dim
+        self.img_mlp = nn.Sequential(
+            nn.Conv1d(img_dim, 128, 1),
+            nn.BatchNorm1d(128), 
+            nn.ReLU(inplace=True),
+            nn.Conv1d(128, point_dim, 1)
+        )
+        
+    def forward(self, point_feat, img_feat):
+        point_feat = point_feat.transpose(1, 2)
+        img_feat = img_feat.transpose(1, 2)
+        
+        img_feat = self.img_mlp(img_feat)
+        fused_feat = img_feat + point_feat
+        return fused_feat
+
+
 class CrossAttentionConcat(nn.Module):
     def __init__(self, point_dim, img_dim, dropout, num_heads, normalize=False):
         super(CrossAttentionConcat, self).__init__()
@@ -366,9 +388,14 @@ class IGNet(nn.Module):
         #                                           num_heads=8, dropout=0.1, normalize=False)
 
         # late fusion (Gated fusion)        
+        # self.img_feature_dim = 0
+        # self.point_backbone = MinkUNet14D(in_channels=3, out_channels=self.seed_feature_dim, D=3)
+        # self.fusion_module = GatedFusion(point_dim=self.seed_feature_dim, img_dim=img_feat_dim)
+
+        # late fusion (Add fusion)        
         self.img_feature_dim = 0
         self.point_backbone = MinkUNet14D(in_channels=3, out_channels=self.seed_feature_dim, D=3)
-        self.fusion_module = GatedFusion(point_dim=self.seed_feature_dim, img_dim=img_feat_dim)
+        self.fusion_module = AddFusion(point_dim=self.seed_feature_dim, img_dim=img_feat_dim)
         
         # self.img_backbone = psp_models['resnet34'.lower()]()
         self.img_backbone = PSPNet(sizes=(1, 2, 3, 6), psp_size=512, 
@@ -431,7 +458,7 @@ class IGNet(nn.Module):
         # point_features = point_features[quantize2original].view(B, point_num, -1).transpose(1, 2)
         # seed_features = torch.concat([point_features, image_features], dim=1)
     
-        # late fusion (multi-head attention, gated fusion)
+        # late fusion (multi-head attention, gated fusion, add fusion)
         coordinates_batch, features_batch = ME.utils.sparse_collate(coords=[c for c in end_points['coors']], 
                                                                     feats=[f for f in end_points['feats']], 
                                                                     dtype=torch.float32)
