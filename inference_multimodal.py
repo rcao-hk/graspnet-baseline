@@ -175,9 +175,9 @@ net.eval()
 checkpoint = torch.load(ckpt_name, map_location=device)
 
 try:
-    net.load_state_dict(checkpoint['model_state_dict'])
+    net.load_state_dict(checkpoint['model_state_dict'], strict=True)
 except:
-    net.load_state_dict(checkpoint)
+    net.load_state_dict(checkpoint, strict=True)
 eps = 1e-8
 
 def inference(scene_idx):
