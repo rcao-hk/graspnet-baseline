@@ -86,7 +86,8 @@ parser.add_argument('--worker_num', type=int, default=18, help='Worker number fo
 parser.add_argument('--ckpt_save_interval', type=int, default=5, help='Number for save checkpoint[default: 5]')
 parser.add_argument('--weight_decay', type=float, default=0.001, help='Optimization L2 weight decay [default: 0]')
 parser.add_argument('--inst_denoise', action='store_true', help='Denoise instance points during training and testing [default: False]')
-parser.add_argument('--pin_memory', action='store_true', help='set pin_memory for faster training [default: False]')
+parser.add_argument('--pin_memory', action='store_true', help='Set pin_memory for faster training [default: False]')
+parser.add_argument('--multi_scale_grouping', action='store_true', help='Multi-scale grouping [default: False]')
 # parser.add_argument('--bn_decay_step', type=int, default=2, help='Period of BN decay (in epochs) [default: 2]')
 # parser.add_argument('--bn_decay_rate', type=float, default=0.5, help='Decay rate for BN decay [default: 0.5]')
 # parser.add_argument('--lr_decay_steps', default='8,12,16', help='When to decay the learning rate (in epochs) [default: 8,12,16]')
@@ -145,7 +146,8 @@ print(len(TRAIN_DATALOADER), len(TEST_DATALOADER))
 
 # net = IGNet(num_view=cfgs.num_view, seed_feat_dim=cfgs.seed_feat_dim, is_training=True)
 # net.to(device)
-net = IGNet(num_view=cfgs.num_view, seed_feat_dim=cfgs.seed_feat_dim, img_feat_dim=cfgs.img_feat_dim, is_training=True)
+net = IGNet(num_view=cfgs.num_view, seed_feat_dim=cfgs.seed_feat_dim, img_feat_dim=cfgs.img_feat_dim, 
+            is_training=True, multi_scale_grouping=cfgs.multi_scale_grouping)
 net.to(device)
 
 # Load the Adam optimizer

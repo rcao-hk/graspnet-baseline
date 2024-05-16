@@ -172,7 +172,7 @@ class CloudCrop(nn.Module):
 
     def forward(self, seed_xyz, seed_features, rot, crop_size):
         grouped_feature = self.grouper(seed_xyz, seed_xyz, rot, crop_size, seed_features)  # B*3 + feat_dim*M*K
-        new_features = self.mlps(grouped_feature)  # (batch_size, mlps[-1], M, K)
+        new_features = self.mlps(grouped_feature)  # (batch_size, mlps[-1], M, nsample)
         new_features = F.max_pool2d(new_features, kernel_size=[1, new_features.size(3)])  # (batch_size, mlps[-1], M, 1)
         new_features = new_features.squeeze(-1)   # (batch_size, mlps[-1], M)
         return new_features
@@ -364,7 +364,8 @@ class CrossAttentionConcat(nn.Module):
 
 
 class IGNet(nn.Module):
-    def __init__(self,  num_view=300, num_angle=12, num_depth=4, seed_feat_dim=512, img_feat_dim=64, is_training=True):
+    def __init__(self,  num_view=300, num_angle=12, num_depth=4, seed_feat_dim=512, img_feat_dim=64, 
+                 is_training=True, multi_scale_grouping=False):
         super().__init__()
         self.is_training = is_training
         self.seed_feature_dim = seed_feat_dim
@@ -372,10 +373,11 @@ class IGNet(nn.Module):
         self.num_depth = num_depth
         self.num_angle = num_angle
         self.num_view = num_view
-
+        self.multi_scale_grouping = multi_scale_grouping
+        
         # early fusion
-        # self.img_feature_dim = 0
-        # self.point_backbone = MinkUNet14D(in_channels=img_feat_dim, out_channels=self.seed_feature_dim, D=3)
+        self.img_feature_dim = 0
+        self.point_backbone = MinkUNet14D(in_channels=img_feat_dim, out_channels=self.seed_feature_dim, D=3)
         
         # # late fusion (concatentation)
         # self.img_feature_dim = img_feat_dim
@@ -387,15 +389,15 @@ class IGNet(nn.Module):
         # self.fusion_module = CrossAttentionConcat(self.seed_feature_dim, img_feat_dim,
         #                                           num_heads=8, dropout=0.1, normalize=False)
 
-        # late fusion (Gated fusion)        
+        # late fusion (Gated fusion)
         # self.img_feature_dim = 0
         # self.point_backbone = MinkUNet14D(in_channels=3, out_channels=self.seed_feature_dim, D=3)
         # self.fusion_module = GatedFusion(point_dim=self.seed_feature_dim, img_dim=img_feat_dim)
 
-        # late fusion (Add fusion)        
-        self.img_feature_dim = 0
-        self.point_backbone = MinkUNet14D(in_channels=3, out_channels=self.seed_feature_dim, D=3)
-        self.fusion_module = AddFusion(point_dim=self.seed_feature_dim, img_dim=img_feat_dim)
+        # late fusion (Add fusion)
+        # self.img_feature_dim = 0
+        # self.point_backbone = MinkUNet14D(in_channels=3, out_channels=self.seed_feature_dim, D=3)
+        # self.fusion_module = AddFusion(point_dim=self.seed_feature_dim, img_dim=img_feat_dim)
         
         # self.img_backbone = psp_models['resnet34'.lower()]()
         self.img_backbone = PSPNet(sizes=(1, 2, 3, 6), psp_size=512, 
@@ -404,12 +406,25 @@ class IGNet(nn.Module):
                                                 num_depth=self.num_depth,
                                                 seed_feature_dim=self.seed_feature_dim + self.img_feature_dim, 
                                                 is_training=self.is_training)
-        self.crop = CloudCrop(nsample=32, seed_feature_dim=self.seed_feature_dim + self.img_feature_dim, 
-                              out_dim=self.seed_feature_dim)
         self.depth_head = DepthNet(self.num_view, num_angle=self.num_angle, 
                                    num_depth=self.num_depth,
                                    seed_feature_dim=self.seed_feature_dim)
-
+        if self.multi_scale_grouping:
+            feat_dim = self.seed_feature_dim + self.img_feature_dim
+            self.crop_scales = [0.25, 0.5, 0.75, 1.0]
+            self.multi_scale_fuse = nn.Conv1d(feat_dim * 4, feat_dim, 1)
+            self.multi_scale_gate = nn.Sequential(
+                nn.Conv1d(feat_dim, feat_dim, 1),
+                nn.Sigmoid()
+            )
+            self.crop1 = CloudCrop(nsample=16, seed_feature_dim=feat_dim, out_dim=self.seed_feature_dim)
+            self.crop2 = CloudCrop(nsample=16, seed_feature_dim=feat_dim, out_dim=self.seed_feature_dim)
+            self.crop3 = CloudCrop(nsample=16, seed_feature_dim=feat_dim, out_dim=self.seed_feature_dim)
+            self.crop4 = CloudCrop(nsample=16, seed_feature_dim=feat_dim, out_dim=self.seed_feature_dim)
+            self.crop_op_list = [self.crop1, self.crop2, self.crop3, self.crop4]
+        else:
+            self.crop = CloudCrop(nsample=32, seed_feature_dim=self.seed_feature_dim + self.img_feature_dim, 
+                                out_dim=self.seed_feature_dim)
         self.apply(self._init_weights)
 
     def _init_weights(self, m):
@@ -437,15 +452,15 @@ class IGNet(nn.Module):
         image_features = torch.gather(img_feat, 2, img_idxs).contiguous()
         
         # early fusion
-        # image_features = image_features.transpose(1, 2)
-        # coordinates_batch, features_batch = ME.utils.sparse_collate(coords=[c for c in end_points['coors']], 
-        #                                                             feats=[f for f in image_features], 
-        #                                                             dtype=torch.float32)
-        # coordinates_batch, features_batch, _, quantize2original = ME.utils.sparse_quantize(
-        #     coordinates_batch, features_batch, return_index=True, return_inverse=True, device=seed_xyz.device)
-        # mink_input = ME.SparseTensor(coordinates=coordinates_batch, features=features_batch)
-        # point_features = self.point_backbone(mink_input).F
-        # seed_features = point_features[quantize2original].view(B, point_num, -1).transpose(1, 2)
+        image_features = image_features.transpose(1, 2)
+        coordinates_batch, features_batch = ME.utils.sparse_collate(coords=[c for c in end_points['coors']], 
+                                                                    feats=[f for f in image_features], 
+                                                                    dtype=torch.float32)
+        coordinates_batch, features_batch, _, quantize2original = ME.utils.sparse_quantize(
+            coordinates_batch, features_batch, return_index=True, return_inverse=True, device=seed_xyz.device)
+        mink_input = ME.SparseTensor(coordinates=coordinates_batch, features=features_batch)
+        point_features = self.point_backbone(mink_input).F
+        seed_features = point_features[quantize2original].view(B, point_num, -1).transpose(1, 2)
 
         # late fusion (concatentation)
         # coordinates_batch, features_batch = ME.utils.sparse_collate(coords=[c for c in end_points['coors']], 
@@ -459,16 +474,16 @@ class IGNet(nn.Module):
         # seed_features = torch.concat([point_features, image_features], dim=1)
     
         # late fusion (multi-head attention, gated fusion, add fusion)
-        coordinates_batch, features_batch = ME.utils.sparse_collate(coords=[c for c in end_points['coors']], 
-                                                                    feats=[f for f in end_points['feats']], 
-                                                                    dtype=torch.float32)
-        coordinates_batch, features_batch, _, quantize2original = ME.utils.sparse_quantize(
-            coordinates_batch, features_batch, return_index=True, return_inverse=True, device=seed_xyz.device)
-        mink_input = ME.SparseTensor(features_batch, coordinates=coordinates_batch)
-        point_features = self.point_backbone(mink_input).F
-        point_features = point_features[quantize2original].view(B, point_num, -1)
-        image_features = image_features.transpose(1, 2)
-        seed_features = self.fusion_module(point_features, image_features)
+        # coordinates_batch, features_batch = ME.utils.sparse_collate(coords=[c for c in end_points['coors']], 
+        #                                                             feats=[f for f in end_points['feats']], 
+        #                                                             dtype=torch.float32)
+        # coordinates_batch, features_batch, _, quantize2original = ME.utils.sparse_quantize(
+        #     coordinates_batch, features_batch, return_index=True, return_inverse=True, device=seed_xyz.device)
+        # mink_input = ME.SparseTensor(features_batch, coordinates=coordinates_batch)
+        # point_features = self.point_backbone(mink_input).F
+        # point_features = point_features[quantize2original].view(B, point_num, -1)
+        # image_features = image_features.transpose(1, 2)
+        # seed_features = self.fusion_module(point_features, image_features)
         
         end_points['seed_features'] = seed_features  # (B, seed_feature_dim, num_seed)
         end_points, rot_features = self.rot_head(seed_features, end_points)
@@ -479,14 +494,27 @@ class IGNet(nn.Module):
             grasp_top_rots, end_points = match_grasp_view_and_label(end_points)
         else:
             grasp_top_rots = end_points['grasp_top_rot']
-
-        crop_length = (0.04 + base_depth) * torch.ones((B, point_num, 1), device=seed_xyz.device)
-        crop_width = GRASP_MAX_WIDTH * torch.ones_like(crop_length, device=seed_xyz.device)
-        crop_height = 0.02 * torch.ones_like(crop_length, device=seed_xyz.device)
-        crop_size = torch.concat([crop_length, crop_width, crop_height], dim=-1).contiguous()
-
-        group_features = self.crop(seed_xyz.contiguous(), seed_features.contiguous(),
-                                   grasp_top_rots, crop_size)
+        
+        if self.multi_scale_grouping:
+            group_features = []
+            for crop_scale, crop_op in zip(self.crop_scales, self.crop_op_list):
+                crop_length = (0.04 + base_depth) * torch.ones((B, point_num, 1), device=seed_xyz.device)
+                crop_width = crop_scale * GRASP_MAX_WIDTH * torch.ones_like(crop_length, device=seed_xyz.device)
+                crop_height = 0.02 * torch.ones_like(crop_length, device=seed_xyz.device)
+                crop_size = torch.concat([crop_length, crop_width, crop_height], dim=-1)
+                group_features.append(crop_op(seed_xyz.contiguous(), seed_features.contiguous(), 
+                                                grasp_top_rots, crop_size.contiguous()))
+            group_features = torch.cat(group_features, dim=1) #            
+            group_features = self.multi_scale_fuse(group_features)
+            seed_features_gate = self.multi_scale_gate(seed_features) * seed_features
+            group_features = group_features + seed_features_gate
+        else:
+            crop_length = (0.04 + base_depth) * torch.ones((B, point_num, 1), device=seed_xyz.device)
+            crop_width = GRASP_MAX_WIDTH * torch.ones_like(crop_length, device=seed_xyz.device)
+            crop_height = 0.02 * torch.ones_like(crop_length, device=seed_xyz.device)
+            crop_size = torch.concat([crop_length, crop_width, crop_height], dim=-1).contiguous()
+            group_features = self.crop(seed_xyz.contiguous(), seed_features.contiguous(),
+                                       grasp_top_rots, crop_size)
         end_points = self.depth_head(group_features, end_points)
         return end_points
 
