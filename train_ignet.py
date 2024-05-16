@@ -79,13 +79,14 @@ parser.add_argument('--voxel_size', type=float, default=0.002, help='Voxel Size 
 parser.add_argument('--visib_threshold', type=float, default=0.5, help='Visibility Threshold [default: 0.5]')
 parser.add_argument('--num_view', type=int, default=300, help='View Number [default: 300]')
 parser.add_argument('--max_epoch', type=int, default=61, help='Epoch to run [default: 61]')
+parser.add_argument('--lr_sched', default=False, action='store_true')
 parser.add_argument('--lr_sched_period', type=int, default=16, help='T_max of cosine learing rate scheduler [default: 16]')
 parser.add_argument('--batch_size', type=int, default=22, help='Batch Size during training [default: 2]')
 parser.add_argument('--learning_rate', type=float, default=0.002, help='Initial learning rate [default: 0.002]')
 parser.add_argument('--worker_num', type=int, default=18, help='Worker number for dataloader [default: 4]')
 parser.add_argument('--ckpt_save_interval', type=int, default=5, help='Number for save checkpoint[default: 5]')
 parser.add_argument('--weight_decay', type=float, default=0.001, help='Optimization L2 weight decay [default: 0]')
-parser.add_argument('--inst_denoise', action='store_true', help='Denoise instance points during training and testing [default: False]')
+parser.add_argument('--inst_denoise', default=False, action='store_true', help='Denoise instance points during training and testing [default: False]')
 parser.add_argument('--pin_memory', action='store_true', help='Set pin_memory for faster training [default: False]')
 parser.add_argument('--multi_scale_grouping', action='store_true', help='Multi-scale grouping [default: False]')
 # parser.add_argument('--bn_decay_step', type=int, default=2, help='Period of BN decay (in epochs) [default: 2]')
@@ -153,7 +154,8 @@ net.to(device)
 # Load the Adam optimizer
 # optimizer = optim.Adam(net.parameters(), lr=cfgs.learning_rate, weight_decay=cfgs.weight_decay)
 optimizer = optim.AdamW(net.parameters(), lr=cfgs.learning_rate, weight_decay=cfgs.weight_decay)
-lr_scheduler = CosineAnnealingLR(optimizer, T_max=cfgs.lr_sched_period, eta_min=1e-4)
+if cfgs.lr_sched:
+    lr_scheduler = CosineAnnealingLR(optimizer, T_max=cfgs.lr_sched_period, eta_min=1e-4)
 
 # Load checkpoint if there is any
 it = -1 # for the initialize value of `LambdaLR` and `BNMomentumScheduler`
@@ -162,7 +164,8 @@ if CHECKPOINT_PATH is not None and os.path.isfile(CHECKPOINT_PATH):
     checkpoint = torch.load(CHECKPOINT_PATH, map_location=device)
     net.load_state_dict(checkpoint['model_state_dict'])
     optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-    lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
+    if cfgs.lr_sched:
+        lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
     start_epoch = checkpoint['epoch']
     log_string("-> loaded checkpoint %s (epoch: %d)"%(CHECKPOINT_PATH, start_epoch))
     
@@ -213,12 +216,6 @@ def train_one_epoch():
         # Compute loss and gradients, update parameters.
         loss, end_points = get_loss(end_points, device)
         loss.backward()
-        # if (batch_idx+1) % 1 == 0:
-        # for name, parms in net.named_parameters():
-        #     try:
-        #         print('-->name:', name, '-->grad_requirs:', parms.requires_grad, '--weight', torch.mean(parms.data), ' -->grad_value:', torch.mean(parms.grad))
-        #     except:
-        #         print('error')
         optimizer.step()
         optimizer.zero_grad()
         # scheduler.step()
@@ -289,23 +286,24 @@ def train(start_epoch):
     for epoch in range(start_epoch, cfgs.max_epoch):
         EPOCH_CNT = epoch
         log_string('**** EPOCH %03d ****' % (epoch))
-        log_string('Current learning rate: %f' % (lr_scheduler.get_last_lr()[0]))
+        current_lr = optimizer.param_groups[0]['lr']
+        log_string('Current learning rate: %f' % (current_lr))
         # log_string('Current BN decay momentum: %f'%(bnm_scheduler.lmbd(bnm_scheduler.last_epoch)))
         log_string(str(datetime.now()))
         # Reset numpy seed.
         # REF: https://github.com/pytorch/pytorch/issues/5059
         np.random.seed()
         train_loss = train_one_epoch()
-        log_writer.add_scalar('training/learning_rate', optimizer.param_groups[0]['lr'], epoch)
-        lr_scheduler.step()
+        log_writer.add_scalar('training/learning_rate', current_lr, epoch)
         
         eval_loss = evaluate_one_epoch()
         # Save checkpoint
         save_dict = {'epoch': epoch+1, # after training one epoch, the start_epoch should be epoch+1
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    # 'loss': loss,
-                    'lr_scheduler':lr_scheduler.state_dict(),
-                    }
+                    'optimizer_state_dict': optimizer.state_dict()}
+        
+        if cfgs.lr_sched:
+            lr_scheduler.step()
+            save_dict['lr_scheduler'] = lr_scheduler.state_dict()
         try: # with nn.DataParallel() the net is added as a submodule of DataParallel
             save_dict['model_state_dict'] = net.module.state_dict()
         except:
