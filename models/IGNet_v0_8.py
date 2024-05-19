@@ -481,21 +481,21 @@ class IGNet(nn.Module):
         self.img_backbone = PSPNet(sizes=(1, 2, 3, 6), psp_size=512, 
                                    deep_features_size=img_feat_dim, backend='resnet34')
         
-        # self.rot_head = RotationScoringNet(self.num_view, num_angle=self.num_angle,
-        #                                         num_depth=self.num_depth,
-        #                                         seed_feature_dim=self.seed_feature_dim + self.img_feature_dim, 
-        #                                         is_training=self.is_training)
-        # self.depth_head = DepthNet(self.num_view, num_angle=self.num_angle, 
-        #                            num_depth=self.num_depth,
-        #                            seed_feature_dim=self.seed_feature_dim)
+        self.rot_head = RotationScoringNet(self.num_view, num_angle=self.num_angle,
+                                                num_depth=self.num_depth,
+                                                seed_feature_dim=self.seed_feature_dim + self.img_feature_dim, 
+                                                is_training=self.is_training)
+        self.depth_head = DepthNet(self.num_view, num_angle=self.num_angle, 
+                                   num_depth=self.num_depth,
+                                   seed_feature_dim=self.seed_feature_dim)
 
-        self.rot_head = RotationGraspableNet(self.num_view, num_angle=self.num_angle,
-                                             num_depth=self.num_depth,
-                                             seed_feature_dim=self.seed_feature_dim + self.img_feature_dim, 
-                                             is_training=self.is_training)
-        self.depth_head = OperationNet(self.num_view, num_angle=self.num_angle, 
-                                       num_depth=self.num_depth,
-                                       seed_feature_dim=self.seed_feature_dim)
+        # self.rot_head = RotationGraspableNet(self.num_view, num_angle=self.num_angle,
+        #                                      num_depth=self.num_depth,
+        #                                      seed_feature_dim=self.seed_feature_dim + self.img_feature_dim, 
+        #                                      is_training=self.is_training)
+        # self.depth_head = OperationNet(self.num_view, num_angle=self.num_angle, 
+        #                                num_depth=self.num_depth,
+        #                                seed_feature_dim=self.seed_feature_dim)
         if self.multi_scale_grouping:
             feat_dim = self.seed_feature_dim + self.img_feature_dim
             self.crop_scales = [0.25, 0.5, 0.75, 1.0]

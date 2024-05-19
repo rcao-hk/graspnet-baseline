@@ -57,6 +57,8 @@ parser.add_argument('--dump_dir', type=str, default='ignet_v0.8.0', help='Dump d
 parser.add_argument('--inst_pt_num', type=int, default=1024, help='Dump dir to save outputs')
 parser.add_argument('--ckpt_epoch', type=int, default=48, help='Checkpoint epoch name of trained model')
 parser.add_argument('--inst_denoise', action='store_true', help='Denoise instance points during training and testing [default: False]')
+parser.add_argument('--seg_root',type=str, default='/media/gpuadmin/rcao/dataset/graspnet', help='Segmentation results [default: uois]')
+parser.add_argument('--seg_model',type=str, default='uois', help='Segmentation results [default: uois]')
 parser.add_argument('--multi_scale_grouping', action='store_true', help='Multi-scale grouping [default: False]')
 parser.add_argument('--voxel_size', type=float, default=0.002, help='Voxel Size to quantize point cloud [default: 0.005]')
 parser.add_argument('--collision_voxel_size', type=float, default=0.01, help='Voxel Size to process point clouds before collision detection [default: 0.01]')
@@ -132,7 +134,8 @@ data_type = 'real' # syn
 restored_depth = False
 use_gt_mask = False
 inst_denoise = cfgs.inst_denoise
-seg_model = 'uois'
+seg_root = cfgs.seg_root
+seg_model = cfgs.seg_model
 num_pt = cfgs.inst_pt_num
 denoise_pre_sample_num = int(num_pt * 1.5)
 
@@ -201,7 +204,7 @@ def inference(scene_idx):
             
         meta_path = os.path.join(dataset_root,
                                 'scenes/scene_{:04d}/{}/meta/{:04d}.mat'.format(scene_idx, camera, anno_idx))
-        seg_mask_path = os.path.join(dataset_root,
+        seg_mask_path = os.path.join(seg_root,
                                 '{}_mask/scene_{:04d}/{}/{:04d}.png'.format(seg_model, scene_idx, camera, anno_idx))
 
         # suction_score_path = os.path.join(dataset_root, 'suction/scene_{:04d}/{}/{:04d}.npz'.format(scene_idx, camera, anno_idx))
