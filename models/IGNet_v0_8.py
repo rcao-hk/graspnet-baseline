@@ -178,14 +178,46 @@ class CloudCrop(nn.Module):
         return new_features
 
 
-class DepthNet(nn.Module):
-    def __init__(self, num_view, num_angle, num_depth, seed_feature_dim, is_training=True):
+class OperationNet(nn.Module):
+    """ Grasp configure estimation.
+
+        Input:
+            num_depth: [int]
+                number of gripper depth classes
+    """
+
+    def __init__(self, num_view, num_angle, num_depth, seed_feature_dim):
         super().__init__()
         self.in_dim = seed_feature_dim
         self.num_view = num_view
         self.num_angle = num_angle
         self.num_depth = num_depth
-        self.is_training = is_training
+
+        self.conv1 = nn.Conv1d(self.in_dim, 128, 1)
+        self.conv2 = nn.Conv1d(128, 128, 1)
+        self.conv3 = nn.Conv1d(128, 3 * num_angle, 1)
+        self.bn1 = nn.BatchNorm1d(128)
+        self.bn2 = nn.BatchNorm1d(128)
+
+    def forward(self, seed_features, end_points):
+        B, _, num_seed = seed_features.size()
+        features = F.relu(self.bn1(self.conv1(seed_features)), inplace=True)
+        features = F.relu(self.bn2(self.conv2(features)), inplace=True)
+        features = self.conv3(features)
+        features = features.view(B, 2, self.num_depth, num_seed)
+        features = features.permute(0, 1, 3, 2) # (B, 2, num_seed, num_depth)
+        end_points['grasp_score_pred'] = features[:, 0]
+        end_points['grasp_width_pred'] = features[:, 1]
+        return end_points
+        
+        
+class DepthNet(nn.Module):
+    def __init__(self, num_view, num_angle, num_depth, seed_feature_dim):
+        super().__init__()
+        self.in_dim = seed_feature_dim
+        self.num_view = num_view
+        self.num_angle = num_angle
+        self.num_depth = num_depth
         self.conv1 = nn.Conv1d(self.in_dim, self.in_dim, 1)
         # regression-based
         self.conv2 = nn.Conv1d(self.in_dim, self.num_depth * 2, 1)
@@ -270,6 +302,52 @@ class RotationScoringNet(nn.Module):
         return end_points, res_features
 
 
+class RotationGraspableNet(nn.Module):
+    def __init__(self, num_view, num_angle, num_depth, seed_feature_dim, is_training=True):
+        super().__init__()
+        self.num_view = num_view
+        self.num_angle = num_angle
+        self.num_depth = num_depth
+        self.in_dim = seed_feature_dim
+        self.is_training = is_training
+        self.conv1 = nn.Conv1d(self.in_dim, self.in_dim, 1)
+        self.conv2 = nn.Conv1d(self.in_dim, self.in_dim, 1)
+        self.conv3 = nn.Conv1d(self.in_dim, self.num_view * self.num_angle, 1)
+        self.bn1 = nn.BatchNorm1d(self.in_dim)
+        self.bn2 = nn.BatchNorm1d(self.in_dim)
+        
+    def forward(self, seed_features, end_points):
+        B, _, num_seed = seed_features.size()
+        
+        res_features = F.relu(self.bn1(self.conv1(seed_features)), inplace=True)
+        res_features = F.relu(self.bn2(self.conv2(res_features)), inplace=True)
+        rotation_scores = self.conv3(res_features)
+        rotation_scores = rotation_scores.transpose(1, 2).contiguous()  # (B, num_seed, num_view * num_angle)
+        
+        end_points['grasp_rot_graspness_pred'] = rotation_scores
+
+        if self.is_training:
+            # normalize view graspness score to 0~1
+            rot_score = rotation_scores.clone().detach()
+            rot_score = normalize_tensor(rot_score)
+            top_rot_inds = []
+            for i in range(B):
+                top_rot_inds_batch = torch.multinomial(rot_score[i], 1, replacement=False)
+                top_rot_inds.append(top_rot_inds_batch)
+            top_rot_inds = torch.stack(top_rot_inds, dim=0).squeeze(-1)  # B, num_seed
+        else:
+            _, top_rot_inds = torch.max(rotation_scores, dim=-1)  # (B, num_seed)
+            temp_grasp_rots = grasp_rot.clone().to(seed_features.device)
+            temp_grasp_rots = temp_grasp_rots.view(1, 1, self.num_view*self.num_angle, 3, 3)
+            temp_grasp_rots = temp_grasp_rots.expand(B, num_seed, -1, -1, -1).contiguous()
+            top_rot_inds_ = top_rot_inds.view(B, num_seed, 1, 1, 1).expand(-1, -1, -1, 3, 3)
+            grasp_top_rot = torch.gather(temp_grasp_rots, 2, top_rot_inds_).squeeze(2)
+            end_points['grasp_top_rot'] = grasp_top_rot
+
+        end_points['grasp_top_rot_inds'] = top_rot_inds
+        return end_points, res_features
+    
+    
 # add two features
 class AddFusion(nn.Module):
     def __init__(self, point_dim, img_dim):
@@ -402,13 +480,22 @@ class IGNet(nn.Module):
         # self.img_backbone = psp_models['resnet34'.lower()]()
         self.img_backbone = PSPNet(sizes=(1, 2, 3, 6), psp_size=512, 
                                    deep_features_size=img_feat_dim, backend='resnet34')
-        self.rot_head = RotationScoringNet(self.num_view, num_angle=self.num_angle,
-                                                num_depth=self.num_depth,
-                                                seed_feature_dim=self.seed_feature_dim + self.img_feature_dim, 
-                                                is_training=self.is_training)
-        self.depth_head = DepthNet(self.num_view, num_angle=self.num_angle, 
-                                   num_depth=self.num_depth,
-                                   seed_feature_dim=self.seed_feature_dim)
+        
+        # self.rot_head = RotationScoringNet(self.num_view, num_angle=self.num_angle,
+        #                                         num_depth=self.num_depth,
+        #                                         seed_feature_dim=self.seed_feature_dim + self.img_feature_dim, 
+        #                                         is_training=self.is_training)
+        # self.depth_head = DepthNet(self.num_view, num_angle=self.num_angle, 
+        #                            num_depth=self.num_depth,
+        #                            seed_feature_dim=self.seed_feature_dim)
+
+        self.rot_head = RotationGraspableNet(self.num_view, num_angle=self.num_angle,
+                                             num_depth=self.num_depth,
+                                             seed_feature_dim=self.seed_feature_dim + self.img_feature_dim, 
+                                             is_training=self.is_training)
+        self.depth_head = OperationNet(self.num_view, num_angle=self.num_angle, 
+                                       num_depth=self.num_depth,
+                                       seed_feature_dim=self.seed_feature_dim)
         if self.multi_scale_grouping:
             feat_dim = self.seed_feature_dim + self.img_feature_dim
             self.crop_scales = [0.25, 0.5, 0.75, 1.0]
