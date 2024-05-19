@@ -195,7 +195,7 @@ class OperationNet(nn.Module):
 
         self.conv1 = nn.Conv1d(self.in_dim, 128, 1)
         self.conv2 = nn.Conv1d(128, 128, 1)
-        self.conv3 = nn.Conv1d(128, 3 * num_angle, 1)
+        self.conv3 = nn.Conv1d(128, self.num_depth * 2, 1)
         self.bn1 = nn.BatchNorm1d(128)
         self.bn2 = nn.BatchNorm1d(128)
 
