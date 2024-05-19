@@ -57,6 +57,7 @@ parser.add_argument('--dump_dir', type=str, default='ignet_v0.8.0', help='Dump d
 parser.add_argument('--inst_pt_num', type=int, default=1024, help='Dump dir to save outputs')
 parser.add_argument('--ckpt_epoch', type=int, default=48, help='Checkpoint epoch name of trained model')
 parser.add_argument('--inst_denoise', action='store_true', help='Denoise instance points during training and testing [default: False]')
+parser.add_argument('--multi_scale_grouping', action='store_true', help='Multi-scale grouping [default: False]')
 parser.add_argument('--voxel_size', type=float, default=0.002, help='Voxel Size to quantize point cloud [default: 0.005]')
 parser.add_argument('--collision_voxel_size', type=float, default=0.01, help='Voxel Size to process point clouds before collision detection [default: 0.01]')
 parser.add_argument('--collision_thresh', type=float, default=0.01, help='Collision Threshold in collision detection [default: 0.01]')
@@ -169,7 +170,7 @@ try :
 except :
     raise FileNotFoundError
 
-net = IGNet(num_view=300, seed_feat_dim=cfgs.seed_feat_dim, img_feat_dim=cfgs.img_feat_dim, is_training=False)
+net = IGNet(num_view=300, seed_feat_dim=cfgs.seed_feat_dim, img_feat_dim=cfgs.img_feat_dim, is_training=False, multi_scale_grouping=cfgs.multi_scale_grouping)
 net.to(device)
 net.eval()
 checkpoint = torch.load(ckpt_name, map_location=device)
