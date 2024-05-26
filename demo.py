@@ -133,6 +133,7 @@ def get_resized_idxs(idxs, orig_shape, resize_shape):
 data_type = 'real' # syn
 restored_depth = False
 use_gt_mask = False
+multimodal_infer = True
 inst_denoise = cfgs.inst_denoise
 seg_root = cfgs.seg_root
 seg_model = cfgs.seg_model
@@ -155,6 +156,8 @@ if network_ver.startswith('v0.8'):
     from models.IGNet_v0_8 import IGNet, pred_decode
 elif network_ver.startswith('v0.7'):
     from models.IGNet_v0_7 import IGNet, pred_decode
+elif network_ver.startswith('v0.6'):
+    from models.IGNet_v0_6 import IGNet, pred_decode
 else:
     raise NotImplementedError
 # from models.GSNet_v0_4 import IGNet, pred_decode
@@ -300,24 +303,25 @@ def inference(scene_idx):
         inst_coors_tensor = torch.tensor(np.array(inst_coors_list), dtype=torch.float32, device=device)
         inst_feats_tensor = torch.tensor(np.array(inst_feats_list), dtype=torch.float32, device=device)
         
-        # coordinates_batch, features_batch = ME.utils.sparse_collate(inst_coors_list, inst_feats_list,
-        #                                                             dtype=torch.float32)
-        # coordinates_batch = coordinates_batch.to(device)
-        # features_batch = features_batch.to(device)
-        # coordinates_batch, features_batch, _, quantize2original = ME.utils.sparse_quantize(
-        #     coordinates_batch, features_batch, return_index=True, return_inverse=True, device=device)
+        if not multimodal_infer:
+            coordinates_batch, features_batch = ME.utils.sparse_collate(inst_coors_list, inst_feats_list,
+                                                                        dtype=torch.float32)
+            coordinates_batch, features_batch, _, quantize2original = ME.utils.sparse_quantize(
+                coordinates_batch, features_batch, return_index=True, return_inverse=True, device=device)
 
-        batch_data_label = {"point_clouds": inst_cloud_tensor,
-                            "cloud_colors": inst_colors_tensor,
-                            # "cloud_normals": inst_normals_tensor,
-                            "img": inst_imgs_tensor,
-                            "img_idxs": inst_img_idxs_tensor,
-                            "coors": inst_coors_tensor,
-                            "feats": inst_feats_tensor,
-                            # "coors": coordinates_batch,
-                            # "feats": features_batch,
-                            # "quantize2original": quantize2original,
-                            }
+            batch_data_label = {"point_clouds": inst_cloud_tensor,
+                                "cloud_colors": inst_colors_tensor,
+                                "coors": coordinates_batch,
+                                "feats": features_batch,
+                                "quantize2original": quantize2original}
+        else:
+            batch_data_label = {"point_clouds": inst_cloud_tensor,
+                                "cloud_colors": inst_colors_tensor,
+                                "img": inst_imgs_tensor,
+                                "img_idxs": inst_img_idxs_tensor,
+                                "coors": inst_coors_tensor,
+                                "feats": inst_feats_tensor,
+                                }
 
         with torch.no_grad(): 
             end_points = net(batch_data_label)
