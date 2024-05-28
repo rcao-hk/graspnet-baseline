@@ -1,5 +1,6 @@
 import os
 os.environ['CUDA_LAUNCH_BLOCKING'] = '1' 
+os.environ['CUDA_VISIBLE_DEVICES'] = '1'
 
 import resource
 # RuntimeError: received 0 items of ancdata. Issue: pytorch/pytorch#973
@@ -30,6 +31,7 @@ from graspnetAPI import GraspGroup
 from utils.collision_detector import ModelFreeCollisionDetector
 from utils.data_utils import CameraInfo, create_point_cloud_from_depth_image, get_workspace_mask, sample_points, points_denoise
 from torchvision import transforms
+from dataset.ignet_multi_dataset import load_grasp_labels
 
 import cv2
 cv2.setNumThreads(0)
@@ -55,7 +57,7 @@ parser.add_argument('--ckpt_root', default='/media/gpuadmin/rcao/result/ignet', 
 parser.add_argument('--network_ver', type=str, default='v0.8.2', help='Network version')
 parser.add_argument('--dump_dir', type=str, default='ignet_v0.8.2', help='Dump dir to save outputs')
 parser.add_argument('--inst_pt_num', type=int, default=1024, help='Dump dir to save outputs')
-parser.add_argument('--ckpt_epoch', type=int, default=48, help='Checkpoint epoch name of trained model')
+parser.add_argument('--ckpt_epoch', type=int, default=53, help='Checkpoint epoch name of trained model')
 parser.add_argument('--inst_denoise', action='store_true', help='Denoise instance points during training and testing [default: False]')
 parser.add_argument('--seg_root',type=str, default='/media/gpuadmin/rcao/dataset/graspnet_sample', help='Segmentation results root')
 parser.add_argument('--seg_model',type=str, default='uois', help='Segmentation results [default: uois]')
@@ -128,12 +130,36 @@ def get_resized_idxs(idxs, orig_shape, resize_shape):
     new_coords_x = np.clip((coords[1] * scale_x).astype(int), 0, resize_shape[1]-1)
     new_idxs = np.ravel_multi_index((new_coords_y, new_coords_x), resize_shape)
     return new_idxs
+
+
+def find_closest_pose_index(estimated_pose, poses):
+    """
+    根据估计的位置，找到最接近的物体索引。
+
+    参数:
+    estimated_pose (np.array): 形状为 (3,) 的数组，表示估计的物体位置。
+    poses (np.array): 形状为 (3, 4, n) 的数组，表示 n 个物体的位置和方向。
+
+    返回:
+    int: 最接近物体的索引。
+    """
+    # 提取每个物体的位置，假设位置是每个矩阵的最后一列
+    object_positions = poses[:, -1, :].T  # 取每个物体的位置，并转置为 (n, 3)
+
+    # 计算估计位置与每个物体位置的距离
+    distances = np.linalg.norm(object_positions - estimated_pose, axis=1)
+
+    # 找到最近的物体索引
+    closest_index = np.argmin(distances)
     
-    
+    return closest_index
+
+
 data_type = 'real' # syn
 restored_depth = False
 use_gt_mask = False
 multimodal_infer = True
+load_gt_grasps = False
 inst_denoise = cfgs.inst_denoise
 seg_root = cfgs.seg_root
 seg_model = cfgs.seg_model
@@ -153,11 +179,11 @@ torch.cuda.set_device(device)
 anno_list = [0, 128, 255]
 
 if network_ver.startswith('v0.8'):
-    from models.IGNet_v0_8 import IGNet, pred_decode
+    from models.IGNet_v0_8 import IGNet, pred_decode, process_grasp_labels
 elif network_ver.startswith('v0.7'):
-    from models.IGNet_v0_7 import IGNet, pred_decode
+    from models.IGNet_v0_7 import IGNet, pred_decode, process_grasp_labels
 elif network_ver.startswith('v0.6'):
-    from models.IGNet_v0_6 import IGNet, pred_decode
+    from models.IGNet_v0_6 import IGNet, pred_decode, process_grasp_labels
 else:
     raise NotImplementedError
 # from models.GSNet_v0_4 import IGNet, pred_decode
@@ -182,6 +208,7 @@ net.to(device)
 net.eval()
 checkpoint = torch.load(ckpt_name, map_location=device)
 
+valid_obj_idxs, grasp_labels = load_grasp_labels(cfgs.dataset_root)
 try:
     net.load_state_dict(checkpoint['model_state_dict'], strict=True)
 except:
@@ -225,6 +252,7 @@ def inference(scene_idx):
         meta = scio.loadmat(meta_path)
 
         obj_idxs = meta['cls_indexes'].flatten().astype(np.int32)
+        poses = meta['poses']         
         intrinsics = meta['intrinsic_matrix']
         factor_depth = meta['factor_depth']
         camera_info = CameraInfo(img_length, img_width, intrinsics[0][0], intrinsics[1][1], intrinsics[0][2], intrinsics[1][2], factor_depth)
@@ -258,6 +286,10 @@ def inference(scene_idx):
         inst_feats_list = []
         inst_imgs_list  = []
         inst_img_idxs_list = []
+        inst_pose_list = []
+        inst_grasp_point_list = []
+        inst_grasp_score_list = []
+        inst_grasp_offset_list = []
         seg_idxs = np.unique(net_seg)
         for obj_idx in seg_idxs:
             if obj_idx == 0:
@@ -286,6 +318,19 @@ def inference(scene_idx):
             orig_width, orig_length, _ = img.shape
             resized_idxs = get_resized_idxs(inst_mask_choose[idxs], (orig_width, orig_length), resize_shape)
             img = img_transforms(img)
+            
+            gt_obj_idx = find_closest_pose_index(np.mean(inst_cloud, axis=0), poses)
+            gt_obj_pose = poses[:, :, gt_obj_idx]
+            points, offsets, scores = grasp_labels[obj_idxs[gt_obj_idx]]
+            grasp_idxs = np.sort(np.random.choice(len(points), 350, replace=False))
+            grasp_points = points[grasp_idxs]
+            grasp_offsets = offsets[grasp_idxs]
+            scores = scores[grasp_idxs].copy()
+            grasp_scores = scores
+            inst_pose_list.append(gt_obj_pose)
+            inst_grasp_point_list.append(grasp_points)
+            inst_grasp_score_list.append(grasp_scores)
+            inst_grasp_offset_list.append(grasp_offsets)
         
             inst_cloud_list.append(inst_cloud[idxs].astype(np.float32))
             inst_color_list.append(inst_color[idxs].astype(np.float32))
@@ -302,6 +347,11 @@ def inference(scene_idx):
         
         inst_coors_tensor = torch.tensor(np.array(inst_coors_list), dtype=torch.float32, device=device)
         inst_feats_tensor = torch.tensor(np.array(inst_feats_list), dtype=torch.float32, device=device)
+        
+        inst_pose_tensor = torch.tensor(np.array(inst_pose_list), dtype=torch.float32, device=device)
+        inst_grasp_point_tensor = torch.tensor(np.array(inst_grasp_point_list), dtype=torch.float32, device=device)
+        inst_grasp_score_tensor = torch.tensor(np.array(inst_grasp_score_list), dtype=torch.float32, device=device)
+        inst_grasp_offset_tensor = torch.tensor(np.array(inst_grasp_offset_list), dtype=torch.float32, device=device)
         
         if not multimodal_infer:
             coordinates_batch, features_batch = ME.utils.sparse_collate(inst_coors_list, inst_feats_list,
@@ -321,8 +371,14 @@ def inference(scene_idx):
                                 "img_idxs": inst_img_idxs_tensor,
                                 "coors": inst_coors_tensor,
                                 "feats": inst_feats_tensor,
+                                "point_clouds": inst_cloud_tensor,
+                                "object_pose": inst_pose_tensor,
+                                "grasp_points": inst_grasp_point_tensor,
+                                "grasp_labels": inst_grasp_score_tensor,
+                                "grasp_offsets": inst_grasp_offset_tensor
                                 }
 
+        batch_data_label = process_grasp_labels(batch_data_label)
         with torch.no_grad(): 
             end_points = net(batch_data_label)
             grasp_preds = pred_decode(end_points, normalize=False)
