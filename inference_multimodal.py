@@ -132,10 +132,14 @@ def get_resized_idxs(idxs, orig_shape, resize_shape):
     
 data_type = 'real' # syn
 restored_depth = False
-use_gt_mask = False
 inst_denoise = cfgs.inst_denoise
 seg_root = cfgs.seg_root
 seg_model = cfgs.seg_model
+if seg_model == 'gt':
+    use_gt_mask = True
+else:
+    use_gt_mask = False
+    
 num_pt = cfgs.inst_pt_num
 denoise_pre_sample_num = int(num_pt * 1.5)
 
@@ -216,11 +220,13 @@ def inference(scene_idx):
         color = np.array(Image.open(rgb_path), dtype=np.float32) / 255.0
         depth = np.array(Image.open(depth_path))
         seg = np.array(Image.open(mask_path))
-        net_seg = np.array(Image.open(seg_mask_path))
         # normal = np.load(normal_path)['normals']
 
         if use_gt_mask:
             net_seg = seg
+        else:
+            net_seg = np.array(Image.open(seg_mask_path))
+            
         meta = scio.loadmat(meta_path)
 
         obj_idxs = meta['cls_indexes'].flatten().astype(np.int32)
