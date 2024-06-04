@@ -40,10 +40,6 @@ class GraspNetDataset(Dataset):
             self.sceneIds = list( range(100) )
         elif split == 'test':
             self.sceneIds = list( range(100,190) )
-        # if split == 'train':
-        #     self.sceneIds = list( range(1) )
-        # elif split == 'test':
-        #     self.sceneIds = list( range(100,101) )
         elif split == 'test_seen':
             self.sceneIds = list( range(100,130) )
         elif split == 'test_similar':
