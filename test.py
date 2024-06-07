@@ -1,81 +1,73 @@
-""" Testing for GraspNet baseline model. """
-
 import os
 import sys
 import numpy as np
 import argparse
 import time
-
 import torch
 from torch.utils.data import DataLoader
-from graspnetAPI import GraspGroup, GraspNetEval
+from graspnetAPI.graspnet_eval import GraspGroup, GraspNetEval
 
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.append(os.path.join(ROOT_DIR, 'pointnet2'))
+sys.path.append(os.path.join(ROOT_DIR, 'utils'))
 sys.path.append(os.path.join(ROOT_DIR, 'models'))
 sys.path.append(os.path.join(ROOT_DIR, 'dataset'))
-sys.path.append(os.path.join(ROOT_DIR, 'utils'))
-sys.path.append(os.path.join(ROOT_DIR, 'pointnet2'))
 
-from GSNet import GraspNet, pred_decode
-from graspnet_dataset import GraspNetDataset, collate_fn, minkowski_collate_fn
-from collision_detector import ModelFreeCollisionDetector
+from utils.collision_detector import ModelFreeCollisionDetector
+from models.GSNet import GraspNet, pred_decode
+from dataset.graspnet_dataset import GraspNetDataset, load_grasp_labels, minkowski_collate_fn
+
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--dataset_root', default='/data/rcao/dataset/graspnet', help='Dataset root')
-parser.add_argument('--checkpoint_path', default='log/gsnet_v0.1.1/checkpoint.tar', help='Model checkpoint path')
-parser.add_argument('--dump_dir', default='experiment/gsnet_v0.1.1', help='Dump dir to save outputs')
-parser.add_argument('--camera', default='realsense', help='Camera split [realsense/kinect]')
-parser.add_argument('--split', default='test_seen', help='Test set split [test_seen/test_similar/test_novel]')
+parser.add_argument('--dataset_root', default=None, required=True)
+parser.add_argument('--split', default='test_seen', help='Dataset split [default: test_seen]')
+parser.add_argument('--checkpoint_path', help='Model checkpoint path', default=None, required=True)
+parser.add_argument('--dump_dir', help='Dump dir to save outputs', default=None, required=True)
 parser.add_argument('--seed_feat_dim', default=512, type=int, help='Point wise feature dim')
-parser.add_argument('--num_point', type=int, default=15000, help='Point Number [default: 20000]')
-parser.add_argument('--num_view', type=int, default=300, help='View Number [default: 300]')
-parser.add_argument('--batch_size', type=int, default=8, help='Batch Size during inference [default: 1]')
-parser.add_argument('--collision_thresh', type=float, default=0.01, help='Collision Threshold in collision detection [default: 0.01]')
-parser.add_argument('--voxel_size', type=float, default=0.005, help='Voxel Size to process point clouds before collision detection [default: 0.01]')
-parser.add_argument('--num_workers', type=int, default=20, help='Number of workers used in evaluation [default: 30]')
+parser.add_argument('--camera', default='realsense', help='Camera split [realsense/kinect]')
+parser.add_argument('--num_point', type=int, default=15000, help='Point Number [default: 15000]')
+parser.add_argument('--batch_size', type=int, default=1, help='Batch Size during inference [default: 1]')
+parser.add_argument('--voxel_size', type=float, default=0.005, help='Voxel Size for sparse convolution')
+parser.add_argument('--collision_thresh', type=float, default=0.01,
+                    help='Collision Threshold in collision detection [default: 0.01]')
+parser.add_argument('--voxel_size_cd', type=float, default=0.01, help='Voxel Size for collision detection')
+parser.add_argument('--infer', action='store_true', default=False)
+parser.add_argument('--eval', action='store_true', default=False)
 cfgs = parser.parse_args()
-
+print(cfgs)
 # ------------------------------------------------------------------------- GLOBAL CONFIG BEG
-if not os.path.exists(cfgs.dump_dir): os.mkdir(cfgs.dump_dir)
+if not os.path.exists(cfgs.dump_dir):
+    os.mkdir(cfgs.dump_dir)
+
 
 # Init datasets and dataloaders 
 def my_worker_init_fn(worker_id):
     np.random.seed(np.random.get_state()[1][0] + worker_id)
     pass
 
-# Create Dataset and Dataloader
-TEST_DATASET = GraspNetDataset(cfgs.dataset_root, valid_obj_idxs=None, grasp_labels=None, split=cfgs.split, 
-                               camera=cfgs.camera, num_points=cfgs.num_point, remove_outlier=True, augment=False, 
-                               load_label=False)
-
-print(len(TEST_DATASET))
-SCENE_LIST = TEST_DATASET.scene_list()
-TEST_DATALOADER = DataLoader(TEST_DATASET, batch_size=cfgs.batch_size, shuffle=False,
-    num_workers=4, worker_init_fn=my_worker_init_fn, collate_fn=minkowski_collate_fn)
-print(len(TEST_DATALOADER))
-# Init the model
-# net = GraspNet(input_feature_dim=0, num_view=cfgs.num_view, num_angle=12, num_depth=4,
-#                      cylinder_radius=0.05, hmin=-0.02, hmax_list=[0.01,0.02,0.03,0.04], is_training=False)
-net = GraspNet(seed_feat_dim=cfgs.seed_feat_dim, is_training=False)
-device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-net.to(device)
-
-# Load checkpoint
-checkpoint = torch.load(cfgs.checkpoint_path, map_location=device)
-net.load_state_dict(checkpoint['model_state_dict'])
-start_epoch = checkpoint['epoch']
-print("-> loaded checkpoint %s (epoch: %d)"%(cfgs.checkpoint_path, start_epoch))
-
-
-# ------------------------------------------------------------------------- GLOBAL CONFIG END
 
 def inference():
+    valid_obj_idxs, grasp_labels = load_grasp_labels(cfgs.dataset_root)
+    test_dataset = GraspNetDataset(cfgs.dataset_root, valid_obj_idxs, grasp_labels, split=cfgs.split, camera=cfgs.camera, num_points=cfgs.num_point,voxel_size=cfgs.voxel_size, remove_outlier=True, augment=False, load_label=False)
+    print('Test dataset length: ', len(test_dataset))
+    scene_list = test_dataset.scene_list()
+    test_dataloader = DataLoader(test_dataset, batch_size=cfgs.batch_size, shuffle=False,
+                                 num_workers=0, worker_init_fn=my_worker_init_fn, collate_fn=minkowski_collate_fn)
+    print('Test dataloader length: ', len(test_dataloader))
+    # Init the model
+    net = GraspNet(seed_feat_dim=cfgs.seed_feat_dim, is_training=False)
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    net.to(device)
+    # Load checkpoint
+    checkpoint = torch.load(cfgs.checkpoint_path)
+    net.load_state_dict(checkpoint['model_state_dict'])
+    start_epoch = checkpoint['epoch']
+    print("-> loaded checkpoint %s (epoch: %d)" % (cfgs.checkpoint_path, start_epoch))
+
     batch_interval = 100
-    stat_dict = {} # collect statistics
-    # set model to eval mode (for bn and dp)
     net.eval()
     tic = time.time()
-    for batch_idx, batch_data in enumerate(TEST_DATALOADER):
+    for batch_idx, batch_data in enumerate(test_dataloader):
         for key in batch_data:
             if 'list' in key:
                 for i in range(len(batch_data[key])):
@@ -83,7 +75,7 @@ def inference():
                         batch_data[key][i][j] = batch_data[key][i][j].to(device)
             else:
                 batch_data[key] = batch_data[key].to(device)
-        
+
         # Forward pass
         with torch.no_grad():
             end_points = net(batch_data)
@@ -93,38 +85,37 @@ def inference():
         for i in range(cfgs.batch_size):
             data_idx = batch_idx * cfgs.batch_size + i
             preds = grasp_preds[i].detach().cpu().numpy()
-            gg = GraspGroup(preds)
 
+            gg = GraspGroup(preds)
             # collision detection
             if cfgs.collision_thresh > 0:
-                cloud, _ = TEST_DATASET.get_data(data_idx, return_raw_cloud=True)
-                mfcdetector = ModelFreeCollisionDetector(cloud, voxel_size=cfgs.voxel_size)
+                cloud, _ = test_dataset.get_data(data_idx, return_raw_cloud=True)
+                mfcdetector = ModelFreeCollisionDetector(cloud, voxel_size=cfgs.voxel_size_cd)
                 collision_mask = mfcdetector.detect(gg, approach_dist=0.05, collision_thresh=cfgs.collision_thresh)
                 gg = gg[~collision_mask]
 
             # save grasps
-            save_dir = os.path.join(cfgs.dump_dir, SCENE_LIST[data_idx], cfgs.camera)
-            save_path = os.path.join(save_dir, str(data_idx%256).zfill(4)+'.npy')
+            save_dir = os.path.join(cfgs.dump_dir, scene_list[data_idx], cfgs.camera)
+            save_path = os.path.join(save_dir, str(data_idx % 256).zfill(4) + '.npy')
             if not os.path.exists(save_dir):
                 os.makedirs(save_dir)
             gg.save_npy(save_path)
 
-        if batch_idx % batch_interval == 0:
+        if (batch_idx + 1) % batch_interval == 0:
             toc = time.time()
-            print('Eval batch: %d, time: %fs'%(batch_idx, (toc-tic)/batch_interval))
+            print('Eval batch: %d, time: %fs' % (batch_idx + 1, (toc - tic) / batch_interval))
             tic = time.time()
 
-def evaluate():
+
+def evaluate(dump_dir):
     ge = GraspNetEval(root=cfgs.dataset_root, camera=cfgs.camera, split=cfgs.split)
-    if cfgs.split == 'test_seen':
-        res, ap = ge.eval_seen(cfgs.dump_dir, proc=cfgs.num_workers)
-    elif cfgs.split == 'test_similar':
-        res, ap = ge.eval_similar(cfgs.dump_dir, proc=cfgs.num_workers)
-    else:
-        res, ap = ge.eval_novel(cfgs.dump_dir, proc=cfgs.num_workers)
+    res, ap = ge.eval_seen(dump_folder=dump_dir, proc=6)
     save_dir = os.path.join(cfgs.dump_dir, 'ap_{}_{}.npy'.format(cfgs.split, cfgs.camera))
     np.save(save_dir, res)
 
-if __name__=='__main__':
-    inference()
-    evaluate()
+
+if __name__ == '__main__':
+    if cfgs.infer:
+        inference()
+    if cfgs.eval:
+        evaluate(cfgs.dump_dir)

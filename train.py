@@ -57,6 +57,7 @@ parser.add_argument('--max_epoch', type=int, default=18, help='Epoch to run [def
 parser.add_argument('--batch_size', type=int, default=8, help='Batch Size during training [default: 2]')
 parser.add_argument('--learning_rate', type=float, default=0.002, help='Initial learning rate [default: 0.001]')
 parser.add_argument('--weight_decay', type=float, default=0, help='Optimization L2 weight decay [default: 0]')
+parser.add_argument('--voxel_size', type=float, default=0.005, help='Voxel Size for sparse convolution')
 # parser.add_argument('--bn_decay_step', type=int, default=2, help='Period of BN decay (in epochs) [default: 2]')
 # parser.add_argument('--bn_decay_rate', type=float, default=0.5, help='Decay rate for BN decay [default: 0.5]')
 parser.add_argument('--lr_decay_steps', default='8,12,16', help='When to decay the learning rate (in epochs) [default: 8,12,16]')
@@ -92,8 +93,8 @@ torch.cuda.set_device(device)
 
 # Create Dataset and Dataloader
 valid_obj_idxs, grasp_labels = load_grasp_labels(cfgs.dataset_root)
-TRAIN_DATASET = GraspNetDataset(cfgs.dataset_root, valid_obj_idxs, grasp_labels, camera=cfgs.camera, split='train', num_points=cfgs.num_point, remove_outlier=True, augment=True)
-TEST_DATASET = GraspNetDataset(cfgs.dataset_root, valid_obj_idxs, grasp_labels, camera=cfgs.camera, split='test_seen', num_points=cfgs.num_point, remove_outlier=True, augment=False)
+TRAIN_DATASET = GraspNetDataset(cfgs.dataset_root, valid_obj_idxs, grasp_labels, camera=cfgs.camera, split='train', num_points=cfgs.num_point, voxel_size=cfgs.voxel_size, remove_outlier=True, augment=True)
+TEST_DATASET = GraspNetDataset(cfgs.dataset_root, valid_obj_idxs, grasp_labels, camera=cfgs.camera, split='test_seen', num_points=cfgs.num_point, voxel_size=cfgs.voxel_size, remove_outlier=True, augment=False)
 
 print(len(TRAIN_DATASET), len(TEST_DATASET))
 # TRAIN_DATALOADER = DataLoader(TRAIN_DATASET, batch_size=cfgs.batch_size, shuffle=True,
@@ -184,7 +185,7 @@ def train(start_epoch):
 
         save_dict = {'epoch': epoch + 1, 'optimizer_state_dict': optimizer.state_dict(),
                      'model_state_dict': net.state_dict()}
-        torch.save(save_dict, os.path.join(cfgs.log_dir, cfgs.model_name + '_epoch' + str(epoch + 1).zfill(2) + '.tar'))
+        torch.save(save_dict, os.path.join(cfgs.log_dir, 'epoch' + str(epoch + 1).zfill(2) + '.tar'))
 
 
 if __name__ == '__main__':

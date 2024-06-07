@@ -15,13 +15,12 @@ from tqdm import tqdm
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(BASE_DIR)
-sys.path.append(os.path.join(ROOT_DIR, 'utils'))
-from data_utils import CameraInfo, transform_point_cloud, create_point_cloud_from_depth_image,\
+from utils.data_utils import CameraInfo, transform_point_cloud, create_point_cloud_from_depth_image,\
                             get_workspace_mask, remove_invisible_grasp_points
 
 class GraspNetDataset(Dataset):
     def __init__(self, root, valid_obj_idxs, grasp_labels, camera='kinect', split='train', num_points=20000,
-                 remove_outlier=False, remove_invisible=True, augment=False, load_label=True):
+                 remove_outlier=False, voxel_size=0.005, remove_invisible=True, augment=False, load_label=True):
         assert(num_points<=50000)
         self.root = root
         self.split = split
@@ -34,7 +33,7 @@ class GraspNetDataset(Dataset):
         self.augment = augment
         self.load_label = load_label    
         self.collision_labels = {}
-        self.voxel_size = 0.005
+        self.voxel_size = voxel_size
 
         if split == 'train':
             self.sceneIds = list( range(100) )
@@ -127,7 +126,6 @@ class GraspNetDataset(Dataset):
 
         # get valid points
         depth_mask = (depth > 0)
-        seg_mask = (seg > 0)
         if self.remove_outlier:
             camera_poses = np.load(os.path.join(self.root, 'scenes', scene, self.camera, 'camera_poses.npy'))
             align_mat = np.load(os.path.join(self.root, 'scenes', scene, self.camera, 'cam0_wrt_table.npy'))
@@ -138,7 +136,6 @@ class GraspNetDataset(Dataset):
             mask = depth_mask
         cloud_masked = cloud[mask]
         color_masked = color[mask]
-        seg_masked = seg[mask]
         if return_raw_cloud:
             return cloud_masked, color_masked
 
