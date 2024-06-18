@@ -158,6 +158,8 @@ if network_ver.startswith('v0.8'):
     from models.IGNet_v0_8 import IGNet, pred_decode
 elif network_ver.startswith('v0.7'):
     from models.IGNet_v0_7 import IGNet, pred_decode
+elif network_ver.startswith('v0.6'):
+    from models.IGNet_v0_6 import IGNet, pred_decode
 else:
     raise NotImplementedError
 # from models.GSNet_v0_4 import IGNet, pred_decode
@@ -177,7 +179,10 @@ try :
 except :
     raise FileNotFoundError
 
-net = IGNet(num_view=300, seed_feat_dim=cfgs.seed_feat_dim, img_feat_dim=cfgs.img_feat_dim, is_training=False, multi_scale_grouping=cfgs.multi_scale_grouping)
+if network_ver.startswith('v0.6'):
+    net = IGNet(num_view=300, seed_feat_dim=cfgs.seed_feat_dim, is_training=False)
+else:
+    net = IGNet(num_view=300, seed_feat_dim=cfgs.seed_feat_dim, img_feat_dim=cfgs.img_feat_dim, is_training=False, multi_scale_grouping=cfgs.multi_scale_grouping)
 net.to(device)
 net.eval()
 checkpoint = torch.load(ckpt_name, map_location=device)
@@ -188,7 +193,11 @@ except:
     net.load_state_dict(checkpoint, strict=True)
 eps = 1e-8
 
+start = torch.cuda.Event(enable_timing=True)
+end = torch.cuda.Event(enable_timing=True)
+
 def inference(scene_idx):
+    elapsed_time_list = []
     for anno_idx in range(256):
         if data_type == 'real':
             rgb_path = os.path.join(dataset_root,
@@ -335,12 +344,19 @@ def inference(scene_idx):
             
         # torch.cuda.empty_cache()
         # collision detection
+        # 记录时间并执行前向传播
+        start.record()
         if cfgs.collision_thresh > 0:
             # cloud, _ = TEST_DATASET.get_data(data_idx, return_raw_cloud=True)
             mfcdetector = ModelFreeCollisionDetector(cloud.reshape(-1, 3), voxel_size=cfgs.collision_voxel_size)
             collision_mask = mfcdetector.detect(gg, approach_dist=0.05, collision_thresh=cfgs.collision_thresh)
             gg = gg[~collision_mask]
 
+        end.record()
+        torch.cuda.synchronize()
+        elapsed_time = start.elapsed_time(end)
+        print('Inference Time:', elapsed_time)
+        elapsed_time_list.append(elapsed_time)
         # downsampled_scene = scene.voxel_down_sample(voxel_size=0.005)
         # gg = gg.sort_by_score()
         # gg_vis = gg.random_sample(100)
@@ -354,7 +370,9 @@ def inference(scene_idx):
         save_path = os.path.join(save_dir, '%04d'%anno_idx+'.npy')
         gg.save_npy(save_path)
         print('Saving {}, {}'.format(scene_idx, anno_idx))
-        
+    
+    print(f"Mean Inference Time：{np.mean(elapsed_time_list[1:]):.3f} ms")
+    
     # res = GraspNetEval.eval_scene(scene_id=scene_idx, dump_folder=dump_dir)
     # return res
 

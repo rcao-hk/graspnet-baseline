@@ -439,11 +439,20 @@ class IGNet(nn.Module):
         B, point_num, _ = seed_xyz.shape  # batch _size
 
         # point-wise features
-        coordinates_batch = end_points['coors']
-        features_batch = end_points['feats']
+        coordinates_batch, features_batch = ME.utils.sparse_collate(coords=[c for c in end_points['coors']], 
+                                                                    feats=[f for f in end_points['feats']], 
+                                                                    dtype=torch.float32)
+        coordinates_batch, features_batch, _, quantize2original = ME.utils.sparse_quantize(
+            coordinates_batch, features_batch, return_index=True, return_inverse=True, device=seed_xyz.device)
         mink_input = ME.SparseTensor(features_batch, coordinates=coordinates_batch)
         seed_features = self.backbone(mink_input).F
-        seed_features = seed_features[end_points['quantize2original']].view(B, point_num, -1).transpose(1, 2)
+        seed_features = seed_features[quantize2original].view(B, point_num, -1).transpose(1, 2)
+        
+        # coordinates_batch = end_points['coors']
+        # features_batch = end_points['feats']
+        # mink_input = ME.SparseTensor(features_batch, coordinates=coordinates_batch)
+        # seed_features = self.backbone(mink_input).F
+        # seed_features = seed_features[end_points['quantize2original']].view(B, point_num, -1).transpose(1, 2)
 
         end_points['seed_features'] = seed_features  # (B, seed_feature_dim, num_seed)
         end_points, rot_features = self.rot_head(seed_features, end_points)
