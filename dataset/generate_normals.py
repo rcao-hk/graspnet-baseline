@@ -32,21 +32,22 @@ def generate_scene(scene_id, cfgs):
         cloud = create_point_cloud_from_depth_image(depth, camera, organized=True)
 
         # remove outlier and get objectness label
-        depth_mask = (depth > 0)
-        camera_poses = np.load(os.path.join(dataset_root, 'scenes', 'scene_' + str(scene_id).zfill(4),
-                                            camera_type, 'camera_poses.npy'))
-        camera_pose = camera_poses[ann_id]
-        align_mat = np.load(os.path.join(dataset_root, 'scenes', 'scene_' + str(scene_id).zfill(4),
-                                            camera_type, 'cam0_wrt_table.npy'))
-        trans = np.dot(align_mat, camera_pose)
-        workspace_mask = get_workspace_mask(cloud, seg, trans=trans, organized=True, outlier=0.02)
-        mask = (depth_mask & workspace_mask)
+        # depth_mask = (depth > 0)
+        # camera_poses = np.load(os.path.join(dataset_root, 'scenes', 'scene_' + str(scene_id).zfill(4),
+        #                                     camera_type, 'camera_poses.npy'))
+        # camera_pose = camera_poses[ann_id]
+        # align_mat = np.load(os.path.join(dataset_root, 'scenes', 'scene_' + str(scene_id).zfill(4),
+        #                                     camera_type, 'cam0_wrt_table.npy'))
+        # trans = np.dot(align_mat, camera_pose)
+        # workspace_mask = get_workspace_mask(cloud, seg, trans=trans, organized=True, outlier=0.02)
+        # mask = (depth_mask & workspace_mask)
+        mask = (depth > 0)
 
         cloud_masked = cloud[mask]
 
         scene = o3d.geometry.PointCloud()
         scene.points = o3d.utility.Vector3dVector(cloud_masked.reshape(-1, 3))
-        scene.estimate_normals(o3d.geometry.KDTreeSearchParamRadius(0.015), fast_normal_computation=True)
+        scene.estimate_normals(o3d.geometry.KDTreeSearchParamRadius(0.01), fast_normal_computation=True)
         scene.orient_normals_to_align_with_direction(np.array([0., 0., -1.]))
         scene.normalize_normals()
         normal_masked = np.asarray(scene.normals).astype(np.float16)
@@ -70,8 +71,8 @@ def parallel_generate(scene_ids, cfgs, proc = 2):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dataset_root', default='/data/rcao/dataset/graspnet')
-    parser.add_argument('--camera_type', default='kinect', help='Camera split [realsense/kinect]')
+    parser.add_argument('--dataset_root', default='/media/gpuadmin/rcao/dataset/graspnet')
+    parser.add_argument('--camera_type', default='realsense', help='Camera split [realsense/kinect]')
     cfgs = parser.parse_args()
     
     parallel_generate(list(range(190)), cfgs=cfgs, proc = 10)
