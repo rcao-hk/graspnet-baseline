@@ -27,7 +27,7 @@ import MinkowskiEngine as ME
 
 from graspnetAPI import GraspGroup
 
-from utils.collision_detector import ModelFreeCollisionDetector
+from utils.collision_detector import ModelFreeCollisionDetector, ModelFreeCollisionDetectorTorch
 from utils.data_utils import CameraInfo, create_point_cloud_from_depth_image, get_workspace_mask, sample_points, points_denoise
 from torchvision import transforms
 
@@ -57,6 +57,8 @@ parser.add_argument('--dump_dir', type=str, default='ignet_v0.8.0', help='Dump d
 parser.add_argument('--inst_pt_num', type=int, default=1024, help='Dump dir to save outputs')
 parser.add_argument('--ckpt_epoch', type=int, default=48, help='Checkpoint epoch name of trained model')
 parser.add_argument('--inst_denoise', action='store_true', help='Denoise instance points during training and testing [default: False]')
+parser.add_argument('--restored_depth', action='store_true', help='Flag to use restored depth [default: False]')
+parser.add_argument('--depth_root',type=str, default='/media/gpuadmin/rcao/result/depth/v0.4', help='Restored depth path')
 parser.add_argument('--seg_root',type=str, default='/media/gpuadmin/rcao/dataset/graspnet', help='Segmentation results [default: uois]')
 parser.add_argument('--seg_model',type=str, default='uois', help='Segmentation results [default: uois]')
 parser.add_argument('--multi_scale_grouping', action='store_true', help='Multi-scale grouping [default: False]')
@@ -131,7 +133,8 @@ def get_resized_idxs(idxs, orig_shape, resize_shape):
     
     
 data_type = 'real' # syn
-restored_depth = False
+restored_depth = cfgs.restored_depth
+restored_depth_root = cfgs.depth_root
 inst_denoise = cfgs.inst_denoise
 seg_root = cfgs.seg_root
 seg_model = cfgs.seg_model
@@ -197,14 +200,13 @@ start = torch.cuda.Event(enable_timing=True)
 end = torch.cuda.Event(enable_timing=True)
 
 def inference(scene_idx):
-    elapsed_time_list = []
+    # elapsed_time_list = []
     for anno_idx in range(256):
         if data_type == 'real':
             rgb_path = os.path.join(dataset_root,
                                     'scenes/scene_{:04d}/{}/rgb/{:04d}.png'.format(scene_idx, camera, anno_idx))
             if restored_depth:
-                depth_path = os.path.join(dataset_root,
-                                          'restored_depth/scene_{:04d}/{}/{:04d}.png'.format(scene_idx, camera, anno_idx))
+                depth_path = os.path.join(restored_depth_root, '{}/scene_{:04d}/{:04d}.png'.format(camera, scene_idx, anno_idx))
             else:
                 depth_path = os.path.join(dataset_root,
                                           'scenes/scene_{:04d}/{}/depth/{:04d}.png'.format(scene_idx, camera, anno_idx))   
@@ -345,18 +347,23 @@ def inference(scene_idx):
         # torch.cuda.empty_cache()
         # collision detection
         # 记录时间并执行前向传播
-        start.record()
+        # start.record()
+        
         if cfgs.collision_thresh > 0:
             # cloud, _ = TEST_DATASET.get_data(data_idx, return_raw_cloud=True)
-            mfcdetector = ModelFreeCollisionDetector(cloud.reshape(-1, 3), voxel_size=cfgs.collision_voxel_size)
+            # mfcdetector = ModelFreeCollisionDetector(cloud.reshape(-1, 3), voxel_size=cfgs.collision_voxel_size)
+            # collision_mask = mfcdetector.detect(gg, approach_dist=0.05, collision_thresh=cfgs.collision_thresh)
+            
+            mfcdetector = ModelFreeCollisionDetectorTorch(cloud.reshape(-1, 3), voxel_size=cfgs.collision_voxel_size)
             collision_mask = mfcdetector.detect(gg, approach_dist=0.05, collision_thresh=cfgs.collision_thresh)
+            collision_mask = collision_mask.detach().cpu().numpy()
             gg = gg[~collision_mask]
 
-        end.record()
-        torch.cuda.synchronize()
-        elapsed_time = start.elapsed_time(end)
-        print('Inference Time:', elapsed_time)
-        elapsed_time_list.append(elapsed_time)
+        # end.record()
+        # torch.cuda.synchronize()
+        # elapsed_time = start.elapsed_time(end)
+        # print('Inference Time:', elapsed_time)
+        # elapsed_time_list.append(elapsed_time)
         # downsampled_scene = scene.voxel_down_sample(voxel_size=0.005)
         # gg = gg.sort_by_score()
         # gg_vis = gg.random_sample(100)
@@ -371,10 +378,7 @@ def inference(scene_idx):
         gg.save_npy(save_path)
         print('Saving {}, {}'.format(scene_idx, anno_idx))
     
-    print(f"Mean Inference Time：{np.mean(elapsed_time_list[1:]):.3f} ms")
-    
-    # res = GraspNetEval.eval_scene(scene_id=scene_idx, dump_folder=dump_dir)
-    # return res
+    # print(f"Mean Inference Time：{np.mean(elapsed_time_list[1:]):.3f} ms")
 
 
 scene_list = []
