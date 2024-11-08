@@ -432,6 +432,10 @@ class IGNet(nn.Module):
             trunc_normal_(m.weight, std=.02)
             if m.bias is not None:
                 nn.init.constant_(m.bias, 0)
+        elif isinstance(m, nn.Conv2d):
+            nn.init.xavier_normal_(m.weight.data)
+            if m.bias is not None:
+                nn.init.normal_(m.bias.data)
                 
     def forward(self, end_points):
         # use all sampled point cloud, B*Ns*3

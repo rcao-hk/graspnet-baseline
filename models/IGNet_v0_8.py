@@ -405,12 +405,50 @@ class GatedFusion(nn.Module):
         return fused_feat
 
 
-class CrossAttentionConcat(nn.Module):
-    def __init__(self, point_dim, img_dim, dropout, num_heads, normalize=False):
-        super(CrossAttentionConcat, self).__init__()
-        self.point_dim = point_dim
+# class CrossAttentionConcat(nn.Module):
+#     def __init__(self, point_dim, img_dim, dropout, num_heads, normalize=False):
+#         super(CrossAttentionConcat, self).__init__()
+#         self.point_dim = point_dim
+#         self.img_dim = img_dim
+#         self.num_heads = num_heads
+#         self.normalize = normalize
+#         self.dropout = dropout
+        
+#         if self.normalize:
+#             self.point_norm = nn.LayerNorm(self.point_dim)
+#             self.img_norm = nn.LayerNorm(self.img_dim)
+
+#         # 多头注意力层
+#         self.p2m_attn = nn.MultiheadAttention(embed_dim=self.point_dim, num_heads=self.num_heads, 
+#                                               dropout=self.dropout, kdim=self.img_dim, vdim=self.img_dim)
+#         self.m2p_attn = nn.MultiheadAttention(embed_dim=self.img_dim, num_heads=self.num_heads, 
+#                                               dropout=self.dropout, kdim=self.point_dim, vdim=self.point_dim)
+        
+#     def forward(self, point_feat, img_feat):
+#         if self.normalize:
+#             point_feat = self.point_norm(point_feat)
+#             img_feat = self.img_norm(img_feat)
+
+#         # 调整维度符合多头注意力输入要求 (Seq_len, Batch, Embedding_dim)
+#         point_feat = point_feat.transpose(0, 1)  # (num_pc, B, point_dim)
+#         img_feat = img_feat.transpose(0, 1)  # (num_pc, B, img_dim)
+
+#         fused_point_feat, _ = self.p2m_attn(point_feat, img_feat, img_feat)
+#         fused_img_feat, _  = self.m2p_attn(img_feat, point_feat, point_feat)
+#         fused_feat = torch.concat([fused_point_feat, fused_img_feat], dim=2)
+
+#         fused_feat = fused_feat.permute((1, 2, 0))  # (B, output_dim, num_pc)
+#         return fused_feat
+
+
+from flash_attn.modules.mha import FlashCrossAttention
+from einops import rearrange
+
+class CrossModalAttention(nn.Module):
+    def __init__(self, point_dim, img_dim, dropout, normalize=False, in_proj_bias=True):
+        super(CrossModalAttention, self).__init__()
+        self.feat_dim = self.point_dim = point_dim
         self.img_dim = img_dim
-        self.num_heads = num_heads
         self.normalize = normalize
         self.dropout = dropout
         
@@ -418,31 +456,55 @@ class CrossAttentionConcat(nn.Module):
             self.point_norm = nn.LayerNorm(self.point_dim)
             self.img_norm = nn.LayerNorm(self.img_dim)
 
-        # 多头注意力层
-        self.p2m_attn = nn.MultiheadAttention(embed_dim=self.point_dim, num_heads=self.num_heads, 
-                                              dropout=self.dropout, kdim=self.img_dim, vdim=self.img_dim)
-        self.m2p_attn = nn.MultiheadAttention(embed_dim=self.img_dim, num_heads=self.num_heads, 
-                                              dropout=self.dropout, kdim=self.point_dim, vdim=self.point_dim)
+        self.img_mlp = nn.Sequential(
+            nn.Conv1d(img_dim, 128, 1),
+            nn.BatchNorm1d(128), 
+            nn.ReLU(inplace=True),
+            nn.Conv1d(128, self.feat_dim, 1)
+        )
+        
+        self.point_q_proj = nn.Linear(self.feat_dim, self.feat_dim, bias=in_proj_bias)
+        self.point_kv_proj = nn.Linear(self.feat_dim, 2 * self.feat_dim, bias=in_proj_bias)
+        self.img_q_proj = nn.Linear(self.feat_dim, self.feat_dim, bias=in_proj_bias)
+        self.img_kv_proj = nn.Linear(self.feat_dim, 2 * self.feat_dim, bias=in_proj_bias)
+        
+        self.point_cross_attn = FlashCrossAttention(attention_dropout=dropout)
+        self.image_cross_attn = FlashCrossAttention(attention_dropout=dropout)        
         
     def forward(self, point_feat, img_feat):
         if self.normalize:
             point_feat = self.point_norm(point_feat)
             img_feat = self.img_norm(img_feat)
 
-        # 调整维度符合多头注意力输入要求 (Seq_len, Batch, Embedding_dim)
-        point_feat = point_feat.transpose(0, 1)  # (num_pc, B, point_dim)
-        img_feat = img_feat.transpose(0, 1)  # (num_pc, B, img_dim)
-
-        fused_point_feat, _ = self.p2m_attn(point_feat, img_feat, img_feat)
-        fused_img_feat, _  = self.m2p_attn(img_feat, point_feat, point_feat)
-        fused_feat = torch.concat([fused_point_feat, fused_img_feat], dim=2)
-
-        fused_feat = fused_feat.permute((1, 2, 0))  # (B, output_dim, num_pc)
+        Bs, N, _ = point_feat.shape
+        
+        # point_feat = point_feat.transpose(0, 1)  # (num_pc, B, point_dim)
+        # img_feat = img_feat.transpose(0, 1)  # (num_pc, B, img_dim)
+        
+        img_feat = self.img_mlp(img_feat.permute(0, 2, 1)).permute(0, 2, 1)
+        
+        img_q = self.img_q_proj(img_feat).half()
+        img_kv = self.img_kv_proj(img_feat).half()
+        point_q = self.point_q_proj(point_feat).half()
+        point_kv = self.point_kv_proj(point_feat).half()
+        
+        img_q = rearrange(img_q, "... (h d) -> ... h d", d=self.feat_dim)
+        point_kv = rearrange(point_kv, "... (two hkv d) -> ... two hkv d", two=2, d=self.feat_dim)
+        point_fuse = self.point_cross_attn(img_q, point_kv)
+        point_fuse = point_feat + point_fuse.view(Bs, N, -1).float()
+        
+        point_q = rearrange(point_q, "... (h d) -> ... h d", d=self.feat_dim)
+        img_kv = rearrange(img_kv, "... (two hkv d) -> ... two hkv d", two=2, d=self.feat_dim)
+        image_fuse = self.image_cross_attn(point_q, img_kv)
+        image_fuse = img_feat + image_fuse.view(Bs, N, -1).float()
+        
+        fused_feat = torch.concat([point_fuse, image_fuse], dim=2)
+        fused_feat = fused_feat.permute((0, 2, 1))  # (B, output_dim, num_pc)
         return fused_feat
 
 
 class IGNet(nn.Module):
-    def __init__(self,  num_view=300, num_angle=12, num_depth=4, seed_feat_dim=512, img_feat_dim=64, 
+    def __init__(self,  num_view=300, num_angle=12, num_depth=4, seed_feat_dim=256, img_feat_dim=64, 
                  is_training=True, multi_scale_grouping=False):
         super().__init__()
         self.is_training = is_training
@@ -462,10 +524,9 @@ class IGNet(nn.Module):
         # self.point_backbone = MinkUNet14D(in_channels=3, out_channels=self.seed_feature_dim, D=3)
 
         # late fusion (Cross attention concatentation)
-        # self.img_feature_dim = img_feat_dim
+        # self.img_feature_dim = self.seed_feature_dim
         # self.point_backbone = MinkUNet14D(in_channels=3, out_channels=self.seed_feature_dim, D=3)
-        # self.fusion_module = CrossAttentionConcat(self.seed_feature_dim, img_feat_dim,
-        #                                           num_heads=8, dropout=0.1, normalize=False)
+        # self.fusion_module = CrossModalAttention(self.seed_feature_dim, img_feat_dim, dropout=0.1, normalize=False)
 
         # late fusion (Gated fusion)
         # self.img_feature_dim = 0
@@ -522,7 +583,11 @@ class IGNet(nn.Module):
             trunc_normal_(m.weight, std=.02)
             if m.bias is not None:
                 nn.init.constant_(m.bias, 0)
-                
+        elif isinstance(m, nn.Conv2d):
+            nn.init.xavier_normal_(m.weight.data)
+            if m.bias is not None:
+                nn.init.normal_(m.bias.data)
+
     def forward(self, end_points):
         # use all sampled point cloud, B*Ns*3
         seed_xyz = end_points['point_clouds']
@@ -560,7 +625,7 @@ class IGNet(nn.Module):
         # point_features = point_features[quantize2original].view(B, point_num, -1).transpose(1, 2)
         # seed_features = torch.concat([point_features, image_features], dim=1)
     
-        # late fusion (multi-head attention, gated fusion, add fusion)
+        # late fusion (cross attention concatentation, gated fusion, add fusion)
         # coordinates_batch, features_batch = ME.utils.sparse_collate(coords=[c for c in end_points['coors']], 
         #                                                             feats=[f for f in end_points['feats']], 
         #                                                             dtype=torch.float32)
