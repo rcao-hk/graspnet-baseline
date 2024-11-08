@@ -54,6 +54,7 @@ setup_seed(0)
 
 # from models.IGNet_v0_6 import IGNet
 # from models.IGNet_loss_v0_6 import get_loss
+# from dataset.ignet_dataset import GraspNetDataset, minkowski_collate_fn, collate_fn, load_grasp_labels
 
 # from models.IGNet_v0_7 import IGNet
 # from models.IGNet_loss_v0_7 import get_loss
@@ -61,6 +62,7 @@ setup_seed(0)
 
 # from models.IGNet_v0_7 import IGNet
 # from models.IGNet_loss_v0_7 import get_loss
+
 from models.IGNet_v0_8 import IGNet
 from models.IGNet_loss_v0_8 import get_loss
 from dataset.ignet_multi_dataset import GraspNetDataset, minkowski_collate_fn, collate_fn, load_grasp_labels
@@ -88,6 +90,8 @@ parser.add_argument('--ckpt_save_interval', type=int, default=5, help='Number fo
 parser.add_argument('--weight_decay', type=float, default=0.001, help='Optimization L2 weight decay [default: 0]')
 parser.add_argument('--inst_denoise', default=False, action='store_true', help='Denoise instance points during training and testing [default: False]')
 parser.add_argument('--pin_memory', action='store_true', help='Set pin_memory for faster training [default: False]')
+parser.add_argument('--pose_augment', action='store_true', help='Set pose_augment for pose augmentation [default: False]')
+parser.add_argument('--point_augment', action='store_true', help='Set point_augment for point cloud augmentation [default: False]')
 parser.add_argument('--multi_scale_grouping', action='store_true', help='Multi-scale grouping [default: False]')
 # parser.add_argument('--bn_decay_step', type=int, default=2, help='Period of BN decay (in epochs) [default: 2]')
 # parser.add_argument('--bn_decay_rate', type=float, default=0.5, help='Decay rate for BN decay [default: 0.5]')
@@ -124,9 +128,9 @@ torch.cuda.set_device(device)
 # Create Dataset and Dataloader
 valid_obj_idxs, grasp_labels = load_grasp_labels(cfgs.dataset_root)
 TRAIN_DATASET = GraspNetDataset(cfgs.dataset_root, valid_obj_idxs, grasp_labels, camera=cfgs.camera, split='train', 
-                                num_points=cfgs.num_point, remove_outlier=False, augment=False, denoise=cfgs.inst_denoise, real_data=True, syn_data=True, visib_threshold=cfgs.visib_threshold, voxel_size=cfgs.voxel_size)
+                                num_points=cfgs.num_point, remove_outlier=False, pose_augment=cfgs.pose_augment, point_augment=cfgs.point_augment, denoise=cfgs.inst_denoise, real_data=True, syn_data=True, visib_threshold=cfgs.visib_threshold, voxel_size=cfgs.voxel_size)
 TEST_DATASET = GraspNetDataset(cfgs.dataset_root, valid_obj_idxs, grasp_labels, camera=cfgs.camera, split='test_seen', 
-                               num_points=cfgs.num_point, remove_outlier=False, augment=False, denoise=cfgs.inst_denoise, real_data=True, syn_data=False, visib_threshold=cfgs.visib_threshold, voxel_size=cfgs.voxel_size)
+                               num_points=cfgs.num_point, remove_outlier=False, pose_augment=False, point_augment=False, denoise=cfgs.inst_denoise, real_data=True, syn_data=False, visib_threshold=cfgs.visib_threshold, voxel_size=cfgs.voxel_size)
 
 print(len(TRAIN_DATASET), len(TEST_DATASET))
 # TRAIN_DATALOADER = DataLoader(TRAIN_DATASET, batch_size=cfgs.batch_size, shuffle=True,
@@ -145,14 +149,16 @@ print(len(TRAIN_DATALOADER), len(TEST_DATALOADER))
 # net = GraspNet(input_feature_dim=0, num_view=cfgs.num_view, num_angle=12, num_depth=4,
 #                         cylinder_radius=0.05, hmin=-0.02, hmax_list=[0.01,0.02,0.03,0.04])
 
+# instance-level baseline (v0.6)
 # net = IGNet(num_view=cfgs.num_view, seed_feat_dim=cfgs.seed_feat_dim, is_training=True)
 # net.to(device)
+
+# v0.8
 net = IGNet(num_view=cfgs.num_view, seed_feat_dim=cfgs.seed_feat_dim, img_feat_dim=cfgs.img_feat_dim, 
             is_training=True, multi_scale_grouping=cfgs.multi_scale_grouping)
 net.to(device)
 
 # Load the Adam optimizer
-# optimizer = optim.Adam(net.parameters(), lr=cfgs.learning_rate, weight_decay=cfgs.weight_decay)
 optimizer = optim.AdamW(net.parameters(), lr=cfgs.learning_rate, weight_decay=cfgs.weight_decay)
 if cfgs.lr_sched:
     lr_scheduler = CosineAnnealingLR(optimizer, T_max=cfgs.lr_sched_period, eta_min=1e-4)
@@ -168,27 +174,7 @@ if CHECKPOINT_PATH is not None and os.path.isfile(CHECKPOINT_PATH):
         lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
     start_epoch = checkpoint['epoch']
     log_string("-> loaded checkpoint %s (epoch: %d)"%(CHECKPOINT_PATH, start_epoch))
-    
-# Decay Batchnorm momentum from 0.5 to 0.999
-# note: pytorch's BN momentum (default 0.1)= 1 - tensorflow's BN momentum
-# BN_MOMENTUM_INIT = 0.5
-# BN_MOMENTUM_MAX = 0.001
-# bn_lbmd = lambda it: max(BN_MOMENTUM_INIT * cfgs.bn_decay_rate**(int(it / cfgs.bn_decay_step)), BN_MOMENTUM_MAX)
-# bnm_scheduler = BNMomentumScheduler(net, bn_lambda=bn_lbmd, last_epoch=start_epoch-1)
-# scheduler = OneCycleLR(optimizer, max_lr=cfgs.learning_rate, steps_per_epoch=len(TRAIN_DATALOADER),
-                    #    epochs=cfgs.max_epoch, last_epoch=start_epoch * len(TRAIN_DATALOADER)-1)
 
-# def get_current_lr(epoch):
-#     lr = cfgs.learning_rate
-#     for i,lr_decay_epoch in enumerate(LR_DECAY_STEPS):
-#         if epoch >= lr_decay_epoch:
-#             lr *= LR_DECAY_RATES[i]
-#     return lr
-
-# def adjust_learning_rate(optimizer, epoch):
-#     lr = get_current_lr(epoch)
-#     for param_group in optimizer.param_groups:
-#         param_group['lr'] = lr
 
 # TensorBoard Visualizers
 log_writer = SummaryWriter(os.path.join(cfgs.log_dir))

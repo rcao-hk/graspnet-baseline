@@ -311,6 +311,15 @@ def inference(scene_idx):
             inst_imgs_list.append(img)
             inst_img_idxs_list.append(resized_idxs.astype(np.int64))
         
+        # if len(inst_cloud_list) == 0:
+        #     print('No instance in scene {} anno {}'.format(scene_idx, anno_idx))
+        #     save_dir = os.path.join(dump_dir, 'scene_%04d'%scene_idx, cfgs.camera)
+        #     os.makedirs(save_dir, exist_ok=True)
+        #     save_path = os.path.join(save_dir, '%04d'%anno_idx+'.npy')
+        #     gg = GraspGroup(np.zeros((0, 17)))
+        #     gg.save_npy(save_path)
+        #     continue
+        
         inst_cloud_tensor = torch.tensor(np.array(inst_cloud_list), dtype=torch.float32, device=device)
         inst_colors_tensor = torch.tensor(np.array(inst_color_list), dtype=torch.float32, device=device)
         inst_imgs_tensor = torch.stack(inst_imgs_list, dim=0).to(device)

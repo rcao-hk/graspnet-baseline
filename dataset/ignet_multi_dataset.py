@@ -65,9 +65,73 @@ def get_bbox(label):
     return rmin, rmax, cmin, cmax
 
 
+def add_noise_point_cloud(point_cloud, level=0.005, valid_min_z=0):
+    """
+    向点云数据添加高斯噪声，适用于 (N, 3) 形状的点云，每个点包含 (x, y, z) 坐标。
+
+    参数：
+    - point_cloud: numpy 数组，形状为 (N, 3)，表示点云数据。
+    - level: 噪声强度的上限。
+    - valid_min_z: 有效的最小深度值（z 轴），仅对满足条件的点添加噪声。
+
+    返回：
+    - noisy_point_cloud: 添加了噪声的点云数据。
+    """
+    # 确定有效的点，仅对深度 z 大于 valid_min_z 的点添加噪声
+    mask = point_cloud[:, 2] > valid_min_z
+    noisy_point_cloud = point_cloud.copy()
+
+    # 随机生成噪声级别
+    noise_level = np.random.uniform(0, level)
+
+    # 生成高斯噪声，并应用于 (x, y, z) 三个通道
+    noise = noise_level * np.random.randn(*point_cloud.shape)  # (N, 3) 形状
+    noisy_point_cloud[mask] += noise[mask]
+
+    return noisy_point_cloud
+
+
+def random_point_dropout(point_cloud, num_points_to_drop=3, radius=0.01):
+    """
+    随机在点云中选择几个中心点，并丢弃以这些点为中心的球形区域内的所有点。
+
+    参数：
+    - point_cloud: numpy 数组，形状为 (N, 3) 的点云数据。
+    - num_points_to_drop: 随机选择的中心点数目。
+    - radius: 球形区域的半径，丢弃该区域内的所有点。
+
+    返回：
+    - retained_point_cloud: 保留的点云数据。
+    - retained_indices: 保留点云的索引。
+    """
+    num_points = point_cloud.shape[0]
+
+    # 初始化一个掩码，全为 True 表示初始时保留所有点
+    mask = np.ones(num_points, dtype=bool)
+
+    # 随机选择 `num_points_to_drop` 个点作为中心点
+    center_indices = np.random.choice(num_points, num_points_to_drop, replace=False)
+
+    # 对每个选定的中心点，移除半径范围内的点
+    for center_idx in center_indices:
+        center = point_cloud[center_idx]
+
+        # 计算所有点到中心点的距离
+        distances = np.linalg.norm(point_cloud - center, axis=1)
+
+        # 更新掩码，将半径范围内的点设为 False
+        mask &= distances > radius
+
+    # 根据掩码获取保留的点云和索引
+    retained_point_cloud = point_cloud[mask]
+    retained_indices = np.where(mask)[0]  # 获取保留点的索引
+
+    return retained_point_cloud, retained_indices
+
+
 class GraspNetDataset(Dataset):
     def __init__(self, root, valid_obj_idxs, grasp_labels, camera='kinect', split='train', num_points=1024,
-                 remove_outlier=False, remove_invisible=True, augment=False, denoise=False, load_label=True, real_data=True, syn_data=False, visib_threshold=0.0, voxel_size=0.005):
+                 remove_outlier=False, remove_invisible=True, pose_augment=False, point_augment=False, denoise=False, load_label=True, real_data=True, syn_data=False, visib_threshold=0.0, voxel_size=0.005):
         self.root = root
         self.split = split
         self.num_points = num_points
@@ -76,7 +140,8 @@ class GraspNetDataset(Dataset):
         self.valid_obj_idxs = valid_obj_idxs
         self.grasp_labels = grasp_labels
         self.camera = camera
-        self.augment = augment
+        self.pose_augment = pose_augment
+        self.point_augment = point_augment
         self.denoise = denoise
         self.denoise_pre_sample_num = int(self.num_points * 1.5)
         self.load_label = load_label    
@@ -308,6 +373,12 @@ class GraspNetDataset(Dataset):
         inst_cloud = cloud_masked[inst_mask]
         inst_color = color_masked[inst_mask]
           
+        if self.point_augment:
+            inst_cloud, dropout_idx = random_point_dropout(inst_cloud, num_points_to_drop=3, radius=0.01)
+            inst_color = inst_color[dropout_idx]
+            if not self.real_flags[index]:
+                inst_cloud = add_noise_point_cloud(inst_cloud.astype(np.float32), level=0.003, valid_min_z=0.1)
+                
         # sample points
         if self.denoise and self.real_flags[index]:
             inst_cloud_clear_idx = points_denoise(inst_cloud, self.denoise_pre_sample_num)
@@ -343,7 +414,7 @@ class GraspNetDataset(Dataset):
         collision = self.collision_labels[scene][choose_idx] #(Np, V, A, D)
         # grasp_idxs = np.random.choice(len(points), min(max(int(len(points)/4), 300),len(points)), replace=False)
         
-        if self.augment:
+        if self.pose_augment:
             inst_cloud, object_poses_list = self.augment_data(inst_cloud, [object_pose])
             object_pose = object_poses_list[0]
         
