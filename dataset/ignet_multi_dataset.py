@@ -91,41 +91,94 @@ def add_noise_point_cloud(point_cloud, level=0.005, valid_min_z=0):
     return noisy_point_cloud
 
 
-def random_point_dropout(point_cloud, num_points_to_drop=3, radius=0.01):
+# def random_point_dropout(point_cloud, num_points_to_drop=3, radius=0.01):
+    # """
+    # 随机在点云中选择几个中心点，并丢弃以这些点为中心的球形区域内的所有点。
+
+    # 参数：
+    # - point_cloud: numpy 数组，形状为 (N, 3) 的点云数据。
+    # - num_points_to_drop: 随机选择的中心点数目。
+    # - radius: 球形区域的半径，丢弃该区域内的所有点。
+
+    # 返回：
+    # - retained_point_cloud: 保留的点云数据。
+    # - retained_indices: 保留点云的索引。
+    # """
+    # num_points = point_cloud.shape[0]
+
+    # # 初始化一个掩码，全为 True 表示初始时保留所有点
+    # mask = np.ones(num_points, dtype=bool)
+
+    # # 随机选择 `num_points_to_drop` 个点作为中心点
+    # center_indices = np.random.choice(num_points, num_points_to_drop, replace=False)
+
+    # # 对每个选定的中心点，移除半径范围内的点
+    # for center_idx in center_indices:
+    #     center = point_cloud[center_idx]
+
+    #     # 计算所有点到中心点的距离
+    #     distances = np.linalg.norm(point_cloud - center, axis=1)
+
+    #     # 更新掩码，将半径范围内的点设为 False
+    #     mask &= distances > radius
+
+    # # 根据掩码获取保留的点云和索引
+    # retained_point_cloud = point_cloud[mask]
+    # retained_indices = np.where(mask)[0]  # 获取保留点的索引
+
+    # return retained_point_cloud, retained_indices
+
+
+
+def random_point_dropout(point_cloud, min_num=50, num_points_to_drop=3, radius_percent=0.01):
     """
-    随机在点云中选择几个中心点，并丢弃以这些点为中心的球形区域内的所有点。
+    Randomly selects a few center points in the point cloud and removes all points 
+    within a spherical region centered on each selected point.
 
-    参数：
-    - point_cloud: numpy 数组，形状为 (N, 3) 的点云数据。
-    - num_points_to_drop: 随机选择的中心点数目。
-    - radius: 球形区域的半径，丢弃该区域内的所有点。
+    Parameters:
+    - point_cloud: numpy array of shape (N, 3), representing the point cloud data.
+    - min_num: minimum acceptable number of points to retain.
+    - num_points_to_drop: number of random center points to select.
+    - radius_percent: percentage of the objects size to determine the radius of the spherical region (relative to the bounding box diagonal).
 
-    返回：
-    - retained_point_cloud: 保留的点云数据。
-    - retained_indices: 保留点云的索引。
+    Returns:
+    - retained_point_cloud: the point cloud data with retained points.
+    - retained_indices: indices of the retained points in the original point cloud.
     """
     num_points = point_cloud.shape[0]
 
-    # 初始化一个掩码，全为 True 表示初始时保留所有点
+    # Calculate object size using the bounding box diagonal length
+    min_coords = np.min(point_cloud, axis=0)
+    max_coords = np.max(point_cloud, axis=0)
+    bbox_diagonal = np.linalg.norm(max_coords - min_coords)
+    
+    # Compute the radius based on the given percentage
+    radius = radius_percent * bbox_diagonal
+
+    # Initialize a mask to keep all points initially
     mask = np.ones(num_points, dtype=bool)
 
-    # 随机选择 `num_points_to_drop` 个点作为中心点
+    # Randomly select `num_points_to_drop` points as the center points
     center_indices = np.random.choice(num_points, num_points_to_drop, replace=False)
 
-    # 对每个选定的中心点，移除半径范围内的点
+    # For each selected center point, remove points within the radius
     for center_idx in center_indices:
         center = point_cloud[center_idx]
 
-        # 计算所有点到中心点的距离
+        # Calculate the distance from each point to the center
         distances = np.linalg.norm(point_cloud - center, axis=1)
 
-        # 更新掩码，将半径范围内的点设为 False
+        # Update the mask to set points within the radius to False
         mask &= distances > radius
 
-    # 根据掩码获取保留的点云和索引
+    # Use the mask to get retained points and their indices
     retained_point_cloud = point_cloud[mask]
-    retained_indices = np.where(mask)[0]  # 获取保留点的索引
-
+    
+    # Ensure the retained points meet the minimum number requirement
+    if len(retained_point_cloud) < min_num:
+        return point_cloud, np.arange(num_points)
+    
+    retained_indices = np.where(mask)[0]  # Indices of retained points
     return retained_point_cloud, retained_indices
 
 
@@ -374,7 +427,7 @@ class GraspNetDataset(Dataset):
         inst_color = color_masked[inst_mask]
           
         if self.point_augment:
-            inst_cloud, dropout_idx = random_point_dropout(inst_cloud, num_points_to_drop=3, radius=0.01)
+            inst_cloud, dropout_idx = random_point_dropout(inst_cloud, min_num=self.minimum_num_pt,num_points_to_drop=2, radius_percent=0.1)
             inst_color = inst_color[dropout_idx]
             if not self.real_flags[index]:
                 inst_cloud = add_noise_point_cloud(inst_cloud.astype(np.float32), level=0.003, valid_min_z=0.1)

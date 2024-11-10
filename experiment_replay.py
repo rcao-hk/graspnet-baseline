@@ -6,7 +6,7 @@ import pandas as pd
 # epoch_list = ['40', '45', '50', '55', '60']
 # model_list = [method + '_' + i for i in epoch_list]
 # model_list = [method]
-model_list = ['ignet_v0.8.2', 'ignet_v0.8.2.ds0.2']
+model_list = ['ignet_v0.8.2.ds0.3.1']
 column = ['AP', 'AP0.8', 'AP0.4', 'AP', 'AP0.8', 'AP0.4', 'AP', 'AP0.8', 'AP0.4', 'AP_mean']
 camera_type = 'realsense'
 epoch_data = []
