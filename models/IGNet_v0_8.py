@@ -286,7 +286,11 @@ class RotationScoringNet(nn.Module):
             rot_score = normalize_tensor(rot_score)
             top_rot_inds = []
             for i in range(B):
-                top_rot_inds_batch = torch.multinomial(rot_score[i], 1, replacement=False)
+                try:
+                    top_rot_inds_batch = torch.multinomial(rot_score[i], 1, replacement=False)
+                except:
+                    print('outliers in rotation_scores')
+                    _, top_rot_inds_batch = torch.max(rot_score[i], dim=-1)  # (B, num_seed)
                 top_rot_inds.append(top_rot_inds_batch)
             top_rot_inds = torch.stack(top_rot_inds, dim=0).squeeze(-1)  # B, num_seed
         else:
@@ -441,7 +445,7 @@ class GatedFusion(nn.Module):
 #         return fused_feat
 
 
-from flash_attn.modules.mha import FlashCrossAttention
+from flash_attn.modules.mha import FlashCrossAttention, CrossAttention
 from einops import rearrange
 
 class CrossModalAttention(nn.Module):
@@ -463,14 +467,17 @@ class CrossModalAttention(nn.Module):
             nn.Conv1d(128, self.feat_dim, 1)
         )
         
-        self.point_q_proj = nn.Linear(self.feat_dim, self.feat_dim, bias=in_proj_bias)
         self.point_kv_proj = nn.Linear(self.feat_dim, 2 * self.feat_dim, bias=in_proj_bias)
         self.img_q_proj = nn.Linear(self.feat_dim, self.feat_dim, bias=in_proj_bias)
-        self.img_kv_proj = nn.Linear(self.feat_dim, 2 * self.feat_dim, bias=in_proj_bias)
+        # self.img_kv_proj = nn.Linear(self.feat_dim, 2 * self.feat_dim, bias=in_proj_bias)
+        # self.point_q_proj = nn.Linear(self.feat_dim, self.feat_dim, bias=in_proj_bias)
         
-        self.point_cross_attn = FlashCrossAttention(attention_dropout=dropout)
-        self.image_cross_attn = FlashCrossAttention(attention_dropout=dropout)        
+        # self.point_cross_attn = FlashCrossAttention(attention_dropout=dropout)
+        # self.image_cross_attn = FlashCrossAttention(attention_dropout=dropout)
         
+        self.point_cross_attn = CrossAttention(attention_dropout=dropout)
+        # self.image_cross_attn = CrossAttention(attention_dropout=dropout)
+                                                             
     def forward(self, point_feat, img_feat):
         if self.normalize:
             point_feat = self.point_norm(point_feat)
@@ -482,23 +489,33 @@ class CrossModalAttention(nn.Module):
         # img_feat = img_feat.transpose(0, 1)  # (num_pc, B, img_dim)
         
         img_feat = self.img_mlp(img_feat.permute(0, 2, 1)).permute(0, 2, 1)
+
+        img_q = self.img_q_proj(img_feat)
+        # img_kv = self.img_kv_proj(img_feat)
+        # point_q = self.point_q_proj(point_feat)
+        point_kv = self.point_kv_proj(point_feat)
         
-        img_q = self.img_q_proj(img_feat).half()
-        img_kv = self.img_kv_proj(img_feat).half()
-        point_q = self.point_q_proj(point_feat).half()
-        point_kv = self.point_kv_proj(point_feat).half()
+        # img_q = self.img_q_proj(img_feat).half()
+        # img_kv = self.img_kv_proj(img_feat).half()
+        # point_q = self.point_q_proj(point_feat).half()
+        # point_kv = self.point_kv_proj(point_feat).half()
         
         img_q = rearrange(img_q, "... (h d) -> ... h d", d=self.feat_dim)
         point_kv = rearrange(point_kv, "... (two hkv d) -> ... two hkv d", two=2, d=self.feat_dim)
         point_fuse = self.point_cross_attn(img_q, point_kv)
-        point_fuse = point_feat + point_fuse.view(Bs, N, -1).float()
+        # point_fuse = point_feat + point_fuse.view(Bs, N, -1)
+        # point_fuse = torch.concat([point_feat, point_fuse.view(Bs, N, -1)], dim=-1)
+
+        fused_feat = torch.concat([point_feat, point_fuse.view(Bs, N, -1)], dim=-1)
         
-        point_q = rearrange(point_q, "... (h d) -> ... h d", d=self.feat_dim)
-        img_kv = rearrange(img_kv, "... (two hkv d) -> ... two hkv d", two=2, d=self.feat_dim)
-        image_fuse = self.image_cross_attn(point_q, img_kv)
-        image_fuse = img_feat + image_fuse.view(Bs, N, -1).float()
+        # point_q = rearrange(point_q, "... (h d) -> ... h d", d=self.feat_dim)
+        # img_kv = rearrange(img_kv, "... (two hkv d) -> ... two hkv d", two=2, d=self.feat_dim)
+        # image_fuse = self.image_cross_attn(point_q, img_kv)
+        # image_fuse = img_feat + image_fuse.view(Bs, N, -1)
+        # image_fuse = torch.concat([img_feat, image_fuse.view(Bs, N, -1)], dim=-1)
         
-        fused_feat = torch.concat([point_fuse, image_fuse], dim=2)
+        # fused_feat = torch.concat([point_fuse, image_fuse], dim=-1)
+        
         fused_feat = fused_feat.permute((0, 2, 1))  # (B, output_dim, num_pc)
         return fused_feat
 
@@ -518,25 +535,30 @@ class IGNet(nn.Module):
         # early fusion
         self.img_feature_dim = 0
         self.point_backbone = MinkUNet14D(in_channels=img_feat_dim, out_channels=self.seed_feature_dim, D=3)
+        print('early fusion')
         
         # # late fusion (concatentation)
         # self.img_feature_dim = img_feat_dim
         # self.point_backbone = MinkUNet14D(in_channels=3, out_channels=self.seed_feature_dim, D=3)
-
+        # print('late fusion (concatentation)')
+        
         # late fusion (Cross attention concatentation)
         # self.img_feature_dim = self.seed_feature_dim
         # self.point_backbone = MinkUNet14D(in_channels=3, out_channels=self.seed_feature_dim, D=3)
-        # self.fusion_module = CrossModalAttention(self.seed_feature_dim, img_feat_dim, dropout=0.1, normalize=False)
-
+        # self.fusion_module = CrossModalAttention(self.seed_feature_dim, img_feat_dim, dropout=0.0, normalize=False)
+        # print('late fusion (Cross attention concatentation)')
+        
         # late fusion (Gated fusion)
         # self.img_feature_dim = 0
         # self.point_backbone = MinkUNet14D(in_channels=3, out_channels=self.seed_feature_dim, D=3)
         # self.fusion_module = GatedFusion(point_dim=self.seed_feature_dim, img_dim=img_feat_dim)
-
+        # print('late fusion (Gated fusion)')
+        
         # late fusion (Add fusion)
         # self.img_feature_dim = 0
         # self.point_backbone = MinkUNet14D(in_channels=3, out_channels=self.seed_feature_dim, D=3)
         # self.fusion_module = AddFusion(point_dim=self.seed_feature_dim, img_dim=img_feat_dim)
+        # print('late fusion (Add fusion)')
         
         # self.img_backbone = psp_models['resnet34'.lower()]()
         self.img_backbone = PSPNet(sizes=(1, 2, 3, 6), psp_size=512, 
@@ -571,8 +593,7 @@ class IGNet(nn.Module):
             self.crop4 = CloudCrop(nsample=16, seed_feature_dim=feat_dim, out_dim=self.seed_feature_dim)
             self.crop_op_list = [self.crop1, self.crop2, self.crop3, self.crop4]
         else:
-            self.crop = CloudCrop(nsample=32, seed_feature_dim=self.seed_feature_dim + self.img_feature_dim, 
-                                out_dim=self.seed_feature_dim)
+            self.crop = CloudCrop(nsample=32, seed_feature_dim=self.seed_feature_dim + self.img_feature_dim, out_dim=self.seed_feature_dim)
         self.apply(self._init_weights)
 
     def _init_weights(self, m):
