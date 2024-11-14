@@ -220,7 +220,8 @@ def train_one_epoch():
                 log_writer.add_scalar('train_' + key, stat_dict[key]/batch_interval, (EPOCH_CNT*len(TRAIN_DATALOADER)+batch_idx)*cfgs.batch_size)
                 log_string('mean %s: %f'%(key, stat_dict[key]/batch_interval))
                 stat_dict[key] = 0
-        
+    
+    overall_loss = overall_loss/float(cfgs.batch_size)
     log_string('overall loss:{}, batch num:{}'.format(overall_loss, batch_idx+1))
     mean_loss = overall_loss/float(batch_idx+1)
     return mean_loss
@@ -259,6 +260,7 @@ def evaluate_one_epoch():
         log_writer.add_scalar('test_' + key, stat_dict[key]/float(batch_idx+1), (EPOCH_CNT+1)*len(TRAIN_DATALOADER)*cfgs.batch_size)
         log_string('eval mean %s: %f'%(key, stat_dict[key]/(float(batch_idx+1))))
 
+    overall_loss = overall_loss/float(cfgs.batch_size)
     log_string('overall loss:{}, batch num:{}'.format(overall_loss, batch_idx+1))
     mean_loss = overall_loss/float(batch_idx+1)
     return mean_loss
