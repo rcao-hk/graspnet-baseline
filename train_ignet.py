@@ -2,7 +2,7 @@
 
 import sys
 import os
-# os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+# os.environ['CUDA_VISIBLE_DEVICES'] = '5'
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:512"
 # os.environ['OMP_NUM_THREADS'] = '18'
 
@@ -83,13 +83,14 @@ parser.add_argument('--num_view', type=int, default=300, help='View Number [defa
 parser.add_argument('--max_epoch', type=int, default=61, help='Epoch to run [default: 61]')
 parser.add_argument('--lr_sched', default=False, action='store_true')
 parser.add_argument('--lr_sched_period', type=int, default=16, help='T_max of cosine learing rate scheduler [default: 16]')
-parser.add_argument('--batch_size', type=int, default=22, help='Batch Size during training [default: 2]')
+parser.add_argument('--batch_size', type=int, default=20, help='Batch Size during training [default: 2]')
 parser.add_argument('--learning_rate', type=float, default=0.002, help='Initial learning rate [default: 0.002]')
 parser.add_argument('--worker_num', type=int, default=18, help='Worker number for dataloader [default: 4]')
 parser.add_argument('--ckpt_save_interval', type=int, default=5, help='Number for save checkpoint[default: 5]')
 parser.add_argument('--weight_decay', type=float, default=0.001, help='Optimization L2 weight decay [default: 0]')
 parser.add_argument('--inst_denoise', default=False, action='store_true', help='Denoise instance points during training and testing [default: False]')
 parser.add_argument('--pin_memory', action='store_true', help='Set pin_memory for faster training [default: False]')
+parser.add_argument('--inplane_pose_augment', action='store_true', help='Set inplane_pose_augment for inplane pose augmentation [default: False]')
 parser.add_argument('--pose_augment', action='store_true', help='Set pose_augment for pose augmentation [default: False]')
 parser.add_argument('--point_augment', action='store_true', help='Set point_augment for point cloud augmentation [default: False]')
 parser.add_argument('--multi_scale_grouping', action='store_true', help='Multi-scale grouping [default: False]')
@@ -100,6 +101,8 @@ parser.add_argument('--multi_scale_grouping', action='store_true', help='Multi-s
 cfgs = parser.parse_args()
 
 # ------------------------------------------------------------------------- GLOBAL CONFIG BEG
+# cfgs.inplane_pose_augment = True
+
 cfgs.ckpt_dir = os.path.join(cfgs.ckpt_root, cfgs.method_id, cfgs.camera)
 cfgs.log_dir = os.path.join(cfgs.log_root, cfgs.method_id, cfgs.camera)
 os.makedirs(cfgs.ckpt_dir, exist_ok=True)
@@ -128,9 +131,9 @@ torch.cuda.set_device(device)
 # Create Dataset and Dataloader
 valid_obj_idxs, grasp_labels = load_grasp_labels(cfgs.dataset_root)
 TRAIN_DATASET = GraspNetDataset(cfgs.dataset_root, valid_obj_idxs, grasp_labels, camera=cfgs.camera, split='train', 
-                                num_points=cfgs.num_point, remove_outlier=False, pose_augment=cfgs.pose_augment, point_augment=cfgs.point_augment, denoise=cfgs.inst_denoise, real_data=True, syn_data=True, visib_threshold=cfgs.visib_threshold, voxel_size=cfgs.voxel_size)
+                                num_points=cfgs.num_point, remove_outlier=False, inplane_pose_augment=cfgs.inplane_pose_augment, pose_augment=cfgs.pose_augment, point_augment=cfgs.point_augment, denoise=cfgs.inst_denoise, real_data=True, syn_data=True, visib_threshold=cfgs.visib_threshold, voxel_size=cfgs.voxel_size)
 TEST_DATASET = GraspNetDataset(cfgs.dataset_root, valid_obj_idxs, grasp_labels, camera=cfgs.camera, split='test_seen', 
-                               num_points=cfgs.num_point, remove_outlier=False, pose_augment=False, point_augment=False, denoise=cfgs.inst_denoise, real_data=True, syn_data=False, visib_threshold=cfgs.visib_threshold, voxel_size=cfgs.voxel_size)
+                               num_points=cfgs.num_point, remove_outlier=False, inplane_pose_augment=False, pose_augment=False, point_augment=False, denoise=cfgs.inst_denoise, real_data=True, syn_data=False, visib_threshold=cfgs.visib_threshold, voxel_size=cfgs.voxel_size)
 
 print(len(TRAIN_DATASET), len(TEST_DATASET))
 # TRAIN_DATALOADER = DataLoader(TRAIN_DATASET, batch_size=cfgs.batch_size, shuffle=True,
