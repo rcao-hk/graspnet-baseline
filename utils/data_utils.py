@@ -1,5 +1,5 @@
 """ Tools for data processing.
-    Author: chenxi-wang
+    Author: Rui Cao
 """
 
 import numpy as np
@@ -180,3 +180,30 @@ def points_denoise(points, pre_sample_num):
     cl, ind_1 = sampled_pcd.remove_statistical_outlier(nb_neighbors=80, std_ratio=3.5)  # default 80, 2.0
     choose_idx = sampled_idxs[ind_1]
     return choose_idx
+
+
+def add_noise_point_cloud(point_cloud, level=0.005, valid_min_z=0):
+    """
+    Adds Gaussian noise to point cloud data, suitable for point clouds with shape (N, 3), 
+    where each point consists of (x, y, z) coordinates.
+
+    Input:
+    - point_cloud: numpy array, shape (N, 3), representing the point cloud data.
+    - level: maximum noise intensity.
+    - valid_min_z: minimum valid depth value (z-axis); noise is only added to points that meet this condition.
+
+    Output:
+    - noisy_point_cloud: point cloud data with added noise.
+    """
+    # 确定有效的点，仅对深度 z 大于 valid_min_z 的点添加噪声
+    mask = point_cloud[:, 2] > valid_min_z
+    noisy_point_cloud = point_cloud.copy()
+
+    # 随机生成噪声级别
+    noise_level = np.random.uniform(0, level)
+
+    # 生成高斯噪声，并应用于 (x, y, z) 三个通道
+    noise = noise_level * np.random.randn(*point_cloud.shape)  # (N, 3) 形状
+    noisy_point_cloud[mask] += noise[mask]
+
+    return noisy_point_cloud

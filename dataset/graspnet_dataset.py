@@ -16,11 +16,11 @@ from tqdm import tqdm
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(BASE_DIR)
 from utils.data_utils import CameraInfo, transform_point_cloud, create_point_cloud_from_depth_image,\
-                            get_workspace_mask, remove_invisible_grasp_points
+                            get_workspace_mask, remove_invisible_grasp_points, add_noise_point_cloud
 
 class GraspNetDataset(Dataset):
     def __init__(self, root, valid_obj_idxs, grasp_labels, camera='kinect', split='train', num_points=20000,
-                 remove_outlier=False, voxel_size=0.005, remove_invisible=True, augment=False, load_label=True):
+                 remove_outlier=False, voxel_size=0.005, noise_level=0.0, remove_invisible=True, augment=False, load_label=True):
         assert(num_points<=50000)
         self.root = root
         self.split = split
@@ -34,6 +34,7 @@ class GraspNetDataset(Dataset):
         self.load_label = load_label    
         self.collision_labels = {}
         self.voxel_size = voxel_size
+        self.noise_level = noise_level
 
         if split == 'train':
             self.sceneIds = list( range(100) )
@@ -54,14 +55,16 @@ class GraspNetDataset(Dataset):
         self.scenename = []
         self.frameid = []
         self.graspnesspath = []
-        self.normalpath = []
+        # self.normalpath = []
         for x in tqdm(self.sceneIds, desc = 'Loading data path and collision labels...'):
             for img_num in range(256):
                 self.colorpath.append(os.path.join(root, 'scenes', x, camera, 'rgb', str(img_num).zfill(4)+'.png'))
-                self.depthpath.append(os.path.join(root, 'scenes', x, camera, 'depth', str(img_num).zfill(4)+'.png'))
-                self.labelpath.append(os.path.join(root, 'scenes', x, camera, 'label', str(img_num).zfill(4)+'.png'))
+                # self.depthpath.append(os.path.join(root, 'scenes', x, camera, 'depth', str(img_num).zfill(4)+'.png'))
+                # self.labelpath.append(os.path.join(root, 'scenes', x, camera, 'label', str(img_num).zfill(4)+'.png'))
+                self.depthpath.append(os.path.join(root, 'virtual_scenes', x, camera, str(img_num).zfill(4)+'_depth.png'))
+                self.labelpath.append(os.path.join(root, 'virtual_scenes', x, camera, str(img_num).zfill(4)+'_label.png'))
                 self.metapath.append(os.path.join(root, 'scenes', x, camera, 'meta', str(img_num).zfill(4)+'.mat'))
-                self.normalpath.append(os.path.join(root, 'normals', x, camera, str(img_num).zfill(4)+'.npy'))
+                # self.normalpath.append(os.path.join(root, 'normals', x, camera, str(img_num).zfill(4)+'.npy'))
                 self.scenename.append(x.strip())
                 self.frameid.append(img_num)
                 if self.load_label:
@@ -111,7 +114,7 @@ class GraspNetDataset(Dataset):
         depth = np.array(Image.open(self.depthpath[index]))
         seg = np.array(Image.open(self.labelpath[index]))
         meta = scio.loadmat(self.metapath[index])
-        normal = np.load(self.normalpath[index])
+        # normal = np.load(self.normalpath[index])
         scene = self.scenename[index]
         try:
             intrinsic = meta['intrinsic_matrix']
@@ -148,12 +151,15 @@ class GraspNetDataset(Dataset):
             idxs = np.concatenate([idxs1, idxs2], axis=0)
         cloud_sampled = cloud_masked[idxs]
         color_sampled = color_masked[idxs]
-        normal_sampled = normal[idxs]
+        # normal_sampled = normal[idxs]
         
+        if self.noise_level > 0.0:
+            cloud_sampled = add_noise_point_cloud(cloud_sampled, level=self.noise_level, valid_min_z=0.1)
+                
         ret_dict = {}
         ret_dict['point_clouds'] = cloud_sampled.astype(np.float32)
         ret_dict['cloud_colors'] = color_sampled.astype(np.float32)
-        ret_dict['cloud_normals'] = normal_sampled.astype(np.float32)
+        # ret_dict['cloud_normals'] = normal_sampled.astype(np.float32)
         
         ret_dict['coors'] = cloud_sampled.astype(np.float32) / self.voxel_size
         ret_dict['feats'] = np.ones_like(cloud_sampled).astype(np.float32)
@@ -166,7 +172,7 @@ class GraspNetDataset(Dataset):
         meta = scio.loadmat(self.metapath[index])
         scene = self.scenename[index]
         graspness = np.load(self.graspnesspath[index])  # for each point in workspace masked point cloud
-        normal = np.load(self.normalpath[index])
+        # normal = np.load(self.normalpath[index])
         try:
             obj_idxs = meta['cls_indexes'].flatten().astype(np.int32)
             poses = meta['poses']
@@ -204,8 +210,11 @@ class GraspNetDataset(Dataset):
             idxs = np.concatenate([idxs1, idxs2], axis=0)
         cloud_sampled = cloud_masked[idxs]
         color_sampled = color_masked[idxs]
-        normal_sampled = normal[idxs]
-        
+        # normal_sampled = normal[idxs]
+
+        if self.noise_level > 0.0:
+            cloud_sampled = add_noise_point_cloud(cloud_sampled, level=self.noise_level, valid_min_z=0.1)
+            
         seg_sampled = seg_masked[idxs]
         graspness_sampled = graspness[idxs]
 
@@ -253,7 +262,7 @@ class GraspNetDataset(Dataset):
         ret_dict = {}
         ret_dict['point_clouds'] = cloud_sampled.astype(np.float32)
         ret_dict['cloud_colors'] = color_sampled.astype(np.float32)
-        ret_dict['cloud_normals'] = normal_sampled.astype(np.float32)
+        # ret_dict['cloud_normals'] = normal_sampled.astype(np.float32)
         ret_dict['coors'] = cloud_sampled.astype(np.float32) / self.voxel_size
         ret_dict['feats'] = np.ones_like(cloud_sampled).astype(np.float32)
 

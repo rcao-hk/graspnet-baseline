@@ -13,7 +13,7 @@ sys.path.append(os.path.join(ROOT_DIR, 'utils'))
 sys.path.append(os.path.join(ROOT_DIR, 'models'))
 sys.path.append(os.path.join(ROOT_DIR, 'dataset'))
 
-from utils.collision_detector import ModelFreeCollisionDetector
+from utils.collision_detector import ModelFreeCollisionDetector, ModelFreeCollisionDetectorTorch
 from models.GSNet import GraspNet, pred_decode
 from dataset.graspnet_dataset import GraspNetDataset, load_grasp_labels, minkowski_collate_fn
 
@@ -31,6 +31,7 @@ parser.add_argument('--voxel_size', type=float, default=0.005, help='Voxel Size 
 parser.add_argument('--collision_thresh', type=float, default=0.01,
                     help='Collision Threshold in collision detection [default: 0.01]')
 parser.add_argument('--voxel_size_cd', type=float, default=0.01, help='Voxel Size for collision detection')
+parser.add_argument('--noise_level', type=float, default=0.0, help='Noise level for scene points')
 parser.add_argument('--infer', action='store_true', default=False)
 parser.add_argument('--eval', action='store_true', default=False)
 cfgs = parser.parse_args()
@@ -48,7 +49,7 @@ def my_worker_init_fn(worker_id):
 
 def inference():
     valid_obj_idxs, grasp_labels = load_grasp_labels(cfgs.dataset_root)
-    test_dataset = GraspNetDataset(cfgs.dataset_root, valid_obj_idxs, grasp_labels, split=cfgs.split, camera=cfgs.camera, num_points=cfgs.num_point,voxel_size=cfgs.voxel_size, remove_outlier=True, augment=False, load_label=False)
+    test_dataset = GraspNetDataset(cfgs.dataset_root, valid_obj_idxs, grasp_labels, split=cfgs.split, camera=cfgs.camera, num_points=cfgs.num_point, voxel_size=cfgs.voxel_size, noise_level=cfgs.noise_level, remove_outlier=False, augment=False, load_label=False)
     print('Test dataset length: ', len(test_dataset))
     scene_list = test_dataset.scene_list()
     test_dataloader = DataLoader(test_dataset, batch_size=cfgs.batch_size, shuffle=False,
@@ -90,8 +91,10 @@ def inference():
             # collision detection
             if cfgs.collision_thresh > 0:
                 cloud, _ = test_dataset.get_data(data_idx, return_raw_cloud=True)
-                mfcdetector = ModelFreeCollisionDetector(cloud, voxel_size=cfgs.voxel_size_cd)
+                # mfcdetector = ModelFreeCollisionDetector(cloud, voxel_size=cfgs.voxel_size_cd)
+                mfcdetector = ModelFreeCollisionDetectorTorch(cloud.reshape(-1, 3), voxel_size=cfgs.voxel_size_cd)
                 collision_mask = mfcdetector.detect(gg, approach_dist=0.05, collision_thresh=cfgs.collision_thresh)
+                collision_mask = collision_mask.detach().cpu().numpy()
                 gg = gg[~collision_mask]
 
             # save grasps
