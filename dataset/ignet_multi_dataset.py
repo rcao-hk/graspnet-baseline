@@ -17,109 +17,58 @@ from torch.utils.data import Dataset
 from tqdm import tqdm
 from torchvision import transforms
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-ROOT_DIR = os.path.dirname(BASE_DIR)
-sys.path.append(os.path.join(ROOT_DIR, 'utils'))
-from data_utils import CameraInfo, transform_point_cloud, create_point_cloud_from_depth_image,\
+# BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# ROOT_DIR = os.path.dirname(BASE_DIR)
+# sys.path.append(os.path.join(ROOT_DIR, 'utils'))
+from utils.data_utils import CameraInfo, transform_point_cloud, create_point_cloud_from_depth_image,\
                             get_workspace_mask, remove_invisible_grasp_points, points_denoise, sample_points
 
 img_width = 720
 img_length = 1280
-
-# border_list = [-1, 40, 80, 120, 160, 200, 240, 280, 320, 360, 400, 440, 480, 520, 560, 600, 640, 680, 720, 760, 800, 840, 880, 920, 960, 1000, 1040, 1080, 1120, 1160, 1200, 1240]
-# def get_bbox(label):
-#     rows = np.any(label, axis=1)
-#     cols = np.any(label, axis=0)
-#     rmin, rmax = np.where(rows)[0][[0, -1]]
-#     cmin, cmax = np.where(cols)[0][[0, -1]]
-#     rmax += 1
-#     cmax += 1
-#     r_b = rmax - rmin
-#     for tt in range(len(border_list)):
-#         if r_b > border_list[tt] and r_b < border_list[tt + 1]:
-#             r_b = border_list[tt + 1]
-#             break
-#     c_b = cmax - cmin
-#     for tt in range(len(border_list)):
-#         if c_b > border_list[tt] and c_b < border_list[tt + 1]:
-#             c_b = border_list[tt + 1]
-#             break
-#     center = [int((rmin + rmax) / 2), int((cmin + cmax) / 2)]
-#     rmin = center[0] - int(r_b / 2)
-#     rmax = center[0] + int(r_b / 2)
-#     cmin = center[1] - int(c_b / 2)
-#     cmax = center[1] + int(c_b / 2)
-#     if rmin < 0:
-#         delt = -rmin
-#         rmin = 0
-#         rmax += delt
-#     if cmin < 0:
-#         delt = -cmin
-#         cmin = 0
-#         cmax += delt
-#     if rmax > img_width:
-#         delt = rmax - img_width
-#         rmax = img_width
-#         rmin -= delt
-#     if cmax > img_length:
-#         delt = cmax - img_length
-#         cmax = img_length
-#         cmin -= delt
-#     return rmin, rmax, cmin, cmax
-
-
-# def point_projection(point, intrinsics):
-#     cam_fx = intrinsics[0, 0]
-#     cam_fy = intrinsics[1, 1]
-#     cam_cy = intrinsics[1, 2]
-#     cam_cx = intrinsics[0, 2]
-#     point_x = point[0] / point[2]
-#     point_y = point[1] / point[2]
-#     point_x = point_x * cam_fx + cam_cx
-#     point_y = point_y * cam_fy + cam_cy
-#     return point_x, point_y
+border_list = [-1, 40, 80, 120, 160, 200, 240, 280, 320, 360, 400, 440, 480, 520, 560, 600, 640, 680, 720, 760, 800, 840, 880, 920, 960, 1000, 1040, 1080, 1120, 1160, 1200, 1240]
+def get_bbox(label):
+    rows = np.any(label, axis=1)
+    cols = np.any(label, axis=0)
+    rmin, rmax = np.where(rows)[0][[0, -1]]
+    cmin, cmax = np.where(cols)[0][[0, -1]]
+    rmax += 1
+    cmax += 1
+    r_b = rmax - rmin
+    for tt in range(len(border_list)):
+        if r_b > border_list[tt] and r_b < border_list[tt + 1]:
+            r_b = border_list[tt + 1]
+            break
+    c_b = cmax - cmin
+    for tt in range(len(border_list)):
+        if c_b > border_list[tt] and c_b < border_list[tt + 1]:
+            c_b = border_list[tt + 1]
+            break
+    center = [int((rmin + rmax) / 2), int((cmin + cmax) / 2)]
+    rmin = center[0] - int(r_b / 2)
+    rmax = center[0] + int(r_b / 2)
+    cmin = center[1] - int(c_b / 2)
+    cmax = center[1] + int(c_b / 2)
+    if rmin < 0:
+        delt = -rmin
+        rmin = 0
+        rmax += delt
+    if cmin < 0:
+        delt = -cmin
+        cmin = 0
+        cmax += delt
+    if rmax > img_width:
+        delt = rmax - img_width
+        rmax = img_width
+        rmin -= delt
+    if cmax > img_length:
+        delt = cmax - img_length
+        cmax = img_length
+        cmin -= delt
+    return rmin, rmax, cmin, cmax
 
 
-# zoom_in_lambda = 1.1
-# aspect_ratio = 1  # 640 / 480
-# def get_bbox(obj_mask, obj_t, intrinsic):
-#     bb_x, bb_y, bb_w, bb_h = cv2.boundingRect(np.uint8(obj_mask))
-#     x_c, y_c = point_projection(obj_t, intrinsic)
+def get_bbox_center(label, obj_t, intrinsic):
 
-#     x_c, y_c = round(x_c), round(y_c)
-
-#     x_dist = np.max([np.abs(bb_x - x_c), np.abs(bb_x + bb_w - x_c)])
-#     y_dist = np.max([np.abs(bb_y - y_c), np.abs(bb_y + bb_h - y_c)])
-
-#     zoomed_width = int(np.max([x_dist, y_dist * aspect_ratio]) * 2 * zoom_in_lambda)
-#     zoomed_height = int(np.max([x_dist / aspect_ratio, y_dist]) * 2 * zoom_in_lambda)
-
-#     rmin = y_c - int(zoomed_height / 2)
-#     rmax = y_c + int(zoomed_height / 2)
-#     cmin = x_c - int(zoomed_width / 2)
-#     cmax = x_c + int(zoomed_width / 2)
-#     if rmin < 0:
-#         delt = -rmin
-#         rmin = 0
-#         rmax += delt
-#     if cmin < 0:
-#         delt = -cmin
-#         cmin = 0
-#         cmax += delt
-#     if rmax > img_width:
-#         delt = rmax - img_width
-#         rmax = img_width
-#         rmin -= delt
-#     if cmax > img_length:
-#         delt = cmax - img_length
-#         cmax = img_length
-#         cmin -= delt
-#     return rmin, rmax, cmin, cmax
-
-
-def get_bbox(label, obj_t, intrinsic):
-    bb_x, bb_y, bb_w, bb_h = cv2.boundingRect(label)
-    
     fx, fy = intrinsic[0, 0], intrinsic[1, 1]
     cx, cy = intrinsic[0, 2], intrinsic[1, 2]
     center_2d = [
@@ -135,29 +84,11 @@ def get_bbox(label, obj_t, intrinsic):
     rmax += 1
     cmax += 1
 
-    max_width = cmax - cmin
-    max_height = rmax - rmin
-
-    # Determine patch size (square, using max dimension)
-    # patch_size = max(max_width, max_height)
-
-    # Compute bounding box centered on the projected 2D center
-    # rmin = center_2d[1] - max_height // 2
-    # rmax = center_2d[1] + max_height // 2
-    # cmin = center_2d[0] - max_width // 2
-    # cmax = center_2d[0] + max_width // 2
-
     # Adjust bounding box to center around `center_2d` while ensuring it covers the mask
     cmin = center_2d[0] - (center_2d[0] - cmin)
     cmax = center_2d[0] + (cmax - center_2d[0])
     rmin = center_2d[1] - (center_2d[1] - rmin)
     rmax = center_2d[1] + (rmax - center_2d[1])
-
-    # # Zero padding if bbox goes out of bounds
-    # pad_top = max(0, -rmin)
-    # pad_bottom = max(0, rmax - img_width)
-    # pad_left = max(0, -cmin)
-    # pad_right = max(0, cmax - img_length)
 
     # Clip the bbox to fit within the image
     rmin = max(0, rmin)
@@ -166,7 +97,6 @@ def get_bbox(label, obj_t, intrinsic):
     cmax = min(img_length, cmax)
 
     return rmin, rmax, cmin, cmax, center_2d
-    # return rmin, rmax, cmin, cmax, pad_top, pad_bottom, pad_left, pad_right
 
 
 def add_noise_point_cloud(point_cloud, level=0.005, valid_min_z=0):
@@ -195,7 +125,50 @@ def add_noise_point_cloud(point_cloud, level=0.005, valid_min_z=0):
     return noisy_point_cloud
 
 
-def get_patch_point_cloud(patch_depth, intrinsics, bbox, choose, cam_scale):
+# def get_patch_point_cloud(patch_depth, intrinsics, bbox, choose, cam_scale):
+#     """
+#     Get the 3D point cloud from a patch depth map, dynamically creating xmap and ymap based on crop size.
+
+#     Parameters:
+#     - patch_depth: np.ndarray, shape (H, W), depth map of the patch (in meters).
+#     - intrinsics: np.ndarray, shape (3, 3), camera intrinsic matrix.
+#     - rmin, rmax, cmin, cmax: int, patch boundary in the full image.
+#     - choose: np.ndarray, indices of valid points in the patch.
+#     - cam_scale: float, depth scale factor.
+
+#     Returns:
+#     - point_cloud: np.ndarray, shape (N, 3), 3D point cloud.
+#     """
+#     rmin, rmax, cmin, cmax = bbox
+#     # Intrinsic parameters
+#     fx, fy = intrinsics[0, 0], intrinsics[1, 1]
+#     cx, cy = intrinsics[0, 2], intrinsics[1, 2]
+
+#     # Get the size of the cropped patch
+#     patch_height = rmax - rmin
+#     patch_width = cmax - cmin
+
+#     # Dynamically generate xmap and ymap for the cropped patch
+#     xmap = np.tile(np.arange(cmin, cmax), (patch_height, 1))  # X coordinates for crop
+#     ymap = np.tile(np.arange(rmin, rmax).reshape(-1, 1), (1, patch_width))  # Y coordinates for crop
+
+#     # Masked depth and pixel coordinates
+#     depth_masked = patch_depth.flatten()[choose][:, np.newaxis].astype(np.float32)
+#     xmap_masked = xmap.flatten()[choose][:, np.newaxis].astype(np.float32)
+#     ymap_masked = ymap.flatten()[choose][:, np.newaxis].astype(np.float32)
+
+#     # Scale depth
+#     pt2 = depth_masked / cam_scale
+
+#     # Compute 3D coordinates
+#     pt0 = (xmap_masked - cx) * pt2 / fx
+#     pt1 = (ymap_masked - cy) * pt2 / fy
+#     cloud = np.concatenate((pt0, pt1, pt2), axis=1)
+
+#     return cloud
+
+
+def get_patch_point_cloud(patch_depth, intrinsics, bbox, cam_scale):
     """
     Get the 3D point cloud from a patch depth map, dynamically creating xmap and ymap based on crop size.
 
@@ -223,9 +196,9 @@ def get_patch_point_cloud(patch_depth, intrinsics, bbox, choose, cam_scale):
     ymap = np.tile(np.arange(rmin, rmax).reshape(-1, 1), (1, patch_width))  # Y coordinates for crop
 
     # Masked depth and pixel coordinates
-    depth_masked = patch_depth.flatten()[choose][:, np.newaxis].astype(np.float32)
-    xmap_masked = xmap.flatten()[choose][:, np.newaxis].astype(np.float32)
-    ymap_masked = ymap.flatten()[choose][:, np.newaxis].astype(np.float32)
+    depth_masked = patch_depth.flatten()[:, np.newaxis].astype(np.float32)
+    xmap_masked = xmap.flatten()[:, np.newaxis].astype(np.float32)
+    ymap_masked = ymap.flatten()[:, np.newaxis].astype(np.float32)
 
     # Scale depth
     pt2 = depth_masked / cam_scale
@@ -301,7 +274,7 @@ def inplane_pose_2D_rotation(pose, rotation_angle):
     R = pose[:3, :3]  # 3x3 rotation matrix
     t = pose[:3, 3]   # Translation vector (3,)
 
-    # Calculate alpha_x and alpha_y using ground truth translation
+    # # Calculate alpha_x and alpha_y using ground truth translation
     alpha_x = -np.arctan2(t[1], t[2])  # YZ plane
     alpha_y = np.arctan2(t[0], np.linalg.norm(t[1:3]))  # ZX plane
 
@@ -313,9 +286,20 @@ def inplane_pose_2D_rotation(pose, rotation_angle):
     Rz = axangle2mat(np.array([[0.0, 0.0, 1.0]]), np.array([rotation_angle]), is_normalized=True)[0]
 
     # Final rotation update
-    R_new = Ry @ Rx @ Rz @ Rx.T @ Ry.T @ R
+    # R_canonical = Rz @ Rx.T @ Ry.T @ R 
+    # R_new = Ry @ Rx @ R
+    # R_new = Rz @ Rx.T @ Ry.T @ R
+    # R_new = Rz @ Ry @ Rx @ R
+    # R_new = Ry @ Rx @ Rz @ R
     # R_new = Ry @ Rx @ Rz @ R
 
+    # Rz_canonical = Rz @ Ry.T @ Rx.T
+    # Rz_canonical = Rx @ Ry @ Rz
+    # R_new = Rz_canonical @ R
+    # R_new = Ry @ Rx @ Rz @ Rx.T @ Ry.T @ R
+    # R_new = Rz @ Rx.T @ Ry.T @ R
+    # R_new = R
+    R_new = Ry @ Rx @ Rz @ np.linalg.inv(Rx) @ np.linalg.inv(Ry) @ R
     # Translation remains unchanged
     t_new = t
 
@@ -325,6 +309,64 @@ def inplane_pose_2D_rotation(pose, rotation_angle):
     updated_pose[:3, 3] = t_new
 
     return updated_pose
+
+# from scipy.spatial.transform import Rotation as R
+# def inplane_pose_2D_rotation(pose, rotation_angle):
+#     """
+#     Update the 6D pose with a 2D in-plane rotation applied to the patch image.
+
+#     Parameters:
+#     - pose: np.ndarray, shape (4, 4), initial 6D pose in homogeneous coordinates.
+#     - rotation_angle: float, rotation angle in radians (2D image rotation).
+
+#     Returns:
+#     - updated_pose: np.ndarray, shape (4, 4), updated 6D pose in homogeneous coordinates.
+#     """
+#     # Extract rotation (R) and translation (t) from the 4x4 pose matrix
+#     R_mat = pose[:3, :3]  # 3x3 rotation matrix
+#     t = pose[:3, 3]       # Translation vector (3,)
+
+#     # Generate the 2D rotation matrix (around Z-axis)
+#     Rz = R.from_euler('z', rotation_angle).as_matrix()
+
+#     # Update the rotation matrix
+#     R_new = Rz @ R_mat  # Apply the in-plane rotation to the original rotation
+
+#     # Translation remains unchanged
+#     t_new = t
+
+#     # Assemble the updated 4x4 pose matrix
+#     updated_pose = pose.copy()
+#     updated_pose[:3, :3] = R_new
+#     updated_pose[:3, 3] = t_new
+
+#     return updated_pose
+
+
+def flip_image(rgb, depth, mask, flip_code):
+    """
+    Flip RGB, depth, and mask images.
+
+    Parameters:
+    - rgb_image: np.ndarray, shape (H, W, 3), RGB image.
+    - depth_image: np.ndarray, shape (H, W), depth image.
+    - mask_image: np.ndarray, shape (H, W), mask image.
+    - flip_code: int, flip direction.
+        0: Flip vertically.
+        1: Flip horizontally.
+       -1: Flip both vertically and horizontally.
+
+    Returns:
+    - flipped_rgb: np.ndarray, flipped RGB image.
+    - flipped_depth: np.ndarray, flipped depth image.
+    - flipped_mask: np.ndarray, flipped mask image.
+    """
+    # Flip images using OpenCV's flip function
+    flipped_rgb = cv2.flip(rgb, flip_code)
+    flipped_depth = cv2.flip(depth, flip_code)
+    flipped_mask = cv2.flip(mask, flip_code)
+
+    return flipped_rgb, flipped_depth, flipped_mask
 
 
 def rotate_image(color, depth, mask, rotation_angle, center=None, fill_color=(0, 0, 0)):
@@ -459,7 +501,7 @@ def visualize_bbox_with_center(image, rmin, rmax, cmin, cmax, center, index):
 
 class GraspNetDataset(Dataset):
     def __init__(self, root, valid_obj_idxs, grasp_labels, camera='kinect', split='train', num_points=1024,
-                 remove_outlier=False, remove_invisible=True, pose_augment=False, inplane_pose_augment=False, point_augment=False, denoise=False, load_label=True, real_data=True, syn_data=False, visib_threshold=0.0, voxel_size=0.005):
+                 remove_outlier=False, remove_invisible=True, multi_modal_pose_augment=False, point_augment=False, denoise=False, load_label=True, real_data=True, syn_data=False, visib_threshold=0.0, voxel_size=0.005):
         self.root = root
         self.split = split
         self.num_points = num_points
@@ -468,8 +510,9 @@ class GraspNetDataset(Dataset):
         self.valid_obj_idxs = valid_obj_idxs
         self.grasp_labels = grasp_labels
         self.camera = camera
-        self.pose_augment = pose_augment
-        self.inplane_pose_augment = inplane_pose_augment
+        # self.pose_augment = pose_augment
+        # self.inplane_pose_augment = inplane_pose_augment
+        self.multi_modal_pose_augment = multi_modal_pose_augment
         self.point_augment = point_augment
         self.denoise = denoise
         self.denoise_pre_sample_num = int(self.num_points * 1.5)
@@ -483,7 +526,7 @@ class GraspNetDataset(Dataset):
         if split == 'train':
             self.sceneIds = list(range(100))
             # self.sceneIds = list(range(79, 80))
-            # self.sceneIds = list(range(47, 48))
+            # self.sceneIds = list(range(14, 15))
         elif split == 'test':
             self.sceneIds = list(range(100, 190))
         elif split == 'test_seen':
@@ -547,30 +590,64 @@ class GraspNetDataset(Dataset):
     def __len__(self):
         return len(self.depthpath)
 
-    def points_pose_augment(self, point_clouds, object_pose):
+    def instance_pose_augment(self, point_cloud, object_pose):
         # Flipping along the YZ plane
         if np.random.random() > 0.5:
             flip_mat = np.array([[-1, 0, 0],
                                 [ 0, 1, 0],
                                 [ 0, 0, 1]])
-            point_clouds = transform_point_cloud(point_clouds, flip_mat, '3x3')
+            point_cloud = transform_point_cloud(point_cloud, flip_mat, '3x3')
             object_pose = np.dot(flip_mat, object_pose).astype(np.float32)
 
         # Rotation along up-axis/Z-axis
         rot_angle = (np.random.random()*np.pi/3) - np.pi/6 # -30 ~ +30 degree
         c, s = np.cos(rot_angle), np.sin(rot_angle)
-        rot_mat = np.array([[1, 0, 0],
-                            [0, c,-s],
-                            [0, s, c]])
-        point_clouds = transform_point_cloud(point_clouds, rot_mat, '3x3')
+        rot_mat = np.array([[c, -s, 0],
+                            [s, c, 0],
+                            [0, 0, 1]])
+                
+        point_cloud = transform_point_cloud(point_cloud, rot_mat, '3x3')
         object_pose = np.dot(rot_mat, object_pose).astype(np.float32)
-        return point_clouds, object_pose
+        return point_cloud, object_pose
 
-    def inplane_pose_transform(self, color, depth, mask, object_pose):
-        rot_angle = (np.random.random()*np.deg2rad(180)) - np.deg2rad(90) # -90 ~ +90 degree
-        augment_pose = inplane_pose_2D_rotation(object_pose, rot_angle)
-        rot_color, rot_depth, rot_mask = rotate_image(color, depth, mask, -rot_angle, fill_color=(0, 0, 0))
-        return rot_color, rot_depth, rot_mask, augment_pose
+    def scene_pose_augment(self, images, object_poses):
+        (color, depth, mask) = images
+        # Flipping along the YZ plane
+        if np.random.random() > 0.5:
+            flip_mat = np.eye(4)
+            flip_mat[:3, :3] = np.array([[-1, 0, 0],
+                                         [ 0, 1, 0],
+                                         [ 0, 0, 1]])
+            # point_clouds = transform_point_cloud(point_clouds, flip_mat, '3x3')
+            color, depth, mask = flip_image(color, depth, mask, 1)
+            for i in range(len(object_poses)):
+                object_pose = np.eye(4)
+                object_pose[:3, :] = object_poses[i]
+                object_poses[i] = (flip_mat @ object_pose)[:3, :].astype(np.float32)
+
+        # Rotation along up-axis/Z-axis
+        rot_angle = (np.random.random()*np.pi/3) - np.pi/6 # -30 ~ +30 degree
+        c, s = np.cos(rot_angle), np.sin(rot_angle)
+        rot_mat = np.eye(4)
+        rot_mat[:3, :3] = np.array([[c, -s, 0],
+                                    [s, c, 0],
+                                    [0, 0, 1]])
+
+        color, depth, mask = rotate_image(color, depth, mask, -rot_angle)
+        # point_clouds = transform_point_cloud(point_clouds, rot_mat, '3x3')
+        for i in range(len(object_poses)):
+            object_pose = np.eye(4)
+            object_pose[:3, :] = object_poses[i]
+            object_poses[i] = (rot_mat @ object_pose)[:3, :].astype(np.float32)
+
+        return (color, depth, mask), object_poses
+    
+    # def inplane_pose_transform(self, color, depth, mask, object_pose):
+    #     # rot_angle = (np.random.random()*np.deg2rad(180)) - np.deg2rad(90) # -90 ~ +90 degree
+    #     rot_angle = np.deg2rad(90)
+    #     augment_pose = inplane_pose_2D_rotation(object_pose, rot_angle)
+    #     rot_color, rot_depth, rot_mask = rotate_image(color, depth, mask, -rot_angle, fill_color=(0, 0, 0))
+    #     return rot_color, rot_depth, rot_mask, augment_pose
     
     def __getitem__(self, index):
         if self.load_label:
@@ -625,7 +702,6 @@ class GraspNetDataset(Dataset):
             if inst_mask_len > self.minimum_num_pt and inst_visib_fract > self.visib_threshold:
                 break
 
-        
         inst_mask = inst_mask.astype(np.uint8)
         object_pose = poses[:, :, choose_idx]
         rmin, rmax, cmin, cmax, center = get_bbox(inst_mask, object_pose[:3, 3], intrinsic)
@@ -651,6 +727,133 @@ class GraspNetDataset(Dataset):
         ret_dict['feats'] = np.ones_like(inst_cloud).astype(np.float32)
         return ret_dict
 
+    # def get_data_label(self, index):
+    #     color = np.array(Image.open(self.colorpath[index]), dtype=np.float32) / 255.0
+    #     depth = np.array(Image.open(self.depthpath[index]))
+    #     seg = np.array(Image.open(self.labelpath[index]))
+    #     meta = scio.loadmat(self.metapath[index])
+    #     visib_info = scio.loadmat(self.visibpath[index])
+    #     scene = self.scenename[index]
+    #     real_flag = self.real_flags[index]
+    #     # graspness = np.load(self.graspnesspath[index])  # for each point in workspace masked point cloud
+    #     # normal = np.load(self.normalpath[index])['normals']
+        
+    #     try:
+    #         obj_idxs = meta['cls_indexes'].flatten().astype(np.int32)
+    #         poses = meta['poses']
+    #         intrinsic = meta['intrinsic_matrix']
+    #         factor_depth = meta['factor_depth'][0]
+    #     except Exception as e:
+    #         print(repr(e))
+    #         print(scene)
+
+    #     # get valid points
+    #     depth_mask = (depth > 0)
+    #     seg_mask = (seg > 0)
+    #     if self.remove_outlier:
+    #         camera_poses = np.load(os.path.join(self.root, 'scenes', scene, self.camera, 'camera_poses.npy'))
+    #         align_mat = np.load(os.path.join(self.root, 'scenes', scene, self.camera, 'cam0_wrt_table.npy'))
+    #         trans = np.dot(align_mat, camera_poses[self.frameid[index]])
+    #         workspace_mask = get_workspace_mask(cloud, seg, trans=trans, organized=True, outlier=0.02)
+    #         mask = (depth_mask & workspace_mask)
+    #     else:
+    #         mask = depth_mask
+
+    #     seg_masked = seg * mask
+        
+    #     while 1:
+    #         choose_idx = np.random.choice(np.arange(len(obj_idxs)))
+    #         inst_mask = seg_masked == obj_idxs[choose_idx]
+    #         inst_mask_len = inst_mask.sum()
+    #         inst_visib_fract = float(visib_info[str(obj_idxs[choose_idx])]['visib_fract'])
+    #         if inst_mask_len > self.minimum_num_pt and inst_visib_fract > self.visib_threshold:
+    #             break
+
+    #     inst_mask = inst_mask.astype(np.uint8)
+    #     object_pose = poses[:, :, choose_idx]
+    #     rmin, rmax, cmin, cmax, center = get_bbox_center(inst_mask, object_pose[:3, 3], intrinsic)
+    #     bbox = (rmin, rmax, cmin, cmax)
+
+    #     patch_color = color[rmin:rmax, cmin:cmax, :]
+    #     patch_depth = depth[rmin:rmax, cmin:cmax]
+    #     patch_mask = inst_mask[rmin:rmax, cmin:cmax]
+
+    #     # cv2.imwrite("{}_color.png".format(index), patch_color*255.0)
+    #     choose = patch_mask.flatten().nonzero()[0]
+    #     sampled_idxs = sample_points(len(choose), self.num_points)
+    #     choose = choose[sampled_idxs]
+        
+    #     inst_cloud = get_patch_point_cloud(patch_depth, intrinsic, bbox, choose, factor_depth)
+    #     inst_color = patch_color.reshape(-1, 3)[choose]
+        
+    #     # inst_pc_vis = o3d.geometry.PointCloud()
+    #     # inst_pc_vis.points = o3d.utility.Vector3dVector(inst_cloud.astype(np.float32))
+    #     # # inst_pc_vis.colors = o3d.utility.Vector3dVector(inst_color.astype(np.float32))
+    #     # inst_pc_vis.paint_uniform_color([1.0, 0.0, 0.0])
+    #     # combin_vis = scene_vis + inst_pc_vis
+    #     # o3d.io.write_point_cloud('{0}_combine.ply'.format(index), combin_vis)
+    
+    #     if self.point_augment:
+    #         inst_cloud, dropout_idx = random_point_dropout(inst_cloud, min_num=self.minimum_num_pt,num_points_to_drop=2, radius_percent=0.1)
+    #         inst_color = inst_color[dropout_idx]
+    #         if not real_flag:
+    #             inst_cloud = add_noise_point_cloud(inst_cloud.astype(np.float32), level=0.003, valid_min_z=0.1)
+                
+    #     orig_width, orig_length, _ = patch_color.shape
+    #     resized_idxs = self.get_resized_idxs(choose, (orig_width, orig_length))
+    #     img = self.img_transforms(patch_color)
+        
+    #     # inst_idxs_img = np.zeros_like(img)
+    #     # inst_idxs_img = inst_idxs_img.reshape(-1, 3)
+    #     # inst_idxs_img[resized_idxs] = inst_color
+    #     # inst_idxs_img = inst_idxs_img.reshape((224, 224, 3))
+    #     # cv2.imwrite("{}_inst_input.png".format(index), inst_idxs_img*255.)
+        
+    #     # inst_pc_vis = o3d.geometry.PointCloud()
+    #     # inst_pc_vis.points = o3d.utility.Vector3dVector(inst_cloud.astype(np.float32))
+    #     # inst_pc_vis.colors = o3d.utility.Vector3dVector(inst_color.astype(np.float32))
+    #     # o3d.io.write_point_cloud('{0}_input.ply'.format(index), inst_pc_vis)
+        
+    #     points, offsets, scores = self.grasp_labels[obj_idxs[choose_idx]]
+    #     collision = self.collision_labels[scene][choose_idx] #(Np, V, A, D)
+    #     # grasp_idxs = np.random.choice(len(points), min(max(int(len(points)/4), 300),len(points)), replace=False)
+        
+    #     if self.pose_augment:
+    #         inst_cloud, object_pose = self.points_pose_augment(inst_cloud, object_pose)
+        
+    #     grasp_idxs = np.sort(np.random.choice(len(points), 350, replace=False))
+    #     # grasp_idxs = np.random.choice(len(points), min(max(int(len(points) / 4), 350), len(points)), replace=False)
+    #     grasp_points = points[grasp_idxs]
+    #     grasp_offsets = offsets[grasp_idxs]
+    #     collision = collision[grasp_idxs].copy()
+    #     scores = scores[grasp_idxs].copy()
+    #     scores[collision] = 0
+    #     grasp_scores = scores
+        
+    #     ret_dict = {}
+    #     ret_dict['point_clouds'] = inst_cloud.astype(np.float32)
+    #     ret_dict['cloud_colors'] = inst_color.astype(np.float32)
+        
+    #     # ret_dict['cloud_normals'] = inst_normal.astype(np.float32)
+    #     ret_dict['coors'] = inst_cloud.astype(np.float32) / self.voxel_size
+    #     # ret_dict['feats'] = inst_color.astype(np.float32)
+    #     ret_dict['feats'] = np.ones_like(inst_cloud).astype(np.float32)
+        
+    #     ret_dict['img'] = img
+    #     ret_dict['img_idxs'] = resized_idxs.astype(np.int64)
+    #     # ret_dict['graspness_label'] = graspness_sampled.astype(np.float32)
+    #     # ret_dict['objectness_label'] = objectness_label.astype(np.int64)
+    #     # ret_dict['object_poses_list'] = object_poses_list
+    #     # ret_dict['grasp_points_list'] = grasp_points_list
+    #     # ret_dict['grasp_offsets_list'] = grasp_offsets_list
+    #     # ret_dict['grasp_labels_list'] = grasp_scores_list
+    #     ret_dict['object_pose'] = object_pose.astype(np.float32)
+    #     ret_dict['grasp_points'] = grasp_points.astype(np.float32)
+    #     ret_dict['grasp_offsets'] = grasp_offsets.astype(np.float32)
+    #     ret_dict['grasp_labels'] = grasp_scores.astype(np.float32)
+    #     return ret_dict
+    
+    
     def get_data_label(self, index):
         color = np.array(Image.open(self.colorpath[index]), dtype=np.float32) / 255.0
         depth = np.array(Image.open(self.depthpath[index]))
@@ -672,53 +875,64 @@ class GraspNetDataset(Dataset):
             print(scene)
 
         # get valid points
-        depth_mask = (depth > 0)
-        seg_mask = (seg > 0)
-        if self.remove_outlier:
-            camera_poses = np.load(os.path.join(self.root, 'scenes', scene, self.camera, 'camera_poses.npy'))
-            align_mat = np.load(os.path.join(self.root, 'scenes', scene, self.camera, 'cam0_wrt_table.npy'))
-            trans = np.dot(align_mat, camera_poses[self.frameid[index]])
-            workspace_mask = get_workspace_mask(cloud, seg, trans=trans, organized=True, outlier=0.02)
-            mask = (depth_mask & workspace_mask)
-        else:
-            mask = depth_mask
+        # if self.remove_outlier:
+        #     camera_poses = np.load(os.path.join(self.root, 'scenes', scene, self.camera, 'camera_poses.npy'))
+        #     align_mat = np.load(os.path.join(self.root, 'scenes', scene, self.camera, 'cam0_wrt_table.npy'))
+        #     trans = np.dot(align_mat, camera_poses[self.frameid[index]])
+        #     workspace_mask = get_workspace_mask(cloud, seg, trans=trans, organized=True, outlier=0.02)
+        #     mask = (depth_mask & workspace_mask)
+        # else:
+        # mask = depth_mask
 
-        seg_masked = seg * mask
+        poses = poses.transpose(2, 0, 1)
         
+        if self.multi_modal_pose_augment:
+            (color, depth, seg), poses = self.scene_pose_augment((color, depth, seg), poses)
+                
         while 1:
             choose_idx = np.random.choice(np.arange(len(obj_idxs)))
-            inst_mask = seg_masked == obj_idxs[choose_idx]
+            inst_mask = seg == obj_idxs[choose_idx]
             inst_mask_len = inst_mask.sum()
-            inst_visib_fract = float(visib_info[str(obj_idxs[choose_idx])]['visib_fract'])
+            # inst_visib_fract = float(visib_info[str(obj_idxs[choose_idx])]['visib_fract'])
+            inst_visib_fract = float(inst_mask_len / visib_info[str(obj_idxs[choose_idx])]['px_count_all'])
             if inst_mask_len > self.minimum_num_pt and inst_visib_fract > self.visib_threshold:
                 break
 
+        depth_mask = (depth > 0)
+        seg = seg * depth_mask
+        # color, depth, seg = color_aug, depth_aug, seg_aug
         inst_mask = inst_mask.astype(np.uint8)
-        object_pose = poses[:, :, choose_idx]
-        rmin, rmax, cmin, cmax, center = get_bbox(inst_mask, object_pose[:3, 3], intrinsic)
+        object_pose = poses[choose_idx, :, :]
+        rmin, rmax, cmin, cmax = get_bbox(inst_mask)
+        
         bbox = (rmin, rmax, cmin, cmax)
-
         patch_color = color[rmin:rmax, cmin:cmax, :]
         patch_depth = depth[rmin:rmax, cmin:cmax]
         patch_mask = inst_mask[rmin:rmax, cmin:cmax]
-
-        if self.inplane_pose_augment:
-            patch_color, patch_depth, patch_mask, object_pose = self.inplane_pose_transform(patch_color, patch_depth, patch_mask, object_pose)
         
-        # cv2.imwrite("{}_color.png".format(index), patch_color*255.0)
+        # cv2.imwrite("{}_before.png".format(index), patch_color[:, :, ::-1]*255.)
+        # if self.pose_augment:
+        #     patch_cloud, object_pose = self.points_pose_augment(patch_cloud, object_pose)
+
+        # cv2.imwrite("{}_before.png".format(index), patch_color*255.0)
+        
+        # if self.inplane_pose_augment:
+        #     patch_color, patch_depth, patch_mask, object_pose = self.inplane_pose_transform(patch_color, patch_depth, patch_mask, object_pose)
+
         choose = patch_mask.flatten().nonzero()[0]
-        if len(choose) <= 0:
-            rmin, rmax, cmin, cmax, center = get_bbox(inst_mask, object_pose[:3, 3], intrinsic)
-            print(self.colorpath[index], choose_idx)
-            print(rmin, rmax, cmin, cmax)
-            visualize_bbox_with_center(color, rmin, rmax, cmin, cmax, center, index)
-            cv2.imwrite("{}_color.png".format(index), color*255.0)
-            cv2.imwrite("{}_mask.png".format(index), inst_mask * 255.0)
+        # if len(choose) <= 0:
+        #     rmin, rmax, cmin, cmax, center = get_bbox(inst_mask, object_pose[:3, 3], intrinsic)
+        #     print(self.colorpath[index], choose_idx)
+        #     print(rmin, rmax, cmin, cmax)
+        #     visualize_bbox_with_center(color, rmin, rmax, cmin, cmax, center, index)
+        #     cv2.imwrite("{}_color.png".format(index), color*255.0)
+        #     cv2.imwrite("{}_mask.png".format(index), inst_mask * 255.0)
             
         sampled_idxs = sample_points(len(choose), self.num_points)
         choose = choose[sampled_idxs]
-        
-        inst_cloud = get_patch_point_cloud(patch_depth, intrinsic, bbox, choose, factor_depth)
+
+        patch_cloud = get_patch_point_cloud(patch_depth, intrinsic, bbox, factor_depth)
+        inst_cloud = patch_cloud[choose]
         inst_color = patch_color.reshape(-1, 3)[choose]
         
         # inst_pc_vis = o3d.geometry.PointCloud()
@@ -738,9 +952,10 @@ class GraspNetDataset(Dataset):
         resized_idxs = self.get_resized_idxs(choose, (orig_width, orig_length))
         img = self.img_transforms(patch_color)
         
+        # cv2.imwrite("{}_after.png".format(index), patch_color[:, :, ::-1]*255.)
         # inst_idxs_img = np.zeros_like(img)
         # inst_idxs_img = inst_idxs_img.reshape(-1, 3)
-        # inst_idxs_img[resized_idxs] = inst_color
+        # inst_idxs_img[resized_idxs] = inst_color[:, ::-1]
         # inst_idxs_img = inst_idxs_img.reshape((224, 224, 3))
         # cv2.imwrite("{}_inst_input.png".format(index), inst_idxs_img*255.)
         
@@ -752,12 +967,8 @@ class GraspNetDataset(Dataset):
         points, offsets, scores = self.grasp_labels[obj_idxs[choose_idx]]
         collision = self.collision_labels[scene][choose_idx] #(Np, V, A, D)
         # grasp_idxs = np.random.choice(len(points), min(max(int(len(points)/4), 300),len(points)), replace=False)
-        
-        if self.pose_augment:
-            inst_cloud, object_pose = self.points_pose_augment(inst_cloud, object_pose)
-        
+                
         grasp_idxs = np.sort(np.random.choice(len(points), 350, replace=False))
-        # grasp_idxs = np.random.choice(len(points), min(max(int(len(points) / 4), 350), len(points)), replace=False)
         grasp_points = points[grasp_idxs]
         grasp_offsets = offsets[grasp_idxs]
         collision = collision[grasp_idxs].copy()
@@ -793,6 +1004,7 @@ def load_grasp_labels(root):
     # obj_names = [0, 2, 5, 14, 15, 20, 21, 22, 41, 43, 44, 46, 48, 52, 60, 62, 66, 70]
     # obj_names = [0, 2, 5, 20, 26, 37, 38, 51, 66]
     # obj_names = [ 8, 20, 26, 30, 41, 46, 56, 57, 60, 63, 66]
+    # obj_names = [ 0, 9, 17, 51, 58, 61, 69, 70,]
     valid_obj_idxs = []
     grasp_labels = {}
     for obj_idx in tqdm(obj_names, desc='Loading grasping labels...'):
@@ -895,12 +1107,12 @@ if __name__ == "__main__":
     
     root = '/media/gpuadmin/rcao/dataset/graspnet'
     valid_obj_idxs, grasp_labels = load_grasp_labels(root)
-    train_dataset = GraspNetDataset(root, valid_obj_idxs, grasp_labels, num_points=1024, camera='realsense', split='train', inplane_pose_augment=False, pose_augment=False, point_augment=False, real_data=True, syn_data=False, visib_threshold=0.5, denoise=False, voxel_size=0.002)
+    train_dataset = GraspNetDataset(root, valid_obj_idxs, grasp_labels, num_points=1024, camera='realsense', split='train', multi_modal_pose_augment=True, point_augment=False, real_data=True, syn_data=False, visib_threshold=0.5, denoise=False, voxel_size=0.002)
     # print(len(train_dataset))
 
     scene_list = list(range(len(train_dataset)))
     # np.random.shuffle(scene_list)
-    for scene_id in scene_list[:15]:
+    for scene_id in scene_list:
         end_points = train_dataset[scene_id]
 
         cloud = end_points['point_clouds']
@@ -908,7 +1120,7 @@ if __name__ == "__main__":
         pose = end_points['object_pose']
         grasp_point = end_points['grasp_points']
         grasp_point = transform_point_cloud(grasp_point, pose, '3x4')
-
+        
         pc = o3d.geometry.PointCloud()
         pc.points = o3d.utility.Vector3dVector(cloud)
         pc.colors = o3d.utility.Vector3dVector(color)
@@ -917,6 +1129,6 @@ if __name__ == "__main__":
         pc_obj.points = o3d.utility.Vector3dVector(grasp_point)
         pc_obj.paint_uniform_color([1, 0, 0])
         pc_save = pc_obj + pc
-        # o3d.io.write_point_cloud('{}_combine.ply'.format(scene_id), pc_save)
+        o3d.io.write_point_cloud('{}_combine.ply'.format(scene_id), pc_save)
         
         # o3d.visualization.draw_geometries([pc, pc_obj])
