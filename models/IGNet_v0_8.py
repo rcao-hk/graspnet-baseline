@@ -467,8 +467,11 @@ class CrossModalAttention(nn.Module):
             nn.Conv1d(128, self.feat_dim, 1)
         )
         
-        self.point_kv_proj = nn.Linear(self.feat_dim, 2 * self.feat_dim, bias=in_proj_bias)
-        self.img_q_proj = nn.Linear(self.feat_dim, self.feat_dim, bias=in_proj_bias)
+        # self.point_kv_proj = nn.Linear(self.feat_dim, 2 * self.feat_dim, bias=in_proj_bias)
+        # self.img_q_proj = nn.Linear(self.feat_dim, self.feat_dim, bias=in_proj_bias)
+        self.point_kv_proj = nn.Conv1d(self.feat_dim, 2 * self.feat_dim, bias=in_proj_bias, kernel_size=1)
+        self.img_q_proj = nn.Conv1d(self.feat_dim, self.feat_dim, bias=in_proj_bias, kernel_size=1)
+        
         # self.img_kv_proj = nn.Linear(self.feat_dim, 2 * self.feat_dim, bias=in_proj_bias)
         # self.point_q_proj = nn.Linear(self.feat_dim, self.feat_dim, bias=in_proj_bias)
         
@@ -485,11 +488,10 @@ class CrossModalAttention(nn.Module):
 
         Bs, N, _ = point_feat.shape
         
-        # point_feat = point_feat.transpose(0, 1)  # (num_pc, B, point_dim)
-        # img_feat = img_feat.transpose(0, 1)  # (num_pc, B, img_dim)
+        point_feat = point_feat.transpose(1, 2)  # (B, point_dim, num_pc)
+        img_feat = img_feat.transpose(1, 2)  # (B, img_dim, num_pc)
         
-        img_feat = self.img_mlp(img_feat.permute(0, 2, 1)).permute(0, 2, 1)
-
+        img_feat = self.img_mlp(img_feat)
         img_q = self.img_q_proj(img_feat)
         # img_kv = self.img_kv_proj(img_feat)
         # point_q = self.point_q_proj(point_feat)
@@ -500,13 +502,13 @@ class CrossModalAttention(nn.Module):
         # point_q = self.point_q_proj(point_feat).half()
         # point_kv = self.point_kv_proj(point_feat).half()
         
-        img_q = rearrange(img_q, "... (h d) -> ... h d", d=self.feat_dim)
-        point_kv = rearrange(point_kv, "... (two hkv d) -> ... two hkv d", two=2, d=self.feat_dim)
+        img_q = rearrange(img_q.transpose(1, 2), "... (h d) -> ... h d", d=self.feat_dim)
+        point_kv = rearrange(point_kv.transpose(1, 2), "... (two hkv d) -> ... two hkv d", two=2, d=self.feat_dim)
         point_fuse = self.point_cross_attn(img_q, point_kv)
         # point_fuse = point_feat + point_fuse.view(Bs, N, -1)
         # point_fuse = torch.concat([point_feat, point_fuse.view(Bs, N, -1)], dim=-1)
 
-        fused_feat = torch.concat([point_feat, point_fuse.view(Bs, N, -1)], dim=-1)
+        fused_feat = torch.concat([point_feat.transpose(1, 2), point_fuse.view(Bs, N, -1)], dim=-1)
         
         # point_q = rearrange(point_q, "... (h d) -> ... h d", d=self.feat_dim)
         # img_kv = rearrange(img_kv, "... (two hkv d) -> ... two hkv d", two=2, d=self.feat_dim)
@@ -533,9 +535,9 @@ class IGNet(nn.Module):
         self.multi_scale_grouping = multi_scale_grouping
         
         # early fusion
-        self.img_feature_dim = 0
-        self.point_backbone = MinkUNet14D(in_channels=img_feat_dim, out_channels=self.seed_feature_dim, D=3)
-        print('early fusion')
+        # self.img_feature_dim = 0
+        # self.point_backbone = MinkUNet14D(in_channels=img_feat_dim, out_channels=self.seed_feature_dim, D=3)
+        # print('early fusion')
         
         # # late fusion (concatentation)
         # self.img_feature_dim = img_feat_dim
@@ -543,10 +545,10 @@ class IGNet(nn.Module):
         # print('late fusion (concatentation)')
         
         # late fusion (Cross attention concatentation)
-        # self.img_feature_dim = self.seed_feature_dim
-        # self.point_backbone = MinkUNet14D(in_channels=3, out_channels=self.seed_feature_dim, D=3)
-        # self.fusion_module = CrossModalAttention(self.seed_feature_dim, img_feat_dim, dropout=0.0, normalize=False)
-        # print('late fusion (Cross attention concatentation)')
+        self.img_feature_dim = self.seed_feature_dim
+        self.point_backbone = MinkUNet14D(in_channels=3, out_channels=self.seed_feature_dim, D=3)
+        self.fusion_module = CrossModalAttention(self.seed_feature_dim, img_feat_dim, dropout=0.0, normalize=False)
+        print('late fusion (Cross attention concatentation)')
         
         # late fusion (Gated fusion)
         # self.img_feature_dim = 0
@@ -625,15 +627,15 @@ class IGNet(nn.Module):
         image_features = torch.gather(img_feat, 2, img_idxs).contiguous()
         
         # early fusion
-        image_features = image_features.transpose(1, 2)
-        coordinates_batch, features_batch = ME.utils.sparse_collate(coords=[c for c in end_points['coors']], 
-                                                                    feats=[f for f in image_features], 
-                                                                    dtype=torch.float32)
-        coordinates_batch, features_batch, _, quantize2original = ME.utils.sparse_quantize(
-            coordinates_batch, features_batch, return_index=True, return_inverse=True, device=seed_xyz.device)
-        mink_input = ME.SparseTensor(coordinates=coordinates_batch, features=features_batch)
-        point_features = self.point_backbone(mink_input).F
-        seed_features = point_features[quantize2original].view(B, point_num, -1).transpose(1, 2)
+        # image_features = image_features.transpose(1, 2)
+        # coordinates_batch, features_batch = ME.utils.sparse_collate(coords=[c for c in end_points['coors']], 
+        #                                                             feats=[f for f in image_features], 
+        #                                                             dtype=torch.float32)
+        # coordinates_batch, features_batch, _, quantize2original = ME.utils.sparse_quantize(
+        #     coordinates_batch, features_batch, return_index=True, return_inverse=True, device=seed_xyz.device)
+        # mink_input = ME.SparseTensor(coordinates=coordinates_batch, features=features_batch)
+        # point_features = self.point_backbone(mink_input).F
+        # seed_features = point_features[quantize2original].view(B, point_num, -1).transpose(1, 2)
 
         # late fusion (concatentation)
         # coordinates_batch, features_batch = ME.utils.sparse_collate(coords=[c for c in end_points['coors']], 
@@ -647,16 +649,16 @@ class IGNet(nn.Module):
         # seed_features = torch.concat([point_features, image_features], dim=1)
     
         # late fusion (cross attention concatentation, gated fusion, add fusion)
-        # coordinates_batch, features_batch = ME.utils.sparse_collate(coords=[c for c in end_points['coors']], 
-        #                                                             feats=[f for f in end_points['feats']], 
-        #                                                             dtype=torch.float32)
-        # coordinates_batch, features_batch, _, quantize2original = ME.utils.sparse_quantize(
-        #     coordinates_batch, features_batch, return_index=True, return_inverse=True, device=seed_xyz.device)
-        # mink_input = ME.SparseTensor(features_batch, coordinates=coordinates_batch)
-        # point_features = self.point_backbone(mink_input).F
-        # point_features = point_features[quantize2original].view(B, point_num, -1)
-        # image_features = image_features.transpose(1, 2)
-        # seed_features = self.fusion_module(point_features, image_features)
+        coordinates_batch, features_batch = ME.utils.sparse_collate(coords=[c for c in end_points['coors']], 
+                                                                    feats=[f for f in end_points['feats']], 
+                                                                    dtype=torch.float32)
+        coordinates_batch, features_batch, _, quantize2original = ME.utils.sparse_quantize(
+            coordinates_batch, features_batch, return_index=True, return_inverse=True, device=seed_xyz.device)
+        mink_input = ME.SparseTensor(features_batch, coordinates=coordinates_batch)
+        point_features = self.point_backbone(mink_input).F
+        point_features = point_features[quantize2original].view(B, point_num, -1)
+        image_features = image_features.transpose(1, 2)
+        seed_features = self.fusion_module(point_features, image_features)
         
         end_points['seed_features'] = seed_features  # (B, seed_feature_dim, num_seed)
         end_points, rot_features = self.rot_head(seed_features, end_points)
