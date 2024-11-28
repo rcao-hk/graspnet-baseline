@@ -649,6 +649,28 @@ class GraspNetDataset(Dataset):
     #     rot_color, rot_depth, rot_mask = rotate_image(color, depth, mask, -rot_angle, fill_color=(0, 0, 0))
     #     return rot_color, rot_depth, rot_mask, augment_pose
     
+    def obj_idx_select(self, seg, obj_idxs, visib_info):
+        max_visib_fract = -1  # 初始化最大可见性比例
+        max_visib_idx = -1  # 初始化最大可见性对应的索引
+
+        for idx in range(len(obj_idxs)):
+            inst_mask = seg == obj_idxs[idx]
+            inst_mask_len = inst_mask.sum()
+            # inst_visib_fract = float(visib_info[str(obj_idxs[idx])]['visib_fract'])
+            inst_visib_fract = float(inst_mask_len / visib_info[str(obj_idxs[idx])]['px_count_all'])
+
+            # 更新最大可见性索引
+            if inst_visib_fract > max_visib_fract:
+                max_visib_fract = inst_visib_fract
+                max_visib_idx = idx
+
+            # 如果满足条件，立即返回
+            if inst_mask_len > self.minimum_num_pt and inst_visib_fract > self.visib_threshold:
+                return idx
+        else:
+            # 如果没有满足条件的索引，选择最大可见性的索引
+            return max_visib_idx
+            
     def __getitem__(self, index):
         if self.load_label:
             return self.get_data_label(index)
@@ -885,24 +907,24 @@ class GraspNetDataset(Dataset):
         # mask = depth_mask
 
         poses = poses.transpose(2, 0, 1)
-        
+        depth_mask = (depth > 0)
+        seg = seg * depth_mask
+       
         if self.multi_modal_pose_augment:
             (color, depth, seg), poses = self.scene_pose_augment((color, depth, seg), poses)
                 
-        while 1:
-            choose_idx = np.random.choice(np.arange(len(obj_idxs)))
-            inst_mask = seg == obj_idxs[choose_idx]
-            inst_mask_len = inst_mask.sum()
-            # inst_visib_fract = float(visib_info[str(obj_idxs[choose_idx])]['visib_fract'])
-            inst_visib_fract = float(inst_mask_len / visib_info[str(obj_idxs[choose_idx])]['px_count_all'])
-            if inst_mask_len > self.minimum_num_pt and inst_visib_fract > self.visib_threshold:
-                break
+        # while 1:
+        #     choose_idx = np.random.choice(np.arange(len(obj_idxs)))
+        #     inst_mask = seg == obj_idxs[choose_idx]
+        #     inst_mask_len = inst_mask.sum()
+        #     # inst_visib_fract = float(visib_info[str(obj_idxs[choose_idx])]['visib_fract'])
+        #     inst_visib_fract = float(inst_mask_len / visib_info[str(obj_idxs[choose_idx])]['px_count_all'])
+        #     if inst_mask_len > self.minimum_num_pt and inst_visib_fract > self.visib_threshold:
+        #         break
 
-        depth_mask = (depth > 0)
-        seg = seg * depth_mask
+        choose_idx = self.obj_idx_select(seg, obj_idxs, visib_info)
         inst_mask = seg == obj_idxs[choose_idx]
         inst_mask = inst_mask.astype(np.uint8)
-        
         object_pose = poses[choose_idx, :, :]
         rmin, rmax, cmin, cmax = get_bbox(inst_mask)
         
