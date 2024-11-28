@@ -900,8 +900,9 @@ class GraspNetDataset(Dataset):
 
         depth_mask = (depth > 0)
         seg = seg * depth_mask
-        # color, depth, seg = color_aug, depth_aug, seg_aug
+        inst_mask = seg == obj_idxs[choose_idx]
         inst_mask = inst_mask.astype(np.uint8)
+        
         object_pose = poses[choose_idx, :, :]
         rmin, rmax, cmin, cmax = get_bbox(inst_mask)
         
