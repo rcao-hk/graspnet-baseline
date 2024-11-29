@@ -306,6 +306,103 @@ class RotationScoringNet(nn.Module):
         return end_points, res_features
 
 
+from transformers.activations import ACT2FN
+class GateFFN(nn.Module):
+    def __init__(self, model_dim, dropout_rate, hidden_unit=2048):
+        super(GateFFN, self).__init__()
+        """
+        对应论文中的W，V，以及W2，激活函数对应GELU_new
+        """
+        self.W = nn.Linear(model_dim, hidden_unit, bias=False)
+        self.V = nn.Linear(model_dim, hidden_unit, bias=False)
+        self.W2 = nn.Linear(hidden_unit, model_dim, bias=False)
+        self.dropout = nn.Dropout(dropout_rate)
+        self.gelu_act = ACT2FN["gelu_new"]
+
+    def forward(self, hidden_states):
+        hidden_states = hidden_states.transpose(1, 2)
+        hidden_gelu = self.gelu_act(self.W(hidden_states))
+        hidden_linear = self.V(hidden_states)
+        hidden_states = hidden_gelu * hidden_linear
+        hidden_states = self.dropout(hidden_states)
+        hidden_states = self.W2(hidden_states)
+        hidden_states = hidden_states.transpose(1, 2)
+        return hidden_states
+    
+
+class DepthNetGate(nn.Module):
+    def __init__(self, num_view, num_angle, num_depth, seed_feature_dim):
+        super().__init__()
+        self.in_dim = seed_feature_dim
+        self.num_view = num_view
+        self.num_angle = num_angle
+        self.num_depth = num_depth
+        self.gate_ffn = GateFFN(self.in_dim, 0.1, 512)
+        # regression-based
+        self.conv_out = nn.Conv1d(self.in_dim, self.num_depth * 2, 1)
+
+    def forward(self, seed_features, end_points):
+        B, _, num_seed = seed_features.size()
+
+        features = self.gate_ffn(seed_features)
+        features = self.conv_out(features)
+
+        features = features.view(B, 2, self.num_depth, num_seed)
+        features = features.permute(0, 1, 3, 2) # (B, 2, num_seed, num_depth)
+
+        end_points['grasp_score_pred'] = features[:, 0]
+        end_points['grasp_width_pred'] = features[:, 1]
+
+        return end_points
+    
+    
+class RotationScoringNetGate(nn.Module):
+    def __init__(self, num_view, num_angle, num_depth, seed_feature_dim, is_training=True):
+        super().__init__()
+        self.num_view = num_view
+        self.num_angle = num_angle
+        self.num_depth = num_depth
+        self.in_dim = seed_feature_dim
+        self.is_training = is_training        
+        self.gate_ffn = GateFFN(self.in_dim, 0.1, 512)
+        # # regression-based
+        self.conv_out = nn.Conv1d(self.in_dim, self.num_view * self.num_angle, 1)
+
+    def forward(self, seed_features, end_points):
+        B, _, num_seed = seed_features.size()
+
+        res_features = self.gate_ffn(seed_features)
+        features = self.conv_out(res_features)
+        rotation_scores = features.transpose(1, 2).contiguous()  # (B, num_seed, num_view * num_angle)
+
+        end_points['grasp_rot_graspness_pred'] = rotation_scores
+
+        if self.is_training:
+            # normalize view graspness score to 0~1
+            rot_score = rotation_scores.clone().detach()
+            rot_score = normalize_tensor(rot_score)
+            top_rot_inds = []
+            for i in range(B):
+                try:
+                    top_rot_inds_batch = torch.multinomial(rot_score[i], 1, replacement=False)
+                except:
+                    print('outliers in rotation_scores')
+                    _, top_rot_inds_batch = torch.max(rot_score[i], dim=-1)  # (B, num_seed)
+                top_rot_inds.append(top_rot_inds_batch)
+            top_rot_inds = torch.stack(top_rot_inds, dim=0).squeeze(-1)  # B, num_seed
+        else:
+            _, top_rot_inds = torch.max(rotation_scores, dim=-1)  # (B, num_seed)
+            temp_grasp_rots = grasp_rot.clone().to(seed_features.device)
+            temp_grasp_rots = temp_grasp_rots.view(1, 1, self.num_view*self.num_angle, 3, 3)
+            temp_grasp_rots = temp_grasp_rots.expand(B, num_seed, -1, -1, -1).contiguous()
+            top_rot_inds_ = top_rot_inds.view(B, num_seed, 1, 1, 1).expand(-1, -1, -1, 3, 3)
+            grasp_top_rot = torch.gather(temp_grasp_rots, 2, top_rot_inds_).squeeze(2)
+            end_points['grasp_top_rot'] = grasp_top_rot
+
+        end_points['grasp_top_rot_inds'] = top_rot_inds
+        return end_points, res_features
+    
+    
 class RotationGraspableNet(nn.Module):
     def __init__(self, num_view, num_angle, num_depth, seed_feature_dim, is_training=True):
         super().__init__()
@@ -574,13 +671,14 @@ class IGNet(nn.Module):
                                    num_depth=self.num_depth,
                                    seed_feature_dim=self.seed_feature_dim)
 
-        # self.rot_head = RotationGraspableNet(self.num_view, num_angle=self.num_angle,
-        #                                      num_depth=self.num_depth,
-        #                                      seed_feature_dim=self.seed_feature_dim + self.img_feature_dim, 
-        #                                      is_training=self.is_training)
-        # self.depth_head = OperationNet(self.num_view, num_angle=self.num_angle, 
-        #                                num_depth=self.num_depth,
-        #                                seed_feature_dim=self.seed_feature_dim)
+        # self.rot_head = RotationScoringNetGate(self.num_view, num_angle=self.num_angle,
+        #                                         num_depth=self.num_depth,
+        #                                         seed_feature_dim=self.seed_feature_dim + self.img_feature_dim, 
+        #                                         is_training=self.is_training)
+        # self.depth_head = DepthNetGate(self.num_view, num_angle=self.num_angle, 
+        #                            num_depth=self.num_depth,
+        #                            seed_feature_dim=self.seed_feature_dim)
+        
         if self.multi_scale_grouping:
             feat_dim = self.seed_feature_dim + self.img_feature_dim
             self.crop_scales = [0.25, 0.5, 0.75, 1.0]

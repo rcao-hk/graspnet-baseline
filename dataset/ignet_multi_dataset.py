@@ -913,16 +913,16 @@ class GraspNetDataset(Dataset):
         if self.multi_modal_pose_augment:
             (color, depth, seg), poses = self.scene_pose_augment((color, depth, seg), poses)
                 
-        # while 1:
-        #     choose_idx = np.random.choice(np.arange(len(obj_idxs)))
-        #     inst_mask = seg == obj_idxs[choose_idx]
-        #     inst_mask_len = inst_mask.sum()
-        #     # inst_visib_fract = float(visib_info[str(obj_idxs[choose_idx])]['visib_fract'])
-        #     inst_visib_fract = float(inst_mask_len / visib_info[str(obj_idxs[choose_idx])]['px_count_all'])
-        #     if inst_mask_len > self.minimum_num_pt and inst_visib_fract > self.visib_threshold:
-        #         break
+        while 1:
+            choose_idx = np.random.choice(np.arange(len(obj_idxs)))
+            inst_mask = seg == obj_idxs[choose_idx]
+            inst_mask_len = inst_mask.sum()
+            inst_visib_fract = float(visib_info[str(obj_idxs[choose_idx])]['visib_fract'])
+            # inst_visib_fract = float(inst_mask_len / visib_info[str(obj_idxs[choose_idx])]['px_count_all'])
+            if inst_mask_len > self.minimum_num_pt and inst_visib_fract > self.visib_threshold:
+                break
 
-        choose_idx = self.obj_idx_select(seg, obj_idxs, visib_info)
+        # choose_idx = self.obj_idx_select(seg, obj_idxs, visib_info)
         inst_mask = seg == obj_idxs[choose_idx]
         inst_mask = inst_mask.astype(np.uint8)
         object_pose = poses[choose_idx, :, :]
