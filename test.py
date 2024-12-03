@@ -31,7 +31,9 @@ parser.add_argument('--voxel_size', type=float, default=0.005, help='Voxel Size 
 parser.add_argument('--collision_thresh', type=float, default=0.01,
                     help='Collision Threshold in collision detection [default: 0.01]')
 parser.add_argument('--voxel_size_cd', type=float, default=0.01, help='Voxel Size for collision detection')
-parser.add_argument('--noise_level', type=float, default=0.0, help='Noise level for scene points')
+parser.add_argument('--gaussian_noise_level', type=float, default=0.0, help='Noise level for scene points')
+parser.add_argument('--smooth_size', type=int, default=0, help='Smooth size for scene points')
+parser.add_argument('--dropout_num', type=int, default=0, help='Gaussian noise level for scene points')
 parser.add_argument('--infer', action='store_true', default=False)
 parser.add_argument('--eval', action='store_true', default=False)
 cfgs = parser.parse_args()
@@ -49,7 +51,7 @@ def my_worker_init_fn(worker_id):
 
 def inference():
     valid_obj_idxs, grasp_labels = load_grasp_labels(cfgs.dataset_root)
-    test_dataset = GraspNetDataset(cfgs.dataset_root, valid_obj_idxs, grasp_labels, split=cfgs.split, camera=cfgs.camera, num_points=cfgs.num_point, voxel_size=cfgs.voxel_size, noise_level=cfgs.noise_level, remove_outlier=False, augment=False, load_label=False)
+    test_dataset = GraspNetDataset(cfgs.dataset_root, valid_obj_idxs, grasp_labels, split=cfgs.split, camera=cfgs.camera, num_points=cfgs.num_point, voxel_size=cfgs.voxel_size, gaussian_noise_level=cfgs.gaussian_noise_level, smooth_size=cfgs.smooth_size, dropout_num=cfgs.dropout_num, remove_outlier=False, augment=False, load_label=False)
     print('Test dataset length: ', len(test_dataset))
     scene_list = test_dataset.scene_list()
     test_dataloader = DataLoader(test_dataset, batch_size=cfgs.batch_size, shuffle=False,

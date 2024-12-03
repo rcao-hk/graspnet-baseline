@@ -4,6 +4,7 @@
 
 import numpy as np
 import open3d as o3d
+import cv2
 
 class CameraInfo():
     """ Camera intrisics for point cloud creation. """
@@ -182,7 +183,7 @@ def points_denoise(points, pre_sample_num):
     return choose_idx
 
 
-def add_noise_point_cloud(point_cloud, level=0.005, valid_min_z=0):
+def add_gaussian_noise_point_cloud(point_cloud, level=0.005, valid_min_z=0):
     """
     Adds Gaussian noise to point cloud data, suitable for point clouds with shape (N, 3), 
     where each point consists of (x, y, z) coordinates.
@@ -207,3 +208,60 @@ def add_noise_point_cloud(point_cloud, level=0.005, valid_min_z=0):
     noisy_point_cloud[mask] += noise[mask]
 
     return noisy_point_cloud
+
+
+def apply_smoothing(depth_map, size=3):
+    smoothed_depth = cv2.blur(depth_map.astype(np.uint16), (size, size))
+    return smoothed_depth
+
+def random_point_dropout(point_cloud, min_num=50, num_points_to_drop=3, radius_percent=0.01):
+    """
+    Randomly selects a few center points in the point cloud and removes all points 
+    within a spherical region centered on each selected point.
+
+    Parameters:
+    - point_cloud: numpy array of shape (N, 3), representing the point cloud data.
+    - min_num: minimum acceptable number of points to retain.
+    - num_points_to_drop: number of random center points to select.
+    - radius_percent: percentage of the objects size to determine the radius of the spherical region (relative to the bounding box diagonal).
+
+    Returns:
+    - retained_point_cloud: the point cloud data with retained points.
+    - retained_indices: indices of the retained points in the original point cloud.
+    """
+    num_points = point_cloud.shape[0]
+
+    # Calculate object size using the bounding box diagonal length
+    min_coords = np.min(point_cloud, axis=0)
+    max_coords = np.max(point_cloud, axis=0)
+    bbox_diagonal = np.linalg.norm(max_coords - min_coords)
+    
+    # Compute the radius based on the given percentage
+    radius = radius_percent * bbox_diagonal
+
+    # Initialize a mask to keep all points initially
+    mask = np.ones(num_points, dtype=bool)
+
+    # Randomly select `num_points_to_drop` points as the center points
+    center_indices = np.random.choice(num_points, num_points_to_drop, replace=False)
+
+    # For each selected center point, remove points within the radius
+    for center_idx in center_indices:
+        center = point_cloud[center_idx]
+
+        # Calculate the distance from each point to the center
+        distances = np.linalg.norm(point_cloud - center, axis=1)
+
+        # Update the mask to set points within the radius to False
+        mask &= distances > radius
+
+    # Use the mask to get retained points and their indices
+    retained_point_cloud = point_cloud[mask]
+    
+    # Ensure the retained points meet the minimum number requirement
+    if len(retained_point_cloud) < min_num:
+        return point_cloud, np.arange(num_points), np.array([])
+    
+    retained_indices = np.where(mask)[0]  # Indices of retained points
+    dropped_indices = np.where(~mask)[0]  # Indices of dropped points
+    return retained_point_cloud, retained_indices, dropped_indices

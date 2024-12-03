@@ -28,7 +28,7 @@ import MinkowskiEngine as ME
 from graspnetAPI import GraspGroup
 
 from utils.collision_detector import ModelFreeCollisionDetector, ModelFreeCollisionDetectorTorch
-from utils.data_utils import CameraInfo, create_point_cloud_from_depth_image, get_workspace_mask, sample_points, points_denoise, add_noise_point_cloud
+from utils.data_utils import CameraInfo, create_point_cloud_from_depth_image, get_workspace_mask, sample_points, points_denoise, add_gaussian_noise_point_cloud, apply_smoothing, random_point_dropout
 from torchvision import transforms
 
 import cv2
@@ -49,21 +49,22 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--split', default='test_seen', help='Dataset split [default: test_seen]')
 parser.add_argument('--camera', default='realsense', help='Camera to use [kinect | realsense]')
 parser.add_argument('--seed_feat_dim', default=256, type=int, help='Point wise feature dim')
-parser.add_argument('--img_feat_dim', default=256, type=int, help='Image feature dim')
-parser.add_argument('--dataset_root', default='/media/gpuadmin/rcao/dataset/graspnet', help='Where dataset is')
-parser.add_argument('--ckpt_root', default='/media/gpuadmin/rcao/result/ignet', help='Where checkpoint is')
-parser.add_argument('--network_ver', type=str, default='v0.8.0', help='Network version')
-parser.add_argument('--dump_dir', type=str, default='ignet_v0.8.0', help='Dump dir to save outputs')
+parser.add_argument('--img_feat_dim', default=64, type=int, help='Image feature dim')
+parser.add_argument('--dataset_root', default='/media/user/data1/rcao/graspnet', help='Where dataset is')
+parser.add_argument('--ckpt_root', default='/media/user/data1/rcao/result/ignet/checkpoint', help='Where checkpoint is')
+parser.add_argument('--network_ver', type=str, default='v0.8.2', help='Network version')
+parser.add_argument('--dump_dir', type=str, default='ignet_v0.8.2.x', help='Dump dir to save outputs')
 parser.add_argument('--inst_pt_num', type=int, default=1024, help='Dump dir to save outputs')
-parser.add_argument('--ckpt_epoch', type=int, default=48, help='Checkpoint epoch name of trained model')
-parser.add_argument('--inst_denoise', action='store_true', help='Denoise instance points during training and testing [default: False]')
-parser.add_argument('--seg_root',type=str, default='/media/gpuadmin/rcao/dataset/graspnet', help='Segmentation results [default: uois]')
-parser.add_argument('--seg_model',type=str, default='uois', help='Segmentation results [default: uois]')
+parser.add_argument('--ckpt_epoch', type=int, default=53, help='Checkpoint epoch name of trained model')
+parser.add_argument('--seg_root',type=str, default='/media/user/data1/rcao/result/uois/graspnet', help='Segmentation results [default: uois]')
+parser.add_argument('--seg_model',type=str, default='GDS_v0.3.2', help='Segmentation results [default: uois]')
 parser.add_argument('--multi_scale_grouping', action='store_true', help='Multi-scale grouping [default: False]')
 parser.add_argument('--voxel_size', type=float, default=0.002, help='Voxel Size to quantize point cloud [default: 0.005]')
 parser.add_argument('--collision_voxel_size', type=float, default=0.01, help='Voxel Size to process point clouds before collision detection [default: 0.01]')
 parser.add_argument('--collision_thresh', type=float, default=0.01, help='Collision Threshold in collision detection [default: 0.01]')
-parser.add_argument('--noise_level', type=float, default=0.0, help='Collision Threshold in collision detection [default: 0.01]')
+parser.add_argument('--gaussian_noise_level', type=float, default=0.0, help='Collision Threshold in collision detection [default: 0.0]')
+parser.add_argument('--smooth_size', type=int, default=1, help='Blur size used for depth smoothing [default: 1]')
+parser.add_argument('--dropout_num', type=int, default=0, help=' [default: 0]')
 cfgs = parser.parse_args()
 
 print(cfgs)
@@ -77,7 +78,7 @@ img_transforms = transforms.Compose([
     transforms.Resize(resize_shape),
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
 ])
-        
+
 border_list = [-1, 40, 80, 120, 160, 200, 240, 280, 320, 360, 400, 440, 480, 520, 560, 600, 640, 680, 720, 760, 800, 840, 880, 920, 960, 1000, 1040, 1080, 1120, 1160, 1200, 1240, 1280, 1320]
 def get_bbox(label):
     rows = np.any(label, axis=1)
@@ -130,7 +131,6 @@ def get_resized_idxs(idxs, orig_shape, resize_shape):
     new_idxs = np.ravel_multi_index((new_coords_y, new_coords_x), resize_shape)
     return new_idxs
 
-inst_denoise = cfgs.inst_denoise
 seg_root = cfgs.seg_root
 seg_model = cfgs.seg_model
 if seg_model == 'gt':
@@ -211,6 +211,9 @@ def inference(scene_idx):
         seg = np.array(Image.open(mask_path))
         # normal = np.load(normal_path)['normals']
 
+        if cfgs.smooth_size > 1:
+            depth = apply_smoothing(depth, size=cfgs.smooth_size)
+            
         if use_gt_mask:
             net_seg = seg
         else:
@@ -239,9 +242,9 @@ def inference(scene_idx):
         seg_masked_org = net_seg * mask
         # normal_masked = normal
 
-        scene = o3d.geometry.PointCloud()
-        scene.points = o3d.utility.Vector3dVector(cloud_masked)
-        scene.colors = o3d.utility.Vector3dVector(color_masked)
+        # scene = o3d.geometry.PointCloud()
+        # scene.points = o3d.utility.Vector3dVector(cloud_masked)
+        # scene.colors = o3d.utility.Vector3dVector(color_masked)
         # scene.estimate_normals(o3d.geometry.KDTreeSearchParamRadius(0.015), fast_normal_computation=False)
         # scene.orient_normals_to_align_with_direction(np.array([0., 0., -1.]))
         # normal_masked = np.asarray(scene.normals)
@@ -266,12 +269,21 @@ def inference(scene_idx):
             inst_cloud = cloud_masked[inst_mask]
             inst_color = color_masked[inst_mask]
 
-            if inst_denoise:
-                inst_cloud_clear_idx = points_denoise(inst_cloud, denoise_pre_sample_num)
-                idxs = sample_points(len(inst_cloud_clear_idx), num_pt)
-                idxs = inst_cloud_clear_idx[idxs]
-            else:
-                idxs = sample_points(len(inst_cloud), num_pt)
+            if cfgs.dropout_num > 0:
+                inst_cloud, select_idx, dropout_idx = random_point_dropout(inst_cloud, min_num=minimum_num_pt, num_points_to_drop=cfgs.dropout_num, radius_percent=0.1)
+                inst_color = inst_color[select_idx]
+
+                if len(dropout_idx) != 0:
+                    # 将 inst_cloud 的索引转换回 cloud_masked 的索引
+                    inst_global_idx = np.where(inst_mask_org.flatten())[0]  # inst_mask 对应的全局索引
+                    dropped_global_idx = inst_global_idx[dropout_idx]  # 转换为全局索引
+
+                    # 更新 inst_mask_org：将被丢弃的点对应的像素置为 False
+                    inst_mask_org_flat = inst_mask_org.flatten()  # 展平 mask
+                    inst_mask_org_flat[dropped_global_idx] = False  # 更新 mask
+                    inst_mask_org = inst_mask_org_flat.reshape(inst_mask_org.shape)  # 恢复形状
+                            
+            idxs = sample_points(len(inst_cloud), num_pt)
             
             rmin, rmax, cmin, cmax = get_bbox(inst_mask_org.astype(np.uint8))
             img = color[rmin:rmax, cmin:cmax, :]
@@ -280,14 +292,20 @@ def inference(scene_idx):
             orig_width, orig_length, _ = img.shape
             resized_idxs = get_resized_idxs(inst_mask_choose[idxs], (orig_width, orig_length), resize_shape)
             img = img_transforms(img)
-            
+                        
             sample_cloud = inst_cloud[idxs].astype(np.float32)
             sample_color = inst_color[idxs].astype(np.float32)
             sample_coors = inst_cloud[idxs].astype(np.float32) / voxel_size
             sample_feats = np.ones_like(inst_cloud[idxs]).astype(np.float32)
+
+            # inst_idxs_img = np.zeros_like(img)
+            # inst_idxs_img = inst_idxs_img.reshape(-1, 3)
+            # inst_idxs_img[resized_idxs] = sample_color
+            # inst_idxs_img = inst_idxs_img.reshape((224, 224, 3))
+            # cv2.imwrite("{}_inst_input.png".format(anno_idx), inst_idxs_img*255.)
             
-            if cfgs.noise_level > 0:
-                sample_cloud = add_noise_point_cloud(sample_cloud, level=cfgs.noise_level, valid_min_z=0.1)
+            if cfgs.gaussian_noise_level > 0:
+                sample_cloud = add_gaussian_noise_point_cloud(sample_cloud, level=cfgs.noise_level, valid_min_z=0.1)
                 
             inst_cloud_list.append(sample_cloud)
             inst_color_list.append(sample_color)
@@ -336,7 +354,6 @@ def inference(scene_idx):
         # start.record()
         
         if cfgs.collision_thresh > 0:
-
             mfcdetector = ModelFreeCollisionDetectorTorch(cloud.reshape(-1, 3), voxel_size=cfgs.collision_voxel_size)
             collision_mask = mfcdetector.detect(gg, approach_dist=0.05, collision_thresh=cfgs.collision_thresh)
             collision_mask = collision_mask.detach().cpu().numpy()

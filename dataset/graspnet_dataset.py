@@ -13,14 +13,14 @@ import collections.abc as container_abcs
 from torch.utils.data import Dataset
 from tqdm import tqdm
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-ROOT_DIR = os.path.dirname(BASE_DIR)
+# BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# ROOT_DIR = os.path.dirname(BASE_DIR)
 from utils.data_utils import CameraInfo, transform_point_cloud, create_point_cloud_from_depth_image,\
-                            get_workspace_mask, remove_invisible_grasp_points, add_noise_point_cloud
+                            get_workspace_mask, remove_invisible_grasp_points, add_gaussian_noise_point_cloud, apply_smoothing, random_point_dropout
 
 class GraspNetDataset(Dataset):
     def __init__(self, root, valid_obj_idxs, grasp_labels, camera='kinect', split='train', num_points=20000,
-                 remove_outlier=False, voxel_size=0.005, noise_level=0.0, remove_invisible=True, augment=False, load_label=True):
+                 remove_outlier=False, voxel_size=0.005, gaussian_noise_level=0.0, smooth_size=1, dropout_num=0, remove_invisible=True, augment=False, load_label=True):
         assert(num_points<=50000)
         self.root = root
         self.split = split
@@ -34,8 +34,9 @@ class GraspNetDataset(Dataset):
         self.load_label = load_label    
         self.collision_labels = {}
         self.voxel_size = voxel_size
-        self.noise_level = noise_level
-
+        self.gaussian_noise_level = gaussian_noise_level
+        self.smooth_size = smooth_size
+        self.dropout_num = dropout_num
         if split == 'train':
             self.sceneIds = list( range(100) )
         elif split == 'test':
@@ -117,6 +118,7 @@ class GraspNetDataset(Dataset):
         # normal = np.load(self.normalpath[index])
         scene = self.scenename[index]
         try:
+            obj_idxs = meta['cls_indexes'].flatten()
             intrinsic = meta['intrinsic_matrix']
             factor_depth = meta['factor_depth']
         except Exception as e:
@@ -124,6 +126,10 @@ class GraspNetDataset(Dataset):
             print(scene)
         camera = CameraInfo(1280.0, 720.0, intrinsic[0][0], intrinsic[1][1], intrinsic[0][2], intrinsic[1][2], factor_depth)
 
+        if self.smooth_size > 1:
+            depth_smoothed = apply_smoothing(depth, size=self.smooth_size)
+            cloud_smoothed = create_point_cloud_from_depth_image(depth_smoothed, camera, organized=True)
+            
         # generate cloud
         cloud = create_point_cloud_from_depth_image(depth, camera, organized=True)
 
@@ -139,9 +145,30 @@ class GraspNetDataset(Dataset):
             mask = depth_mask
         cloud_masked = cloud[mask]
         color_masked = color[mask]
+        seg_masked = seg[mask]
+        
         if return_raw_cloud:
             return cloud_masked, color_masked
 
+        if self.smooth_size > 1:
+            cloud_masked = cloud_smoothed[mask]
+            
+        if self.dropout_num > 0:
+            inst_cloud = []
+            inst_color = []
+            background_mask = (seg_masked == 0)
+            inst_cloud.append(cloud_masked[background_mask])
+            inst_color.append(color_masked[background_mask])
+            for obj_idx in obj_idxs:
+                if (seg_masked == obj_idx).sum() < 50:
+                    continue
+                inst_mask = (seg_masked == obj_idx)
+                inst_cloud_select, select_idx, dropout_idx = random_point_dropout(cloud_masked[inst_mask], min_num=50, num_points_to_drop=self.dropout_num, radius_percent=0.1)
+                inst_cloud.append(inst_cloud_select)
+                inst_color.append(color_masked[inst_mask][select_idx])
+            cloud_masked = np.concatenate(inst_cloud, axis=0)
+            color_masked = np.concatenate(inst_color, axis=0)
+        
         # sample points
         if len(cloud_masked) >= self.num_points:
             idxs = np.random.choice(len(cloud_masked), self.num_points, replace=False)
@@ -149,12 +176,12 @@ class GraspNetDataset(Dataset):
             idxs1 = np.arange(len(cloud_masked))
             idxs2 = np.random.choice(len(cloud_masked), self.num_points-len(cloud_masked), replace=True)
             idxs = np.concatenate([idxs1, idxs2], axis=0)
+        
         cloud_sampled = cloud_masked[idxs]
         color_sampled = color_masked[idxs]
-        # normal_sampled = normal[idxs]
         
-        if self.noise_level > 0.0:
-            cloud_sampled = add_noise_point_cloud(cloud_sampled, level=self.noise_level, valid_min_z=0.1)
+        if self.gaussian_noise_level > 0.0:
+            cloud_sampled = add_gaussian_noise_point_cloud(cloud_sampled, level=self.gaussian_noise_level, valid_min_z=0.1)
                 
         ret_dict = {}
         ret_dict['point_clouds'] = cloud_sampled.astype(np.float32)
@@ -183,6 +210,9 @@ class GraspNetDataset(Dataset):
             print(scene)
         camera = CameraInfo(1280.0, 720.0, intrinsic[0][0], intrinsic[1][1], intrinsic[0][2], intrinsic[1][2], factor_depth)
 
+        if self.smooth_size > 1:
+            depth = apply_smoothing(depth, size=self.smooth_size)
+            
         # generate cloud
         cloud = create_point_cloud_from_depth_image(depth, camera, organized=True)
 
@@ -197,9 +227,26 @@ class GraspNetDataset(Dataset):
             mask = (depth_mask & workspace_mask)
         else:
             mask = depth_mask
+            
         cloud_masked = cloud[mask]
         color_masked = color[mask]
         seg_masked = seg[mask]
+
+        if self.dropout_num > 0:
+            inst_cloud = []
+            inst_color = []
+            background_mask = (seg_masked == 0)
+            inst_cloud.append(cloud_masked[background_mask])
+            inst_color.append(color_masked[background_mask])
+            for obj_idx in obj_idxs:
+                if (seg_masked == obj_idx).sum() < 50:
+                    continue
+                inst_mask = (seg_masked == obj_idx)
+                inst_cloud_select, select_idx, dropout_idx = random_point_dropout(cloud_masked[inst_mask], min_num=50, num_points_to_drop=self.dropout_num, radius_percent=0.1)
+                inst_cloud.append(inst_cloud_select)
+                inst_color.append(color_masked[inst_mask][select_idx])
+            cloud_masked = np.concatenate(inst_cloud, axis=0)
+            color_masked = np.concatenate(inst_color, axis=0)
 
         # sample points
         if len(cloud_masked) >= self.num_points:
@@ -208,14 +255,15 @@ class GraspNetDataset(Dataset):
             idxs1 = np.arange(len(cloud_masked))
             idxs2 = np.random.choice(len(cloud_masked), self.num_points-len(cloud_masked), replace=True)
             idxs = np.concatenate([idxs1, idxs2], axis=0)
+        
         cloud_sampled = cloud_masked[idxs]
         color_sampled = color_masked[idxs]
+        seg_sampled = seg_masked[idxs]
         # normal_sampled = normal[idxs]
 
-        if self.noise_level > 0.0:
-            cloud_sampled = add_noise_point_cloud(cloud_sampled, level=self.noise_level, valid_min_z=0.1)
+        if self.gaussian_noise_level > 0.0:
+            cloud_sampled = add_gaussian_noise_point_cloud(cloud_sampled, level=self.gaussian_noise_level, valid_min_z=0.1)
             
-        seg_sampled = seg_masked[idxs]
         graspness_sampled = graspness[idxs]
 
         objectness_label = seg_sampled.copy()
