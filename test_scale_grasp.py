@@ -44,7 +44,7 @@ def my_worker_init_fn(worker_id):
     pass
 
 # Create Dataset and Dataloader
-TEST_DATASET = GraspNetDataset(cfgs.dataset_root, None, None, split='test', camera=cfgs.camera, num_points=cfgs.num_point, remove_outlier=True, augment=False, load_label=False)
+TEST_DATASET = GraspNetDataset(cfgs.dataset_root, None, None, split='test', camera=cfgs.camera, num_points=cfgs.num_point, remove_outlier=False, augment=False, load_label=False)
 print(len(TEST_DATASET))
 SCENE_LIST = TEST_DATASET.scene_list()
 TEST_DATALOADER = DataLoader(TEST_DATASET, batch_size=cfgs.batch_size, shuffle=False,
