@@ -337,8 +337,7 @@ class DepthNetGate(nn.Module):
         self.num_view = num_view
         self.num_angle = num_angle
         self.num_depth = num_depth
-        self.gate_ffn = GateFFN(self.in_dim, 0.1, 512)
-        # regression-based
+        self.gate_ffn = GateFFN(self.in_dim, 0.0, 512)
         self.conv_out = nn.Conv1d(self.in_dim, self.num_depth * 2, 1)
 
     def forward(self, seed_features, end_points):
@@ -364,8 +363,7 @@ class RotationScoringNetGate(nn.Module):
         self.num_depth = num_depth
         self.in_dim = seed_feature_dim
         self.is_training = is_training        
-        self.gate_ffn = GateFFN(self.in_dim, 0.1, 512)
-        # # regression-based
+        self.gate_ffn = GateFFN(self.in_dim, 0.0, 512)
         self.conv_out = nn.Conv1d(self.in_dim, self.num_view * self.num_angle, 1)
 
     def forward(self, seed_features, end_points):
@@ -663,21 +661,21 @@ class IGNet(nn.Module):
         self.img_backbone = PSPNet(sizes=(1, 2, 3, 6), psp_size=512, 
                                    deep_features_size=img_feat_dim, backend='resnet34')
         
-        self.rot_head = RotationScoringNet(self.num_view, num_angle=self.num_angle,
-                                                num_depth=self.num_depth,
-                                                seed_feature_dim=self.seed_feature_dim + self.img_feature_dim, 
-                                                is_training=self.is_training)
-        self.depth_head = DepthNet(self.num_view, num_angle=self.num_angle, 
-                                   num_depth=self.num_depth,
-                                   seed_feature_dim=self.seed_feature_dim)
-
-        # self.rot_head = RotationScoringNetGate(self.num_view, num_angle=self.num_angle,
+        # self.rot_head = RotationScoringNet(self.num_view, num_angle=self.num_angle,
         #                                         num_depth=self.num_depth,
         #                                         seed_feature_dim=self.seed_feature_dim + self.img_feature_dim, 
         #                                         is_training=self.is_training)
-        # self.depth_head = DepthNetGate(self.num_view, num_angle=self.num_angle, 
+        # self.depth_head = DepthNet(self.num_view, num_angle=self.num_angle, 
         #                            num_depth=self.num_depth,
         #                            seed_feature_dim=self.seed_feature_dim)
+
+        self.rot_head = RotationScoringNetGate(self.num_view, num_angle=self.num_angle,
+                                                num_depth=self.num_depth,
+                                                seed_feature_dim=self.seed_feature_dim + self.img_feature_dim, 
+                                                is_training=self.is_training)
+        self.depth_head = DepthNetGate(self.num_view, num_angle=self.num_angle, 
+                                   num_depth=self.num_depth,
+                                   seed_feature_dim=self.seed_feature_dim)
         
         if self.multi_scale_grouping:
             feat_dim = self.seed_feature_dim + self.img_feature_dim
@@ -704,10 +702,10 @@ class IGNet(nn.Module):
             trunc_normal_(m.weight, std=.02)
             if m.bias is not None:
                 nn.init.constant_(m.bias, 0)
-        elif isinstance(m, nn.Conv2d):
-            nn.init.xavier_normal_(m.weight.data)
-            if m.bias is not None:
-                nn.init.normal_(m.bias.data)
+        # elif isinstance(m, nn.Conv2d):
+        #     nn.init.xavier_normal_(m.weight.data)
+        #     if m.bias is not None:
+        #         nn.init.normal_(m.bias.data)
 
     def forward(self, end_points):
         # use all sampled point cloud, B*Ns*3

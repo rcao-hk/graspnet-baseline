@@ -501,7 +501,7 @@ def visualize_bbox_with_center(image, rmin, rmax, cmin, cmax, center, index):
 
 class GraspNetDataset(Dataset):
     def __init__(self, root, valid_obj_idxs, grasp_labels, camera='kinect', split='train', num_points=1024,
-                 remove_outlier=False, remove_invisible=True, multi_modal_pose_augment=False, point_augment=False, denoise=False, load_label=True, real_data=True, syn_data=False, visib_threshold=0.0, voxel_size=0.005):
+                 remove_outlier=False, remove_invisible=True, multi_modal_pose_augment=False, point_augment=False, denoise=False, load_label=True, real_data=True, syn_data=False, visib_threshold=0.0, voxel_size=0.005, match_point_num=350):
         self.root = root
         self.split = split
         self.num_points = num_points
@@ -523,6 +523,7 @@ class GraspNetDataset(Dataset):
         self.real_data = real_data
         self.syn_data = syn_data
         self.visib_threshold = visib_threshold
+        self.match_point_num = match_point_num
         if split == 'train':
             self.sceneIds = list(range(100))
             # self.sceneIds = list(range(79, 80))
@@ -843,8 +844,8 @@ class GraspNetDataset(Dataset):
     #     if self.pose_augment:
     #         inst_cloud, object_pose = self.points_pose_augment(inst_cloud, object_pose)
         
-    #     grasp_idxs = np.sort(np.random.choice(len(points), 350, replace=False))
-    #     # grasp_idxs = np.random.choice(len(points), min(max(int(len(points) / 4), 350), len(points)), replace=False)
+    #     grasp_idxs = np.sort(np.random.choice(len(points), self.match_point_num, replace=False))
+    #     # grasp_idxs = np.random.choice(len(points), min(max(int(len(points) / 4), self.match_point_num), len(points)), replace=False)
     #     grasp_points = points[grasp_idxs]
     #     grasp_offsets = offsets[grasp_idxs]
     #     collision = collision[grasp_idxs].copy()
@@ -923,8 +924,8 @@ class GraspNetDataset(Dataset):
                 break
 
         # choose_idx = self.obj_idx_select(seg, obj_idxs, visib_info)
-        inst_mask = seg == obj_idxs[choose_idx]
-        inst_mask = inst_mask.astype(np.uint8)
+        # inst_mask = seg == obj_idxs[choose_idx]
+        # inst_mask = inst_mask.astype(np.uint8)
         object_pose = poses[choose_idx, :, :]
         rmin, rmax, cmin, cmax = get_bbox(inst_mask)
         
@@ -990,8 +991,12 @@ class GraspNetDataset(Dataset):
         points, offsets, scores = self.grasp_labels[obj_idxs[choose_idx]]
         collision = self.collision_labels[scene][choose_idx] #(Np, V, A, D)
         # grasp_idxs = np.random.choice(len(points), min(max(int(len(points)/4), 300),len(points)), replace=False)
-                
-        grasp_idxs = np.sort(np.random.choice(len(points), 350, replace=False))
+        
+        if len(points) < self.match_point_num:
+            grasp_idxs = np.arange(len(points))
+            grasp_idxs = np.concatenate([grasp_idxs, np.random.choice(grasp_idxs, self.match_point_num - len(points), replace=False)])
+        else:
+            grasp_idxs = np.sort(np.random.choice(len(points), self.match_point_num, replace=False))
         grasp_points = points[grasp_idxs]
         grasp_offsets = offsets[grasp_idxs]
         collision = collision[grasp_idxs].copy()

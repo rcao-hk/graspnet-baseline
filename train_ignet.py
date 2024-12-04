@@ -79,6 +79,7 @@ parser.add_argument('--seed_feat_dim', default=256, type=int, help='Point wise f
 parser.add_argument('--img_feat_dim', default=64, type=int, help='Image feature dim')
 parser.add_argument('--voxel_size', type=float, default=0.002, help='Voxel Size for Quantize [default: 0.005]')
 parser.add_argument('--visib_threshold', type=float, default=0.5, help='Visibility Threshold [default: 0.5]')
+parser.add_argument('--match_point_num', type=int, default=350, help='Grasp Label Point Number [default: 350]')
 parser.add_argument('--num_view', type=int, default=300, help='View Number [default: 300]')
 parser.add_argument('--max_epoch', type=int, default=61, help='Epoch to run [default: 61]')
 parser.add_argument('--lr_sched', default=False, action='store_true')
@@ -101,7 +102,6 @@ parser.add_argument('--multi_scale_grouping', action='store_true', help='Multi-s
 cfgs = parser.parse_args()
 
 # ------------------------------------------------------------------------- GLOBAL CONFIG BEG
-# cfgs.multi_modal_pose_augment = True
 
 cfgs.ckpt_dir = os.path.join(cfgs.ckpt_root, cfgs.method_id, cfgs.camera)
 cfgs.log_dir = os.path.join(cfgs.log_root, cfgs.method_id, cfgs.camera)
