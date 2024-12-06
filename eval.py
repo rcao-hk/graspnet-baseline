@@ -21,12 +21,12 @@ print(cfgs)
 def evaluate():
     ge = GraspNetEval(root=cfgs.dataset_root, camera=cfgs.camera, split=cfgs.split)
     if cfgs.split == 'test_seen':
-        res, ap = ge.eval_seen(os.path.join('experiment', cfgs.dump_dir), proc=cfgs.num_workers)
+        res, ap = ge.eval_seen(os.path.join(cfgs.dump_dir), proc=cfgs.num_workers)
     elif cfgs.split == 'test_similar':
-        res, ap = ge.eval_similar(os.path.join('experiment', cfgs.dump_dir), proc=cfgs.num_workers)
+        res, ap = ge.eval_similar(os.path.join(cfgs.dump_dir), proc=cfgs.num_workers)
     else:
-        res, ap = ge.eval_novel(os.path.join('experiment', cfgs.dump_dir), proc=cfgs.num_workers)
-    save_dir = os.path.join('experiment', cfgs.dump_dir, 'ap_{}_{}.npy'.format(cfgs.split, cfgs.camera))
+        res, ap = ge.eval_novel(os.path.join(cfgs.dump_dir), proc=cfgs.num_workers)
+    save_dir = os.path.join(cfgs.dump_dir, 'ap_{}_{}.npy'.format(cfgs.split, cfgs.camera))
     np.save(save_dir, res)
 
 if __name__=='__main__':

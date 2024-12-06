@@ -32,8 +32,12 @@ parser.add_argument('--num_view', type=int, default=300, help='View Number [defa
 parser.add_argument('--batch_size', type=int, default=4, help='Batch Size during inference [default: 1]')
 parser.add_argument('--collision_thresh', type=float, default=0.01, help='Collision Threshold in collision detection [default: 0.01]')
 parser.add_argument('--voxel_size', type=float, default=0.01, help='Voxel Size to process point clouds before collision detection [default: 0.01]')
+parser.add_argument('--gaussian_noise_level', type=float, default=0.0, help='Noise level for scene points')
+parser.add_argument('--smooth_size', type=int, default=0, help='Smooth size for scene points')
+parser.add_argument('--dropout_num', type=int, default=0, help='Gaussian noise level for scene points')
 parser.add_argument('--num_workers', type=int, default=30, help='Number of workers used in evaluation [default: 30]')
 cfgs = parser.parse_args()
+print(cfgs)
 
 # ------------------------------------------------------------------------- GLOBAL CONFIG BEG
 if not os.path.exists(cfgs.dump_dir): os.mkdir(cfgs.dump_dir)
@@ -44,7 +48,8 @@ def my_worker_init_fn(worker_id):
     pass
 
 # Create Dataset and Dataloader
-TEST_DATASET = GraspNetDataset(cfgs.dataset_root, None, None, split='test', camera=cfgs.camera, num_points=cfgs.num_point, remove_outlier=False, augment=False, load_label=False)
+# TEST_DATASET = GraspNetDataset(cfgs.dataset_root, None, None, split='test', camera=cfgs.camera, num_points=cfgs.num_point, remove_outlier=False, augment=False, load_label=False)
+TEST_DATASET = GraspNetDataset(cfgs.dataset_root, None, None, split='test', camera=cfgs.camera, num_points=cfgs.num_point, voxel_size=cfgs.voxel_size, gaussian_noise_level=cfgs.gaussian_noise_level, smooth_size=cfgs.smooth_size, dropout_num=cfgs.dropout_num, remove_outlier=False, augment=False, load_label=False)
 print(len(TEST_DATASET))
 SCENE_LIST = TEST_DATASET.scene_list()
 TEST_DATALOADER = DataLoader(TEST_DATASET, batch_size=cfgs.batch_size, shuffle=False,
