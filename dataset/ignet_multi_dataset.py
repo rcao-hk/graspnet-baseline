@@ -897,19 +897,21 @@ class GraspNetDataset(Dataset):
             print(repr(e))
             print(scene)
 
+        depth_mask = (depth > 0)
         # get valid points
-        # if self.remove_outlier:
-        #     camera_poses = np.load(os.path.join(self.root, 'scenes', scene, self.camera, 'camera_poses.npy'))
-        #     align_mat = np.load(os.path.join(self.root, 'scenes', scene, self.camera, 'cam0_wrt_table.npy'))
-        #     trans = np.dot(align_mat, camera_poses[self.frameid[index]])
-        #     workspace_mask = get_workspace_mask(cloud, seg, trans=trans, organized=True, outlier=0.02)
-        #     mask = (depth_mask & workspace_mask)
-        # else:
-        # mask = depth_mask
+        if self.remove_outlier:
+            camera_info = CameraInfo(1280.0, 720.0, intrinsic[0][0], intrinsic[1][1], intrinsic[0][2], intrinsic[1][2], factor_depth)
+            cloud = create_point_cloud_from_depth_image(depth, camera_info, organized=True)
+            camera_poses = np.load(os.path.join(self.root, 'scenes', scene, self.camera, 'camera_poses.npy'))
+            align_mat = np.load(os.path.join(self.root, 'scenes', scene, self.camera, 'cam0_wrt_table.npy'))
+            trans = np.dot(align_mat, camera_poses[self.frameid[index]])
+            workspace_mask = get_workspace_mask(cloud, seg, trans=trans, organized=True, outlier=0.02)
+            mask = (depth_mask & workspace_mask)
+        else:
+            mask = depth_mask
 
         poses = poses.transpose(2, 0, 1)
-        depth_mask = (depth > 0)
-        seg = seg * depth_mask
+        seg = seg * mask
        
         if self.multi_modal_pose_augment:
             (color, depth, seg), poses = self.scene_pose_augment((color, depth, seg), poses)

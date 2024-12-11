@@ -82,6 +82,7 @@ parser.add_argument('--visib_threshold', type=float, default=0.5, help='Visibili
 parser.add_argument('--match_point_num', type=int, default=350, help='Grasp Label Point Number [default: 350]')
 parser.add_argument('--num_view', type=int, default=300, help='View Number [default: 300]')
 parser.add_argument('--max_epoch', type=int, default=61, help='Epoch to run [default: 61]')
+parser.add_argument('--eval_start_epoch', type=int, default=0, help='Epoch to start evaluation [default: 0]')
 parser.add_argument('--lr_sched', default=False, action='store_true')
 parser.add_argument('--lr_sched_period', type=int, default=16, help='T_max of cosine learing rate scheduler [default: 16]')
 parser.add_argument('--batch_size', type=int, default=20, help='Batch Size during training [default: 2]')
@@ -132,7 +133,7 @@ torch.cuda.set_device(device)
 valid_obj_idxs, grasp_labels = load_grasp_labels(cfgs.dataset_root)
 TRAIN_DATASET = GraspNetDataset(cfgs.dataset_root, valid_obj_idxs, grasp_labels, camera=cfgs.camera, split='train', 
                                 num_points=cfgs.num_point, remove_outlier=False, multi_modal_pose_augment=cfgs.multi_modal_pose_augment, point_augment=cfgs.point_augment, denoise=cfgs.inst_denoise, real_data=True, syn_data=True, visib_threshold=cfgs.visib_threshold, voxel_size=cfgs.voxel_size)
-TEST_DATASET = GraspNetDataset(cfgs.dataset_root, valid_obj_idxs, grasp_labels, camera=cfgs.camera, split='test_seen', 
+TEST_DATASET = GraspNetDataset(cfgs.dataset_root, valid_obj_idxs, grasp_labels, camera=cfgs.camera, split='test', 
                                num_points=cfgs.num_point, remove_outlier=False, multi_modal_pose_augment=False, point_augment=False, denoise=cfgs.inst_denoise, real_data=True, syn_data=False, visib_threshold=cfgs.visib_threshold, voxel_size=cfgs.voxel_size)
 
 print(len(TRAIN_DATASET), len(TEST_DATASET))
@@ -161,8 +162,13 @@ net = IGNet(num_view=cfgs.num_view, seed_feat_dim=cfgs.seed_feat_dim, img_feat_d
             is_training=True, multi_scale_grouping=cfgs.multi_scale_grouping)
 net.to(device)
 
+for param in net.img_backbone.dino.parameters():
+    param.requires_grad = False
+    
+optimizer = optim.AdamW(filter(lambda p: p.requires_grad, net.parameters()), lr=cfgs.learning_rate, weight_decay=cfgs.weight_decay)
+
 # Load the Adam optimizer
-optimizer = optim.AdamW(net.parameters(), lr=cfgs.learning_rate, weight_decay=cfgs.weight_decay)
+# optimizer = optim.AdamW(net.parameters(), lr=cfgs.learning_rate, weight_decay=cfgs.weight_decay)
 if cfgs.lr_sched:
     lr_scheduler = CosineAnnealingLR(optimizer, T_max=cfgs.lr_sched_period, eta_min=1e-4)
 
@@ -170,7 +176,7 @@ if cfgs.lr_sched:
 it = -1 # for the initialize value of `LambdaLR` and `BNMomentumScheduler`
 start_epoch = 0
 if CHECKPOINT_PATH is not None and os.path.isfile(CHECKPOINT_PATH):
-    checkpoint = torch.load(CHECKPOINT_PATH, map_location=device)
+    checkpoint = torch.load(CHECKPOINT_PATH, map_location=device, weights_only=True)
     net.load_state_dict(checkpoint['model_state_dict'])
     optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
     if cfgs.lr_sched:
@@ -287,7 +293,6 @@ def train(start_epoch):
         train_loss = train_one_epoch()
         log_writer.add_scalar('training/learning_rate', current_lr, epoch)
         
-        eval_loss = evaluate_one_epoch()
         # Save checkpoint
         save_dict = {'epoch': epoch+1, # after training one epoch, the start_epoch should be epoch+1
                     'optimizer_state_dict': optimizer.state_dict()}
@@ -299,20 +304,22 @@ def train(start_epoch):
             save_dict['model_state_dict'] = net.module.state_dict()
         except:
             save_dict['model_state_dict'] = net.state_dict()
-        
-        if eval_loss < min_loss:
-            min_loss = eval_loss
-            best_epoch = epoch
-            ckpt_name = "epoch_" + str(best_epoch) \
-                        + "_train_" + str(train_loss) \
-                        + "_val_" + str(eval_loss)
-            torch.save(save_dict['model_state_dict'], os.path.join(cfgs.ckpt_dir, ckpt_name + '.tar'))
-        elif not EPOCH_CNT % cfgs.ckpt_save_interval:
-            torch.save(save_dict, os.path.join(cfgs.ckpt_dir, 'checkpoint_{}.tar'.format(EPOCH_CNT)))
+            
+        if epoch > cfgs.eval_start_epoch:
+            eval_loss = evaluate_one_epoch()
+            if eval_loss < min_loss:
+                min_loss = eval_loss
+                best_epoch = epoch
+                ckpt_name = "epoch_" + str(best_epoch) \
+                            + "_train_" + str(train_loss) \
+                            + "_val_" + str(eval_loss)
+                torch.save(save_dict['model_state_dict'], os.path.join(cfgs.ckpt_dir, ckpt_name + '.tar'))
+            elif not EPOCH_CNT % cfgs.ckpt_save_interval:
+                torch.save(save_dict, os.path.join(cfgs.ckpt_dir, 'checkpoint_{}.tar'.format(EPOCH_CNT)))
+            log_string("best_epoch:{}".format(best_epoch))
+            # if epoch in LR_DECAY_STEPS:
+            #     torch.save(save_dict, os.path.join(cfgs.log_dir, 'checkpoint_{}.tar'.format(epoch)))
         torch.save(save_dict, os.path.join(cfgs.ckpt_dir, 'checkpoint.tar'))
-        log_string("best_epoch:{}".format(best_epoch))
-        # if epoch in LR_DECAY_STEPS:
-        #     torch.save(save_dict, os.path.join(cfgs.log_dir, 'checkpoint_{}.tar'.format(epoch)))
-
+        
 if __name__=='__main__':
     train(start_epoch)

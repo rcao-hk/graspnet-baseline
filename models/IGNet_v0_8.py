@@ -2,7 +2,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from timm.models.layers import DropPath, trunc_normal_
+from timm.layers import DropPath, trunc_normal_
 import MinkowskiEngine as ME
 from models.minkowski import MinkUNet14D
 
@@ -331,13 +331,14 @@ class GateFFN(nn.Module):
     
 
 class DepthNetGate(nn.Module):
-    def __init__(self, num_view, num_angle, num_depth, seed_feature_dim):
+    def __init__(self, num_view, num_angle, num_depth, seed_feature_dim, dropout_rate):
         super().__init__()
         self.in_dim = seed_feature_dim
         self.num_view = num_view
         self.num_angle = num_angle
         self.num_depth = num_depth
-        self.gate_ffn = GateFFN(self.in_dim, 0.0, 512)
+        self.dropout_rate = dropout_rate
+        self.gate_ffn = GateFFN(self.in_dim, self.dropout_rate, 512)
         self.conv_out = nn.Conv1d(self.in_dim, self.num_depth * 2, 1)
 
     def forward(self, seed_features, end_points):
@@ -356,14 +357,15 @@ class DepthNetGate(nn.Module):
     
     
 class RotationScoringNetGate(nn.Module):
-    def __init__(self, num_view, num_angle, num_depth, seed_feature_dim, is_training=True):
+    def __init__(self, num_view, num_angle, num_depth, seed_feature_dim, dropout_rate, is_training=True):
         super().__init__()
         self.num_view = num_view
         self.num_angle = num_angle
         self.num_depth = num_depth
         self.in_dim = seed_feature_dim
-        self.is_training = is_training        
-        self.gate_ffn = GateFFN(self.in_dim, 0.0, 512)
+        self.is_training = is_training
+        self.dropout_rate = dropout_rate       
+        self.gate_ffn = GateFFN(self.in_dim, self.dropout_rate, 512)
         self.conv_out = nn.Conv1d(self.in_dim, self.num_view * self.num_angle, 1)
 
     def forward(self, seed_features, end_points):
@@ -540,81 +542,113 @@ class GatedFusion(nn.Module):
 #         return fused_feat
 
 
-from flash_attn.modules.mha import FlashCrossAttention, CrossAttention
-from einops import rearrange
+# from flash_attn.modules.mha import FlashCrossAttention, CrossAttention
+# from einops import rearrange
 
-class CrossModalAttention(nn.Module):
-    def __init__(self, point_dim, img_dim, dropout, normalize=False, in_proj_bias=True):
-        super(CrossModalAttention, self).__init__()
-        self.feat_dim = self.point_dim = point_dim
-        self.img_dim = img_dim
-        self.normalize = normalize
-        self.dropout = dropout
+# class CrossModalAttention(nn.Module):
+#     def __init__(self, point_dim, img_dim, dropout, normalize=False, in_proj_bias=True):
+#         super(CrossModalAttention, self).__init__()
+#         self.feat_dim = self.point_dim = point_dim
+#         self.img_dim = img_dim
+#         self.normalize = normalize
+#         self.dropout = dropout
         
-        if self.normalize:
-            self.point_norm = nn.LayerNorm(self.point_dim)
-            self.img_norm = nn.LayerNorm(self.img_dim)
+#         if self.normalize:
+#             self.point_norm = nn.LayerNorm(self.point_dim)
+#             self.img_norm = nn.LayerNorm(self.img_dim)
 
-        self.img_mlp = nn.Sequential(
-            nn.Conv1d(img_dim, 128, 1),
-            nn.BatchNorm1d(128), 
-            nn.ReLU(inplace=True),
-            nn.Conv1d(128, self.feat_dim, 1)
-        )
+#         self.img_mlp = nn.Sequential(
+#             nn.Conv1d(img_dim, 128, 1),
+#             nn.BatchNorm1d(128), 
+#             nn.ReLU(inplace=True),
+#             nn.Conv1d(128, self.feat_dim, 1)
+#         )
         
-        # self.point_kv_proj = nn.Linear(self.feat_dim, 2 * self.feat_dim, bias=in_proj_bias)
-        # self.img_q_proj = nn.Linear(self.feat_dim, self.feat_dim, bias=in_proj_bias)
-        self.point_kv_proj = nn.Conv1d(self.feat_dim, 2 * self.feat_dim, bias=in_proj_bias, kernel_size=1)
-        self.img_q_proj = nn.Conv1d(self.feat_dim, self.feat_dim, bias=in_proj_bias, kernel_size=1)
+#         # self.point_kv_proj = nn.Linear(self.feat_dim, 2 * self.feat_dim, bias=in_proj_bias)
+#         # self.img_q_proj = nn.Linear(self.feat_dim, self.feat_dim, bias=in_proj_bias)
+#         self.point_kv_proj = nn.Conv1d(self.feat_dim, 2 * self.feat_dim, bias=in_proj_bias, kernel_size=1)
+#         self.img_q_proj = nn.Conv1d(self.feat_dim, self.feat_dim, bias=in_proj_bias, kernel_size=1)
         
-        # self.img_kv_proj = nn.Linear(self.feat_dim, 2 * self.feat_dim, bias=in_proj_bias)
-        # self.point_q_proj = nn.Linear(self.feat_dim, self.feat_dim, bias=in_proj_bias)
+#         # self.img_kv_proj = nn.Linear(self.feat_dim, 2 * self.feat_dim, bias=in_proj_bias)
+#         # self.point_q_proj = nn.Linear(self.feat_dim, self.feat_dim, bias=in_proj_bias)
         
-        # self.point_cross_attn = FlashCrossAttention(attention_dropout=dropout)
-        # self.image_cross_attn = FlashCrossAttention(attention_dropout=dropout)
+#         # self.point_cross_attn = FlashCrossAttention(attention_dropout=dropout)
+#         # self.image_cross_attn = FlashCrossAttention(attention_dropout=dropout)
         
-        self.point_cross_attn = CrossAttention(attention_dropout=dropout)
-        # self.image_cross_attn = CrossAttention(attention_dropout=dropout)
+#         self.point_cross_attn = CrossAttention(attention_dropout=dropout)
+#         # self.image_cross_attn = CrossAttention(attention_dropout=dropout)
                                                              
-    def forward(self, point_feat, img_feat):
-        if self.normalize:
-            point_feat = self.point_norm(point_feat)
-            img_feat = self.img_norm(img_feat)
+#     def forward(self, point_feat, img_feat):
+#         if self.normalize:
+#             point_feat = self.point_norm(point_feat)
+#             img_feat = self.img_norm(img_feat)
 
-        Bs, N, _ = point_feat.shape
+#         Bs, N, _ = point_feat.shape
         
-        point_feat = point_feat.transpose(1, 2)  # (B, point_dim, num_pc)
-        img_feat = img_feat.transpose(1, 2)  # (B, img_dim, num_pc)
+#         point_feat = point_feat.transpose(1, 2)  # (B, point_dim, num_pc)
+#         img_feat = img_feat.transpose(1, 2)  # (B, img_dim, num_pc)
         
-        img_feat = self.img_mlp(img_feat)
-        img_q = self.img_q_proj(img_feat)
-        # img_kv = self.img_kv_proj(img_feat)
-        # point_q = self.point_q_proj(point_feat)
-        point_kv = self.point_kv_proj(point_feat)
+#         img_feat = self.img_mlp(img_feat)
+#         img_q = self.img_q_proj(img_feat)
+#         # img_kv = self.img_kv_proj(img_feat)
+#         # point_q = self.point_q_proj(point_feat)
+#         point_kv = self.point_kv_proj(point_feat)
         
-        # img_q = self.img_q_proj(img_feat).half()
-        # img_kv = self.img_kv_proj(img_feat).half()
-        # point_q = self.point_q_proj(point_feat).half()
-        # point_kv = self.point_kv_proj(point_feat).half()
+#         # img_q = self.img_q_proj(img_feat).half()
+#         # img_kv = self.img_kv_proj(img_feat).half()
+#         # point_q = self.point_q_proj(point_feat).half()
+#         # point_kv = self.point_kv_proj(point_feat).half()
         
-        img_q = rearrange(img_q.transpose(1, 2), "... (h d) -> ... h d", d=self.feat_dim)
-        point_kv = rearrange(point_kv.transpose(1, 2), "... (two hkv d) -> ... two hkv d", two=2, d=self.feat_dim)
-        point_fuse = self.point_cross_attn(img_q, point_kv)
-        # point_fuse = point_feat + point_fuse.view(Bs, N, -1)
-        # point_fuse = torch.concat([point_feat, point_fuse.view(Bs, N, -1)], dim=-1)
+#         img_q = rearrange(img_q.transpose(1, 2), "... (h d) -> ... h d", d=self.feat_dim)
+#         point_kv = rearrange(point_kv.transpose(1, 2), "... (two hkv d) -> ... two hkv d", two=2, d=self.feat_dim)
+#         point_fuse = self.point_cross_attn(img_q, point_kv)
+#         # point_fuse = point_feat + point_fuse.view(Bs, N, -1)
+#         # point_fuse = torch.concat([point_feat, point_fuse.view(Bs, N, -1)], dim=-1)
 
-        fused_feat = torch.concat([point_feat.transpose(1, 2), point_fuse.view(Bs, N, -1)], dim=-1)
+#         fused_feat = torch.concat([point_feat.transpose(1, 2), point_fuse.view(Bs, N, -1)], dim=-1)
         
-        # point_q = rearrange(point_q, "... (h d) -> ... h d", d=self.feat_dim)
-        # img_kv = rearrange(img_kv, "... (two hkv d) -> ... two hkv d", two=2, d=self.feat_dim)
-        # image_fuse = self.image_cross_attn(point_q, img_kv)
-        # image_fuse = img_feat + image_fuse.view(Bs, N, -1)
-        # image_fuse = torch.concat([img_feat, image_fuse.view(Bs, N, -1)], dim=-1)
+#         # point_q = rearrange(point_q, "... (h d) -> ... h d", d=self.feat_dim)
+#         # img_kv = rearrange(img_kv, "... (two hkv d) -> ... two hkv d", two=2, d=self.feat_dim)
+#         # image_fuse = self.image_cross_attn(point_q, img_kv)
+#         # image_fuse = img_feat + image_fuse.view(Bs, N, -1)
+#         # image_fuse = torch.concat([img_feat, image_fuse.view(Bs, N, -1)], dim=-1)
         
-        # fused_feat = torch.concat([point_fuse, image_fuse], dim=-1)
+#         # fused_feat = torch.concat([point_fuse, image_fuse], dim=-1)
         
-        fused_feat = fused_feat.permute((0, 2, 1))  # (B, output_dim, num_pc)
-        return fused_feat
+#         fused_feat = fused_feat.permute((0, 2, 1))  # (B, output_dim, num_pc)
+#         return fused_feat
+
+
+from models.pspnet import PSPUpsample
+class dino_extractor(nn.Module):
+    def __init__(self, feat_ext, deep_features_size=64):
+        super(dino_extractor, self).__init__()
+
+        if feat_ext == "dino":
+            self.dino = torch.hub.load('facebookresearch/dinov2', 'dinov2_vits14')
+        else:
+            raise NotImplementedError
+        
+        self.up_1 = PSPUpsample(384, 256)
+        self.up_2 = PSPUpsample(256, 128)
+        self.up_3 = PSPUpsample(128, deep_features_size)
+        
+        self.drop_1 = nn.Dropout2d(p=0.3)
+        self.drop_2 = nn.Dropout2d(p=0.15)
+        
+    def forward(self, img):
+        B, _, H, W = img.size()
+        features_dict = self.dino.forward_features(img)
+        dino_feats = features_dict['x_norm_patchtokens'].view(B, H//14, W//14, -1)
+        dino_feats = dino_feats.permute(0, 3, 1, 2)
+        feat = self.drop_1(dino_feats)
+        feat = self.up_1(feat)
+        feat = self.drop_2(feat)
+        feat = self.up_2(feat)
+        feat = self.drop_2(feat)
+        feat = self.up_3(feat)
+        feat = F.interpolate(feat, (H, W), mode='bilinear')
+        return feat
 
 
 class IGNet(nn.Module):
@@ -661,21 +695,23 @@ class IGNet(nn.Module):
         self.img_backbone = PSPNet(sizes=(1, 2, 3, 6), psp_size=512, 
                                    deep_features_size=img_feat_dim, backend='resnet34')
         
-        # self.rot_head = RotationScoringNet(self.num_view, num_angle=self.num_angle,
-        #                                         num_depth=self.num_depth,
-        #                                         seed_feature_dim=self.seed_feature_dim + self.img_feature_dim, 
-        #                                         is_training=self.is_training)
-        # self.depth_head = DepthNet(self.num_view, num_angle=self.num_angle, 
-        #                            num_depth=self.num_depth,
-        #                            seed_feature_dim=self.seed_feature_dim)
-
-        self.rot_head = RotationScoringNetGate(self.num_view, num_angle=self.num_angle,
+        self.rot_head = RotationScoringNet(self.num_view, num_angle=self.num_angle,
                                                 num_depth=self.num_depth,
                                                 seed_feature_dim=self.seed_feature_dim + self.img_feature_dim, 
                                                 is_training=self.is_training)
-        self.depth_head = DepthNetGate(self.num_view, num_angle=self.num_angle, 
+        self.depth_head = DepthNet(self.num_view, num_angle=self.num_angle, 
                                    num_depth=self.num_depth,
                                    seed_feature_dim=self.seed_feature_dim)
+
+        # self.rot_head = RotationScoringNetGate(self.num_view, num_angle=self.num_angle,
+        #                                         num_depth=self.num_depth,
+        #                                         seed_feature_dim=self.seed_feature_dim + self.img_feature_dim, 
+        #                                         dropout_rate=0.0,
+        #                                         is_training=self.is_training)
+        # self.depth_head = DepthNetGate(self.num_view, num_angle=self.num_angle, 
+        #                            num_depth=self.num_depth,
+        #                            seed_feature_dim=self.seed_feature_dim,
+        #                            dropout_rate=0.0)
         
         if self.multi_scale_grouping:
             feat_dim = self.seed_feature_dim + self.img_feature_dim
