@@ -210,6 +210,33 @@ def add_gaussian_noise_point_cloud(point_cloud, level=0.005, valid_min_z=0):
     return noisy_point_cloud
 
 
+def add_gaussian_noise_depth_map(depth_map, scale, level=0.005, valid_min_depth=0):
+    """
+    Adds Gaussian noise to a depth map, suitable for 2D depth maps with shape (H, W),
+    where each value represents a depth measurement.
+
+    Input:
+    - depth_map: numpy array, shape (H, W), representing the depth map.
+    - level: standard deviation of the Gaussian noise.
+    - valid_min_depth: minimum valid depth value; noise is only added to pixels with depth greater than this value.
+
+    Output:
+    - noisy_depth_map: depth map with added Gaussian noise.
+    """
+    # 确定有效像素，仅对深度大于 valid_min_depth 的像素添加噪声
+    depth_map = depth_map / scale
+    mask = depth_map > valid_min_depth
+    noisy_depth_map = depth_map.copy()
+
+    # 生成高斯噪声，均值为 0，标准差为 level
+    noise = np.random.normal(0, level, depth_map.shape)
+
+    # 仅对有效像素添加噪声
+    noisy_depth_map[mask] += noise[mask]
+    noisy_depth_map = noisy_depth_map * scale
+    return noisy_depth_map
+
+
 def apply_smoothing(depth_map, size=3):
     smoothed_depth = cv2.blur(depth_map.astype(np.uint16), (size, size))
     return smoothed_depth

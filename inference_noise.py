@@ -28,7 +28,7 @@ import MinkowskiEngine as ME
 from graspnetAPI import GraspGroup
 
 from utils.collision_detector import ModelFreeCollisionDetector, ModelFreeCollisionDetectorTorch
-from utils.data_utils import CameraInfo, create_point_cloud_from_depth_image, get_workspace_mask, sample_points, points_denoise, add_gaussian_noise_point_cloud, apply_smoothing, random_point_dropout
+from utils.data_utils import CameraInfo, create_point_cloud_from_depth_image, get_workspace_mask, sample_points, points_denoise, add_gaussian_noise_depth_map, apply_smoothing, random_point_dropout
 from torchvision import transforms
 
 import cv2
@@ -211,9 +211,6 @@ def inference(scene_idx):
         seg = np.array(Image.open(mask_path))
         # normal = np.load(normal_path)['normals']
 
-        if cfgs.smooth_size > 1:
-            depth = apply_smoothing(depth, size=cfgs.smooth_size)
-            
         if use_gt_mask:
             net_seg = seg
         else:
@@ -225,6 +222,15 @@ def inference(scene_idx):
         intrinsics = meta['intrinsic_matrix']
         factor_depth = meta['factor_depth']
         camera_info = CameraInfo(img_length, img_width, intrinsics[0][0], intrinsics[1][1], intrinsics[0][2], intrinsics[1][2], factor_depth)
+        
+        if cfgs.smooth_size > 1:
+            smooth_depth = apply_smoothing(depth, size=cfgs.smooth_size)
+            smooth_cloud = create_point_cloud_from_depth_image(smooth_depth, camera_info, organized=True)
+        
+        if cfgs.gaussian_noise_level > 0:
+            noisy_depth = add_gaussian_noise_depth_map(depth, factor_depth, level=cfgs.gaussian_noise_level, valid_min_depth=0.1)
+            noisy_cloud = create_point_cloud_from_depth_image(noisy_depth, camera_info, organized=True)
+            
         cloud = create_point_cloud_from_depth_image(depth, camera_info, organized=True)
 
         depth_mask = (depth > 0)
@@ -236,7 +242,13 @@ def inference(scene_idx):
         workspace_mask = get_workspace_mask(cloud, seg, trans=trans, organized=True, outlier=0.02)
         mask = (depth_mask & workspace_mask)
 
-        cloud_masked = cloud[mask]
+        if cfgs.smooth_size > 1:
+            cloud_masked = smooth_cloud[mask]
+        elif cfgs.gaussian_noise_level > 0:
+            cloud_masked = noisy_cloud[mask]
+        else:
+            cloud_masked = cloud[mask]
+            
         color_masked = color[mask]
         seg_masked = net_seg[mask]
         seg_masked_org = net_seg * mask
@@ -304,9 +316,6 @@ def inference(scene_idx):
             # inst_idxs_img = inst_idxs_img.reshape((224, 224, 3))
             # cv2.imwrite("{}_inst_input.png".format(anno_idx), inst_idxs_img*255.)
             
-            if cfgs.gaussian_noise_level > 0:
-                sample_cloud = add_gaussian_noise_point_cloud(sample_cloud, level=cfgs.noise_level, valid_min_z=0.1)
-                
             inst_cloud_list.append(sample_cloud)
             inst_color_list.append(sample_color)
             inst_coors_list.append(sample_coors)
