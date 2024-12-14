@@ -12,6 +12,7 @@ import torch
 import collections.abc as container_abcs
 from torch.utils.data import Dataset
 from tqdm import tqdm
+import open3d as o3d
 
 # BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 # ROOT_DIR = os.path.dirname(BASE_DIR)
@@ -20,7 +21,8 @@ from utils.data_utils import CameraInfo, transform_point_cloud, create_point_clo
 
 class GraspNetDataset(Dataset):
     def __init__(self, root, valid_obj_idxs, grasp_labels, camera='kinect', split='train', num_points=20000,
-                 remove_outlier=False, voxel_size=0.005, gaussian_noise_level=0.0, smooth_size=1, dropout_num=0, remove_invisible=True, augment=False, load_label=True):
+                 remove_outlier=False, voxel_size=0.005, gaussian_noise_level=0.0, smooth_size=1, dropout_num=0, 
+                 downsample_voxel_size=0.0, remove_invisible=True, augment=False, load_label=True):
         assert(num_points<=50000)
         self.root = root
         self.split = split
@@ -37,6 +39,7 @@ class GraspNetDataset(Dataset):
         self.gaussian_noise_level = gaussian_noise_level
         self.smooth_size = smooth_size
         self.dropout_num = dropout_num
+        self.downsample_voxel_size = downsample_voxel_size
         if split == 'train':
             self.sceneIds = list( range(100) )
         elif split == 'test':
@@ -169,13 +172,25 @@ class GraspNetDataset(Dataset):
             cloud_masked = np.concatenate(inst_cloud, axis=0)
             color_masked = np.concatenate(inst_color, axis=0)
         
+        if self.downsample_voxel_size > 0.0:
+            scene_masked = o3d.geometry.PointCloud()
+            scene_masked.points = o3d.utility.Vector3dVector(cloud_masked)
+            scene_masked.colors = o3d.utility.Vector3dVector(color_masked)
+            max_bound = scene_masked.get_max_bound() + self.downsample_voxel_size * 0.5
+            min_bound = scene_masked.get_min_bound() - self.downsample_voxel_size * 0.5
+            out = scene_masked.voxel_down_sample_and_trace(self.downsample_voxel_size, min_bound, max_bound, False)
+            downsample_idx = [cubic_index[0] for cubic_index in out[2]]
+            cloud_masked = cloud_masked[downsample_idx, :] 
+            color_masked = color_masked[downsample_idx, :]
+            
         # sample points
         if len(cloud_masked) >= self.num_points:
             idxs = np.random.choice(len(cloud_masked), self.num_points, replace=False)
         else:
             idxs1 = np.arange(len(cloud_masked))
-            idxs2 = np.random.choice(len(cloud_masked), self.num_points-len(cloud_masked), replace=True)
-            idxs = np.concatenate([idxs1, idxs2], axis=0)
+            # idxs2 = np.random.choice(len(cloud_masked), self.num_points-len(cloud_masked), replace=True)
+            # idxs = np.concatenate([idxs1, idxs2], axis=0)
+            idxs = np.concatenate([idxs1], axis=0)
         
         cloud_sampled = cloud_masked[idxs]
         color_sampled = color_masked[idxs]

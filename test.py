@@ -26,7 +26,8 @@ parser.add_argument('--dump_dir', help='Dump dir to save outputs', default=None,
 parser.add_argument('--seed_feat_dim', default=512, type=int, help='Point wise feature dim')
 parser.add_argument('--camera', default='realsense', help='Camera split [realsense/kinect]')
 parser.add_argument('--num_point', type=int, default=15000, help='Point Number [default: 15000]')
-parser.add_argument('--batch_size', type=int, default=1, help='Batch Size during inference [default: 1]')
+parser.add_argument('--batch_size', type=int, default=4, help='Batch Size during inference [default: 1]')
+parser.add_argument('--remove_outlier', action='store_true', default=False)
 parser.add_argument('--voxel_size', type=float, default=0.005, help='Voxel Size for sparse convolution')
 parser.add_argument('--collision_thresh', type=float, default=0.01,
                     help='Collision Threshold in collision detection [default: 0.01]')
@@ -34,6 +35,7 @@ parser.add_argument('--voxel_size_cd', type=float, default=0.01, help='Voxel Siz
 parser.add_argument('--gaussian_noise_level', type=float, default=0.0, help='Noise level for scene points')
 parser.add_argument('--smooth_size', type=int, default=0, help='Smooth size for scene points')
 parser.add_argument('--dropout_num', type=int, default=0, help='Gaussian noise level for scene points')
+parser.add_argument('--downsample_voxel_size', type=float, default=0.0, help='Voxel Size for scene points downsample')
 parser.add_argument('--infer', action='store_true', default=False)
 parser.add_argument('--eval', action='store_true', default=False)
 cfgs = parser.parse_args()
@@ -51,7 +53,7 @@ def my_worker_init_fn(worker_id):
 
 def inference():
     valid_obj_idxs, grasp_labels = load_grasp_labels(cfgs.dataset_root)
-    test_dataset = GraspNetDataset(cfgs.dataset_root, valid_obj_idxs, grasp_labels, split=cfgs.split, camera=cfgs.camera, num_points=cfgs.num_point, voxel_size=cfgs.voxel_size, gaussian_noise_level=cfgs.gaussian_noise_level, smooth_size=cfgs.smooth_size, dropout_num=cfgs.dropout_num, remove_outlier=False, augment=False, load_label=False)
+    test_dataset = GraspNetDataset(cfgs.dataset_root, valid_obj_idxs, grasp_labels, split=cfgs.split, camera=cfgs.camera, num_points=cfgs.num_point, voxel_size=cfgs.voxel_size, gaussian_noise_level=cfgs.gaussian_noise_level, smooth_size=cfgs.smooth_size, dropout_num=cfgs.dropout_num, downsample_voxel_size=cfgs.downsample_voxel_size, remove_outlier=cfgs.remove_outlier, augment=False, load_label=False)
     print('Test dataset length: ', len(test_dataset))
     scene_list = test_dataset.scene_list()
     test_dataloader = DataLoader(test_dataset, batch_size=cfgs.batch_size, shuffle=False,
