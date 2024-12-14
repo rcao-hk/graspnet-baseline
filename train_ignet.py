@@ -162,13 +162,13 @@ net = IGNet(num_view=cfgs.num_view, seed_feat_dim=cfgs.seed_feat_dim, img_feat_d
             is_training=True, multi_scale_grouping=cfgs.multi_scale_grouping)
 net.to(device)
 
-for param in net.img_backbone.dino.parameters():
-    param.requires_grad = False
+# for param in net.img_backbone.dino.parameters():
+    # param.requires_grad = False
     
-optimizer = optim.AdamW(filter(lambda p: p.requires_grad, net.parameters()), lr=cfgs.learning_rate, weight_decay=cfgs.weight_decay)
+# optimizer = optim.AdamW(filter(lambda p: p.requires_grad, net.parameters()), lr=cfgs.learning_rate, weight_decay=cfgs.weight_decay)
 
 # Load the Adam optimizer
-# optimizer = optim.AdamW(net.parameters(), lr=cfgs.learning_rate, weight_decay=cfgs.weight_decay)
+optimizer = optim.AdamW(net.parameters(), lr=cfgs.learning_rate, weight_decay=cfgs.weight_decay)
 if cfgs.lr_sched:
     lr_scheduler = CosineAnnealingLR(optimizer, T_max=cfgs.lr_sched_period, eta_min=1e-4)
 

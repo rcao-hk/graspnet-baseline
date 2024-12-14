@@ -30,7 +30,8 @@ def get_loss(end_points, device):
     # classifcation-based
     # loss = 10 * graspness_loss + 0.5 * score_loss + 0.1 * width_loss
     # regression-based
-    loss = 10 * graspness_loss + 10 * score_loss + width_loss
+    loss = 5 * graspness_loss + 5 * score_loss + width_loss
+    # loss = 10 * graspness_loss + 10 * score_loss + width_loss
     # score only
     # loss = 5 * graspness_loss + score_loss
     end_points['loss/overall_loss'] = loss
