@@ -65,10 +65,12 @@ parser.add_argument('--collision_thresh', type=float, default=0.01, help='Collis
 parser.add_argument('--gaussian_noise_level', type=float, default=0.0, help='Collision Threshold in collision detection [default: 0.0]')
 parser.add_argument('--smooth_size', type=int, default=1, help='Blur size used for depth smoothing [default: 1]')
 parser.add_argument('--dropout_num', type=int, default=0, help=' [default: 0]')
+parser.add_argument('--downsample_voxel_size', type=float, default=0.01, help='Downsample point cloud [default: 0.0]')
+# parser.add_argument('--scene_pt_num', type=int, default=0, help='Point number of each scene [default: 15000]')
 cfgs = parser.parse_args()
 
 print(cfgs)
-minimum_num_pt = 50
+minimum_num_pt = 30
 img_width = 720
 img_length = 1280
 
@@ -138,8 +140,7 @@ if seg_model == 'gt':
 else:
     use_gt_mask = False
     
-num_pt = cfgs.inst_pt_num
-denoise_pre_sample_num = int(num_pt * 1.5)
+inst_num_pt = cfgs.inst_pt_num
 
 split = cfgs.split
 camera = cfgs.camera
@@ -147,7 +148,7 @@ dataset_root = cfgs.dataset_root
 voxel_size = cfgs.voxel_size
 network_ver = cfgs.network_ver
 ckpt_root = cfgs.ckpt_root
-dump_dir = os.path.join('experiment', cfgs.dump_dir)
+dump_dir = os.path.join(cfgs.dump_dir)
 ckpt_epoch = cfgs.ckpt_epoch
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 torch.cuda.set_device(device)
@@ -252,8 +253,39 @@ def inference(scene_idx):
         color_masked = color[mask]
         seg_masked = net_seg[mask]
         seg_masked_org = net_seg * mask
-        # normal_masked = normal
 
+        if cfgs.downsample_voxel_size > 0.0:
+            scene_masked = o3d.geometry.PointCloud()
+            scene_masked.points = o3d.utility.Vector3dVector(cloud_masked)
+            scene_masked.colors = o3d.utility.Vector3dVector(color_masked)
+            max_bound = scene_masked.get_max_bound() + cfgs.downsample_voxel_size * 0.5
+            min_bound = scene_masked.get_min_bound() - cfgs.downsample_voxel_size * 0.5
+            out = scene_masked.voxel_down_sample_and_trace(cfgs.downsample_voxel_size, min_bound, max_bound, False)
+            downsample_idx = [cubic_index[0] for cubic_index in out[2]]
+            cloud_masked = cloud_masked[downsample_idx] 
+            color_masked = color_masked[downsample_idx]
+            seg_masked = seg_masked[downsample_idx]
+            
+            seg_masked_downsample = np.zeros_like(seg_masked_org)
+            valid_indices = np.nonzero(mask)  # 获取原图像中所有有效点的 (row, col) 索引
+            selected_rows = valid_indices[0][downsample_idx]  # 选中点的行坐标
+            selected_cols = valid_indices[1][downsample_idx]  # 选中点的列坐标
+            seg_masked_downsample[selected_rows, selected_cols] = seg_masked_org[selected_rows, selected_cols]
+            seg_masked_org = seg_masked_downsample
+        
+        # if cfgs.scene_pt_num > 0.0:
+        #     scene_sample_idx = sample_points(len(cloud_masked), cfgs.scene_pt_num)
+        #     cloud_masked = cloud_masked[scene_sample_idx] 
+        #     color_masked = color_masked[scene_sample_idx]
+        #     seg_masked = seg_masked[scene_sample_idx]
+
+        #     seg_masked_downsample = np.zeros_like(seg_masked_org)
+        #     valid_indices = np.nonzero(mask)  # 获取原图像中所有有效点的 (row, col) 索引
+        #     selected_rows = valid_indices[0][scene_sample_idx]  # 选中点的行坐标
+        #     selected_cols = valid_indices[1][scene_sample_idx]  # 选中点的列坐标
+        #     seg_masked_downsample[selected_rows, selected_cols] = seg_masked_org[selected_rows, selected_cols]
+        #     seg_masked_org = seg_masked_downsample
+        
         # scene = o3d.geometry.PointCloud()
         # scene.points = o3d.utility.Vector3dVector(cloud_masked)
         # scene.colors = o3d.utility.Vector3dVector(color_masked)
@@ -294,8 +326,8 @@ def inference(scene_idx):
                     inst_mask_org_flat = inst_mask_org.flatten()  # 展平 mask
                     inst_mask_org_flat[dropped_global_idx] = False  # 更新 mask
                     inst_mask_org = inst_mask_org_flat.reshape(inst_mask_org.shape)  # 恢复形状
-                            
-            idxs = sample_points(len(inst_cloud), num_pt)
+                    
+            idxs = sample_points(len(inst_cloud), inst_num_pt)
             
             rmin, rmax, cmin, cmax = get_bbox(inst_mask_org.astype(np.uint8))
             img = color[rmin:rmax, cmin:cmax, :]
@@ -310,6 +342,11 @@ def inference(scene_idx):
             sample_coors = inst_cloud[idxs].astype(np.float32) / voxel_size
             sample_feats = np.ones_like(inst_cloud[idxs]).astype(np.float32)
 
+            # inst_save = o3d.geometry.PointCloud()
+            # inst_save.points = o3d.utility.Vector3dVector(sample_cloud)
+            # inst_save.colors = o3d.utility.Vector3dVector(sample_color)
+            # o3d.io.write_point_cloud("{}_inst_input.ply".format(anno_idx), inst_save)
+            
             # inst_idxs_img = np.zeros_like(img)
             # inst_idxs_img = inst_idxs_img.reshape(-1, 3)
             # inst_idxs_img[resized_idxs] = sample_color

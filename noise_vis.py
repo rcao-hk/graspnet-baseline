@@ -2,7 +2,7 @@ import os
 import numpy as np
 import matplotlib.pyplot as plt
 
-experiment_root = '/media/user/data1/rcao/result/ignet/experiment'
+experiment_root = '/media/gpuadmin/rcao/result/ignet/experiment'
 # 模型列表和列名称
 # model_list = [
 #     'gsnet.clear', 'gsnet.0.002', 'gsnet.0.005', 'gsnet.0.01', 
@@ -33,13 +33,24 @@ experiment_root = '/media/user/data1/rcao/result/ignet/experiment'
 # noise_type = 'dropout'
 
 model_list = [
-    'gsnet.clear', 'gsnet.7500', 'gsnet.3750', 'gsnet.1875',
-    'scale_grasp.clear', 'scale_grasp.10000', 'scale_grasp.5000', 'scale_grasp.2500',
-    'ignet_v0.6.2.clear', 'ignet_v0.6.2.n512', 'ignet_v0.6.2.n256', 'ignet_v0.6.2.n128',
-    'ignet_v0.8.2.clear', 'ignet_v0.8.2.n512', 'ignet_v0.8.2.n256', 'ignet_v0.8.2.n128'
+    'gsnet.ds0.002', 'gsnet.ds0.005', 'gsnet.ds0.007', 'gsnet.ds0.01',
+    # 'scale_grasp.ds0.002', 'scale_grasp.ds0.005', 'scale_grasp.ds0.007', 'scale_grasp.ds0.01',
+    # 'ignet_v0.6.2.ds0.002', 'ignet_v0.6.2.ds0.005', 'ignet_v0.6.2.ds0.007', 'ignet_v0.6.2.ds0.01',
+    # 'ignet_v0.8.2.ds0.002', 'ignet_v0.8.2.ds0.005', 'ignet_v0.8.2.ds0.007', 'ignet_v0.8.2.ds0.01'
+    'scale_grasp.ds0.002', 'scale_grasp.ds0.01', 'scale_grasp.ds0.007', 'scale_grasp.ds0.005'
 ]
-noise_levels = [100, 50, 25, 12.5]
+
+noise_levels = [0.002, 0.005, 0.007, 0.01]
 noise_type = 'sparse'
+
+# model_list = [
+#     'gsnet.clear', 'gsnet.7500', 'gsnet.3750', 'gsnet.1875',
+#     'scale_grasp.clear', 'scale_grasp.7500', 'scale_grasp.3750', 'scale_grasp.1875',
+#     'ignet_v0.6.2.7500.1024', 'ignet_v0.6.2.7500.768', 'ignet_v0.6.2.n512', 'ignet_v0.6.2.n256',
+#     'ignet_v0.8.2.7500.1024', 'ignet_v0.8.2.7500.768', 'ignet_v0.8.2.n512', 'ignet_v0.8.2.n256'
+# ]
+# noise_levels = [100, 50, 25, 12.5]
+# noise_type = 'sparse_number'
 
 camera_type = 'realsense'
 
@@ -85,10 +96,16 @@ for split in ['seen', 'similar', 'novel']:
         plt.plot(noise_levels, scale_grasp_ap_split, label='ScaleGrasp', marker='^')
     except:
         pass
-    if noise_type == 'sparse':
+    if noise_type == 'sparse_number':
         plt.gca().invert_xaxis()
-    plt.plot(noise_levels, ignet_baseline_ap_split, label='MMGNet (Baseline)', marker='x')
-    plt.plot(noise_levels, ignet_ap_split, label='MMGNet', marker='s')
+    try:
+        plt.plot(noise_levels, ignet_baseline_ap_split, label='MMGNet (Baseline)', marker='x')
+    except:
+        pass
+    try:
+        plt.plot(noise_levels, ignet_ap_split, label='MMGNet', marker='s')
+    except:
+        pass
     # plt.plot(noise_levels, differences, label='Difference (MMGNet - GSNet)', linestyle='--', marker='d')
 
     # 为每个点标注差值
@@ -106,7 +123,7 @@ for split in ['seen', 'similar', 'novel']:
     plt.legend()
     plt.grid(True)
     # plt.show()
-    plt.savefig('{}_ap_mean_vs_{}_noise.svg'.format(split, noise_type), format='svg', dpi=800)
+    # plt.savefig('{}_ap_mean_vs_{}_noise.svg'.format(split, noise_type), format='svg', dpi=800)
     plt.savefig('{}_ap_mean_vs_{}_noise.png'.format(split, noise_type), dpi=800)
 
 
@@ -147,10 +164,16 @@ try:
     plt.plot(noise_levels, scale_grasp_ap_mean, label='ScaleGrasp', marker='^')
 except:
     pass
-if noise_type == 'sparse':
+if noise_type == 'sparse_number':
     plt.gca().invert_xaxis()
-plt.plot(noise_levels, ignet_baseline_ap_mean, label='MMGNet (Baseline)', marker='x')
-plt.plot(noise_levels, ignet_ap_mean, label='MMGNet', marker='s')
+try:
+    plt.plot(noise_levels, ignet_baseline_ap_mean, label='MMGNet (Baseline)', marker='x')
+except:
+    pass
+try:
+    plt.plot(noise_levels, ignet_ap_mean, label='MMGNet', marker='s')
+except:
+    pass
 
 # 为每个点标注差值
 for x, diff, base, ig in zip(noise_levels, gs_differences, gsnet_ap_mean, ignet_ap_mean):
@@ -167,5 +190,5 @@ plt.xticks(noise_levels)
 plt.legend()
 plt.grid(True)
 # plt.show()
-plt.savefig('ap_mean_vs_{}_noise.svg'.format(noise_type), format='svg', dpi=800)
+# plt.savefig('ap_mean_vs_{}_noise.svg'.format(noise_type), format='svg', dpi=800)
 plt.savefig('ap_mean_vs_{}_noise.png'.format(noise_type), dpi=800)

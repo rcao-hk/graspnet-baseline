@@ -194,9 +194,9 @@ class GraspNetDataset(Dataset):
             idxs = np.random.choice(len(cloud_masked), self.num_points, replace=False)
         else:
             idxs1 = np.arange(len(cloud_masked))
-            # idxs2 = np.random.choice(len(cloud_masked), self.num_points-len(cloud_masked), replace=True)
-            # idxs = np.concatenate([idxs1, idxs2], axis=0)
-            idxs = np.concatenate([idxs1], axis=0)
+            idxs2 = np.random.choice(len(cloud_masked), self.num_points-len(cloud_masked), replace=True)
+            idxs = np.concatenate([idxs1, idxs2], axis=0)
+            # idxs = np.concatenate([idxs1], axis=0)
             
         cloud_sampled = cloud_masked[idxs]
         color_sampled = color_masked[idxs]
