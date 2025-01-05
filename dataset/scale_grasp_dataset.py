@@ -21,7 +21,7 @@ from utils.data_utils import CameraInfo, transform_point_cloud, create_point_clo
 
 class GraspNetDataset(Dataset):
     def __init__(self, root, valid_obj_idxs, grasp_labels, camera='kinect', split='train', num_points=20000,
-                 remove_outlier=False, gaussian_noise_level=0.0, smooth_size=1, dropout_num=0, downsample_voxel_size=0.0, remove_invisible=True, augment=False, load_label=True):
+                 remove_outlier=False, gaussian_noise_level=0.0, smooth_size=1, dropout_num=0, downsample_voxel_size=0.0, remove_invisible=True, augment=False, load_label=True, depth_type='virtual'):
         assert(num_points<=50000)
         self.root = root
         self.split = split
@@ -35,7 +35,8 @@ class GraspNetDataset(Dataset):
         self.load_label = load_label
         self.collision_labels = {}
         # self.step = 100
-
+        self.depth_type = depth_type
+        assert self.depth_type in ['real', 'virtual']
         self.gaussian_noise_level = gaussian_noise_level
         self.smooth_size = smooth_size
         self.dropout_num = dropout_num
@@ -63,10 +64,12 @@ class GraspNetDataset(Dataset):
         for x in tqdm(self.sceneIds, desc = 'Loading data path and collision labels...'):
             for img_num in range(256):
                 self.colorpath.append(os.path.join(root, 'scenes', x, camera, 'rgb', str(img_num).zfill(4)+'.png'))
-                # self.depthpath.append(os.path.join(root, 'scenes', x, camera, 'depth', str(img_num).zfill(4)+'.png'))
-                # self.labelpath.append(os.path.join(root, 'scenes', x, camera, 'label', str(img_num).zfill(4)+'.png'))
-                self.depthpath.append(os.path.join(root, 'virtual_scenes', x, camera, str(img_num).zfill(4)+'_depth.png'))
-                self.labelpath.append(os.path.join(root, 'virtual_scenes', x, camera, str(img_num).zfill(4)+'_label.png'))
+                if self.depth_type == 'real':
+                    self.depthpath.append(os.path.join(root, 'scenes', x, camera, 'depth', str(img_num).zfill(4)+'.png'))
+                    self.labelpath.append(os.path.join(root, 'scenes', x, camera, 'label', str(img_num).zfill(4)+'.png'))
+                elif self.depth_type == 'virtual':
+                    self.depthpath.append(os.path.join(root, 'virtual_scenes', x, camera, str(img_num).zfill(4)+'_depth.png'))
+                    self.labelpath.append(os.path.join(root, 'virtual_scenes', x, camera, str(img_num).zfill(4)+'_label.png'))
                 self.metapath.append(os.path.join(root, 'scenes', x, camera, 'meta', str(img_num).zfill(4)+'.mat'))
                 self.scenename.append(x.strip())
                 self.frameid.append(img_num)

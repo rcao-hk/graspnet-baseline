@@ -39,6 +39,7 @@ parser.add_argument('--gaussian_noise_level', type=float, default=0.0, help='Noi
 parser.add_argument('--smooth_size', type=int, default=0, help='Smooth size for scene points')
 parser.add_argument('--dropout_num', type=int, default=0, help='Gaussian noise level for scene points')
 parser.add_argument('--downsample_voxel_size', type=float, default=0.0, help='Voxel Size for scene points downsample')
+parser.add_argument('--depth_type', default='virtual', help='Depth type [real/virtual]')
 parser.add_argument('--num_workers', type=int, default=30, help='Number of workers used in evaluation [default: 30]')
 cfgs = parser.parse_args()
 print(cfgs)
@@ -53,7 +54,7 @@ def my_worker_init_fn(worker_id):
 
 # Create Dataset and Dataloader
 # TEST_DATASET = GraspNetDataset(cfgs.dataset_root, None, None, split='test', camera=cfgs.camera, num_points=cfgs.num_point, remove_outlier=True, augment=False, load_label=False)
-TEST_DATASET = GraspNetDataset(cfgs.dataset_root, None, None, split=cfgs.split, camera=cfgs.camera, num_points=cfgs.num_point,  gaussian_noise_level=cfgs.gaussian_noise_level, smooth_size=cfgs.smooth_size, dropout_num=cfgs.dropout_num, downsample_voxel_size=cfgs.downsample_voxel_size, remove_outlier=cfgs.remove_outlier, augment=False, load_label=False)
+TEST_DATASET = GraspNetDataset(cfgs.dataset_root, None, None, split=cfgs.split, camera=cfgs.camera, num_points=cfgs.num_point,  gaussian_noise_level=cfgs.gaussian_noise_level, smooth_size=cfgs.smooth_size, dropout_num=cfgs.dropout_num, downsample_voxel_size=cfgs.downsample_voxel_size, remove_outlier=cfgs.remove_outlier, augment=False, load_label=False, depth_type=cfgs.depth_type)
 print(len(TEST_DATASET))
 SCENE_LIST = TEST_DATASET.scene_list()
 TEST_DATALOADER = DataLoader(TEST_DATASET, batch_size=cfgs.batch_size, shuffle=False,
