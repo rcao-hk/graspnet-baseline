@@ -403,6 +403,114 @@ class GraspNet(nn.Module):
         return end_points
 
 
+from models.pspnet import PSPNet
+psp_models = {
+    'resnet18': lambda: PSPNet(sizes=(1, 2, 3, 6), psp_size=512, deep_features_size=256, backend='resnet18'),
+    'resnet34': lambda: PSPNet(sizes=(1, 2, 3, 6), psp_size=512, deep_features_size=256, backend='resnet34'),
+    'resnet50': lambda: PSPNet(sizes=(1, 2, 3, 6), psp_size=2048, deep_features_size=1024, backend='resnet50')
+}
+
+class GraspNet_multimodal(nn.Module):
+    def __init__(self,  num_view=300, num_angle=12, num_depth=4, cylinder_radius=0.05, seed_feat_dim=512, img_feat_dim=64, is_training=True):
+        super().__init__()
+        self.is_training = is_training
+        self.seed_feature_dim = seed_feat_dim
+        self.num_depth = num_depth
+        self.num_angle = num_angle
+        self.M_points = 1024
+        self.num_view = num_view
+        self.img_feat_dim = img_feat_dim
+        self.point_backbone = MinkUNet14D(in_channels=img_feat_dim, out_channels=self.seed_feature_dim, D=3)
+        self.img_backbone = PSPNet(sizes=(1, 2, 3, 6), psp_size=512, 
+                                   deep_features_size=img_feat_dim, backend='resnet34')
+        
+        self.graspable = GraspableNet(seed_feature_dim=self.seed_feature_dim)
+        self.rotation = ApproachNet(self.num_view, seed_feature_dim=self.seed_feature_dim, is_training=self.is_training)
+        # self.rotation = NormalPolicy(self.num_view)
+        self.crop = CloudCrop(nsample=16, cylinder_radius=cylinder_radius, seed_feature_dim=self.seed_feature_dim)
+        self.swad = SWADNet(num_angle=self.num_angle, num_depth=self.num_depth)
+
+    def forward(self, end_points):
+        # use all sampled point cloud, B*Ns*3
+        seed_xyz = end_points['point_clouds']
+        B, point_num, _ = seed_xyz.shape  # batch _size
+
+        img = end_points['img']
+        img_idxs = end_points['img_idxs']
+        
+        img_feat = self.img_backbone(img)
+        _, img_dim, _ , _ = img_feat.size()
+        
+        img_feat = img_feat.view(B, img_dim, -1)
+        img_idxs = img_idxs.unsqueeze(1).repeat(1, img_dim, 1)
+        image_features = torch.gather(img_feat, 2, img_idxs).contiguous()
+        
+        # early fusion
+        image_features = image_features.transpose(1, 2)
+        coordinates_batch, features_batch = ME.utils.sparse_collate(coords=[c for c in end_points['coors']], 
+                                                                    feats=[f for f in image_features], 
+                                                                    dtype=torch.float32)
+        coordinates_batch, features_batch, _, quantize2original = ME.utils.sparse_quantize(
+            coordinates_batch, features_batch, return_index=True, return_inverse=True, device=seed_xyz.device)
+        mink_input = ME.SparseTensor(coordinates=coordinates_batch, features=features_batch)
+        point_features = self.point_backbone(mink_input).F
+        seed_features = point_features[quantize2original].view(B, point_num, -1).transpose(1, 2)
+
+        end_points = self.graspable(seed_features, end_points)
+        seed_features_flipped = seed_features.transpose(1, 2)  # B*Ns*feat_dim
+        objectness_score = end_points['objectness_score']
+        graspness_score = end_points['graspness_score'].squeeze(1)
+        objectness_pred = torch.argmax(objectness_score, 1)
+        objectness_mask = (objectness_pred == 1)
+        graspness_mask = graspness_score > GRASPNESS_THRESHOLD
+        graspable_mask = objectness_mask & graspness_mask
+
+        seed_features_graspable = []
+        seed_xyz_graspable = []
+        seed_xyz_graspable_idxs = []
+        graspable_num_batch = 0.
+        for i in range(B):
+            cur_mask = graspable_mask[i]
+            graspable_num_batch += cur_mask.sum()
+            cur_feat = seed_features_flipped[i][cur_mask]  # Ns*feat_dim
+            cur_seed_xyz = seed_xyz[i][cur_mask]  # Ns*3
+
+            cur_seed_xyz = cur_seed_xyz.unsqueeze(0) # 1*Ns*3
+            fps_idxs = furthest_point_sample(cur_seed_xyz, self.M_points)
+            cur_seed_xyz_flipped = cur_seed_xyz.transpose(1, 2).contiguous()  # 1*3*Ns
+            cur_seed_xyz = gather_operation(cur_seed_xyz_flipped, fps_idxs).transpose(1, 2).squeeze(0).contiguous() # Ns*3
+            cur_feat_flipped = cur_feat.unsqueeze(0).transpose(1, 2).contiguous()  # 1*feat_dim*Ns
+            cur_feat = gather_operation(cur_feat_flipped, fps_idxs).squeeze(0).contiguous()  # feat_dim*Ns
+
+            seed_features_graspable.append(cur_feat)
+            seed_xyz_graspable.append(cur_seed_xyz)
+            seed_xyz_graspable_idxs.append(fps_idxs.squeeze(0))
+
+        seed_xyz_graspable = torch.stack(seed_xyz_graspable, 0)  # B*Ns*3
+        seed_features_graspable = torch.stack(seed_features_graspable, 0)  # B*feat_dim*Ns
+        seed_xyz_graspable_idxs = torch.stack(seed_xyz_graspable_idxs, 0)  # B*1*Ns
+        end_points['xyz_graspable'] = seed_xyz_graspable
+        end_points['xyz_graspable_idxs'] = seed_xyz_graspable_idxs
+        end_points['graspable_count_stage1'] = graspable_num_batch / B
+        
+        end_points, res_feat = self.rotation(seed_features_graspable, end_points)
+        seed_features_graspable = seed_features_graspable + res_feat
+
+        # end_points = self.rotation(end_points)
+
+        if self.is_training:
+            end_points = process_grasp_labels(end_points)
+            grasp_top_views_rot, end_points = match_grasp_view_and_label(end_points)
+        else:
+            grasp_top_views_rot = end_points['grasp_top_view_rot']
+
+        group_features = self.crop(seed_xyz_graspable.contiguous(), 
+                                   seed_features_graspable.contiguous(), grasp_top_views_rot)
+        end_points = self.swad(group_features, end_points)
+
+        return end_points
+    
+    
 def process_grasp_labels(end_points):
     """ Process labels according to scene points and object poses. """
     seed_xyzs = end_points['xyz_graspable']  # (B, M_point, 3)

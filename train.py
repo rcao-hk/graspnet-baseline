@@ -40,16 +40,18 @@ ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(ROOT_DIR, 'pointnet2'))
 
 # from graspnet import GraspNet, get_loss
-from models.GSNet import GraspNet
+from models.GSNet import GraspNet, GraspNet_multimodal
 from models.GSNet_loss import get_loss
-from dataset.graspnet_dataset import GraspNetDataset, collate_fn, minkowski_collate_fn, load_grasp_labels
-
+# from dataset.graspnet_dataset import GraspNetDataset, collate_fn, minkowski_collate_fn, load_grasp_labels
+from dataset.graspnet_dataset import GraspNetMultiDataset, collate_fn, minkowski_collate_fn, load_grasp_labels
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--dataset_root', default='/media/gpuadmin/rcao/dataset/graspnet', help='Dataset root')
 parser.add_argument('--camera', default='realsense', help='Camera split [realsense/kinect]')
-parser.add_argument('--checkpoint_path', default=None, help='Model checkpoint path [default: None]')
-parser.add_argument('--log_dir', default='log/gsnet', help='Dump dir to save model checkpoint [default: log]')
+parser.add_argument('--resume_checkpoint', default=None, help='Model checkpoint path [default: None]')
+parser.add_argument('--ckpt_root', default='/media/gpuadmin/rcao/result/ignet', help='Checkpoint dir to save model [default: log]')
+parser.add_argument('--method_id', default='ignet_v0.8.2.x', help='Method version')
+parser.add_argument('--log_root', default='log', help='Log dir to save log [default: log]')
 parser.add_argument('--num_point', type=int, default=15000, help='Point Number [default: 20000]')
 parser.add_argument('--seed_feat_dim', default=512, type=int, help='Point wise feature dim')
 parser.add_argument('--num_view', type=int, default=300, help='View Number [default: 300]')
@@ -57,24 +59,22 @@ parser.add_argument('--max_epoch', type=int, default=18, help='Epoch to run [def
 parser.add_argument('--batch_size', type=int, default=8, help='Batch Size during training [default: 2]')
 parser.add_argument('--learning_rate', type=float, default=0.002, help='Initial learning rate [default: 0.001]')
 parser.add_argument('--weight_decay', type=float, default=0, help='Optimization L2 weight decay [default: 0]')
+parser.add_argument('--worker_num', type=int, default=18, help='Worker number for dataloader [default: 4]')
 parser.add_argument('--voxel_size', type=float, default=0.005, help='Voxel Size for sparse convolution')
-# parser.add_argument('--bn_decay_step', type=int, default=2, help='Period of BN decay (in epochs) [default: 2]')
-# parser.add_argument('--bn_decay_rate', type=float, default=0.5, help='Decay rate for BN decay [default: 0.5]')
-parser.add_argument('--lr_decay_steps', default='8,12,16', help='When to decay the learning rate (in epochs) [default: 8,12,16]')
-parser.add_argument('--lr_decay_rates', default='0.1,0.1,0.1', help='Decay rates for lr decay [default: 0.1,0.1,0.1]')
+parser.add_argument('--pin_memory', action='store_true', help='Set pin_memory for faster training [default: False]')
 cfgs = parser.parse_args()
 
 # ------------------------------------------------------------------------- GLOBAL CONFIG BEG
-EPOCH_CNT = 0
-LR_DECAY_STEPS = [int(x) for x in cfgs.lr_decay_steps.split(',')]
-LR_DECAY_RATES = [float(x) for x in cfgs.lr_decay_rates.split(',')]
-assert(len(LR_DECAY_STEPS)==len(LR_DECAY_RATES))
-DEFAULT_CHECKPOINT_PATH = os.path.join(cfgs.log_dir, 'checkpoint.tar')
-CHECKPOINT_PATH = cfgs.checkpoint_path if cfgs.checkpoint_path is not None \
-    else DEFAULT_CHECKPOINT_PATH
 
-if not os.path.exists(cfgs.log_dir):
-    os.makedirs(cfgs.log_dir)
+cfgs.ckpt_dir = os.path.join(cfgs.ckpt_root, cfgs.method_id, cfgs.camera)
+cfgs.log_dir = os.path.join(cfgs.log_root, cfgs.method_id, cfgs.camera)
+os.makedirs(cfgs.ckpt_dir, exist_ok=True)
+os.makedirs(cfgs.log_dir, exist_ok=True)
+
+EPOCH_CNT = 0
+DEFAULT_CHECKPOINT_PATH = os.path.join(cfgs.ckpt_dir, 'checkpoint.tar')
+CHECKPOINT_PATH = cfgs.resume_checkpoint if cfgs.resume_checkpoint is not None \
+    else DEFAULT_CHECKPOINT_PATH
 
 LOG_FOUT = open(os.path.join(cfgs.log_dir, 'log_train.txt'), 'a')
 LOG_FOUT.write(str(cfgs)+'\n')
@@ -93,25 +93,30 @@ torch.cuda.set_device(device)
 
 # Create Dataset and Dataloader
 valid_obj_idxs, grasp_labels = load_grasp_labels(cfgs.dataset_root)
-TRAIN_DATASET = GraspNetDataset(cfgs.dataset_root, valid_obj_idxs, grasp_labels, camera=cfgs.camera, split='train', num_points=cfgs.num_point, voxel_size=cfgs.voxel_size, remove_outlier=True, augment=True)
-TEST_DATASET = GraspNetDataset(cfgs.dataset_root, valid_obj_idxs, grasp_labels, camera=cfgs.camera, split='test_seen', num_points=cfgs.num_point, voxel_size=cfgs.voxel_size, remove_outlier=True, augment=False)
+# TRAIN_DATASET = GraspNetDataset(cfgs.dataset_root, valid_obj_idxs, grasp_labels, camera=cfgs.camera, split='train', num_points=cfgs.num_point, voxel_size=cfgs.voxel_size, remove_outlier=True, augment=True)
+# TEST_DATASET = GraspNetDataset(cfgs.dataset_root, valid_obj_idxs, grasp_labels, camera=cfgs.camera, split='test_seen', num_points=cfgs.num_point, voxel_size=cfgs.voxel_size, remove_outlier=True, augment=False)
+# TRAIN_DATALOADER = DataLoader(TRAIN_DATASET, batch_size=cfgs.batch_size, shuffle=True,
+#     num_workers=cfgs.worker_num, worker_init_fn=my_worker_init_fn, collate_fn=minkowski_collate_fn, pin_memory=cfgs.pin_memory)
+# TEST_DATALOADER = DataLoader(TEST_DATASET, batch_size=cfgs.batch_size, shuffle=False,
+#     num_workers=cfgs.worker_num, worker_init_fn=my_worker_init_fn, collate_fn=minkowski_collate_fn, pin_memory=cfgs.pin_memory)
+
+TRAIN_DATASET = GraspNetMultiDataset(cfgs.dataset_root, valid_obj_idxs, grasp_labels, camera=cfgs.camera, split='train', num_points=cfgs.num_point, voxel_size=cfgs.voxel_size, remove_outlier=True, augment=False)
+TEST_DATASET = GraspNetMultiDataset(cfgs.dataset_root, valid_obj_idxs, grasp_labels, camera=cfgs.camera, split='test_seen', num_points=cfgs.num_point, voxel_size=cfgs.voxel_size, remove_outlier=True, augment=False)
+TRAIN_DATALOADER = DataLoader(TRAIN_DATASET, batch_size=cfgs.batch_size, shuffle=True,
+    num_workers=cfgs.worker_num, worker_init_fn=my_worker_init_fn, collate_fn=collate_fn, pin_memory=cfgs.pin_memory)
+TEST_DATALOADER = DataLoader(TEST_DATASET, batch_size=cfgs.batch_size, shuffle=False,
+    num_workers=cfgs.worker_num, worker_init_fn=my_worker_init_fn, collate_fn=collate_fn, pin_memory=cfgs.pin_memory)
 
 print(len(TRAIN_DATASET), len(TEST_DATASET))
-# TRAIN_DATALOADER = DataLoader(TRAIN_DATASET, batch_size=cfgs.batch_size, shuffle=True,
-#     num_workers=4, worker_init_fn=my_worker_init_fn, collate_fn=collate_fn)
-# TEST_DATALOADER = DataLoader(TEST_DATASET, batch_size=cfgs.batch_size, shuffle=False,
-#     num_workers=4, worker_init_fn=my_worker_init_fn, collate_fn=collate_fn)
-TRAIN_DATALOADER = DataLoader(TRAIN_DATASET, batch_size=cfgs.batch_size, shuffle=True,
-    num_workers=8, worker_init_fn=my_worker_init_fn, collate_fn=minkowski_collate_fn)
-TEST_DATALOADER = DataLoader(TEST_DATASET, batch_size=cfgs.batch_size, shuffle=False,
-    num_workers=8, worker_init_fn=my_worker_init_fn, collate_fn=minkowski_collate_fn)
 print(len(TRAIN_DATALOADER), len(TEST_DATALOADER))
 # Init the model and optimzier
 # net = GraspNet(input_feature_dim=0, num_view=cfgs.num_view, num_angle=12, num_depth=4,
 #                         cylinder_radius=0.05, hmin=-0.02, hmax_list=[0.01,0.02,0.03,0.04])
 
-net = GraspNet(seed_feat_dim=cfgs.seed_feat_dim, is_training=True)
+# net = GraspNet(seed_feat_dim=cfgs.seed_feat_dim, is_training=True)
+net = GraspNet_multimodal(seed_feat_dim=cfgs.seed_feat_dim, img_feat_dim=64, is_training=True)
 net.to(device)
+
 # Load the Adam optimizer
 optimizer = optim.Adam(net.parameters(), lr=cfgs.learning_rate)
 start_epoch = 0
