@@ -28,7 +28,7 @@ import MinkowskiEngine as ME
 from graspnetAPI import GraspGroup
 
 from utils.collision_detector import ModelFreeCollisionDetector, ModelFreeCollisionDetectorTorch
-from utils.data_utils import CameraInfo, create_point_cloud_from_depth_image, get_workspace_mask, sample_points, points_denoise, add_gaussian_noise_depth_map, apply_smoothing, random_point_dropout
+from utils.data_utils import CameraInfo, create_point_cloud_from_depth_image, get_workspace_mask, sample_points, points_denoise, add_gaussian_noise_depth_map, apply_smoothing, random_point_dropout, find_large_missing_regions, apply_dropout_to_regions
 from torchvision import transforms
 
 import cv2
@@ -65,12 +65,14 @@ parser.add_argument('--collision_thresh', type=float, default=0.01, help='Collis
 parser.add_argument('--gaussian_noise_level', type=float, default=0.0, help='Collision Threshold in collision detection [default: 0.0]')
 parser.add_argument('--smooth_size', type=int, default=1, help='Blur size used for depth smoothing [default: 1]')
 parser.add_argument('--dropout_num', type=int, default=0, help=' [default: 0]')
-parser.add_argument('--downsample_voxel_size', type=float, default=0.01, help='Downsample point cloud [default: 0.0]')
-# parser.add_argument('--scene_pt_num', type=int, default=0, help='Point number of each scene [default: 15000]')
+parser.add_argument('--dropout_rate', type=float, default=0.0, help=' [default: 0.0]')
+parser.add_argument('--dropout_min_size', type=int, default=200, help=' [default: 200]')
+parser.add_argument('--downsample_voxel_size', type=float, default=0.0, help='Downsample point cloud [default: 0.0]')
+parser.add_argument('--scene_pt_num', type=int, default=0, help='Point number of each scene [default: 15000]')
 cfgs = parser.parse_args()
 
 print(cfgs)
-minimum_num_pt = 30
+minimum_num_pt = 20
 img_width = 720
 img_length = 1280
 
@@ -199,16 +201,17 @@ def inference(scene_idx):
     # elapsed_time_list = []
     for anno_idx in range(256):
         rgb_path = os.path.join(dataset_root, 'scenes/scene_{:04d}/{}/rgb/{:04d}.png'.format(scene_idx, camera, anno_idx))
-        depth_path = os.path.join(dataset_root, 'scenes/scene_{:04d}/{}/depth/{:04d}.png'.format(scene_idx, camera, anno_idx))
+        real_depth_path = os.path.join(dataset_root, 'scenes/scene_{:04d}/{}/depth/{:04d}.png'.format(scene_idx, camera, anno_idx))
 
-        depth_path = os.path.join(dataset_root, 'virtual_scenes/scene_{:04d}/{}/{:04d}_depth.png'.format(scene_idx, camera, anno_idx))
+        clear_depth_path = os.path.join(dataset_root, 'virtual_scenes/scene_{:04d}/{}/{:04d}_depth.png'.format(scene_idx, camera, anno_idx))
         mask_path = os.path.join(dataset_root, 'virtual_scenes/scene_{:04d}/{}/{:04d}_label.png'.format(scene_idx, camera, anno_idx))
             
         meta_path = os.path.join(dataset_root, 'scenes/scene_{:04d}/{}/meta/{:04d}.mat'.format(scene_idx, camera, anno_idx))
         seg_mask_path = os.path.join(seg_root, '{}_mask/scene_{:04d}/{}/{:04d}.png'.format(seg_model, scene_idx, camera, anno_idx))
 
         color = np.array(Image.open(rgb_path), dtype=np.float32) / 255.0
-        depth = np.array(Image.open(depth_path))
+        depth = np.array(Image.open(clear_depth_path))
+        real_depth = np.array(Image.open(real_depth_path))
         seg = np.array(Image.open(mask_path))
         # normal = np.load(normal_path)['normals']
 
@@ -231,6 +234,14 @@ def inference(scene_idx):
         if cfgs.gaussian_noise_level > 0:
             noisy_depth = add_gaussian_noise_depth_map(depth, factor_depth, level=cfgs.gaussian_noise_level, valid_min_depth=0.1)
             noisy_cloud = create_point_cloud_from_depth_image(noisy_depth, camera_info, organized=True)
+        
+        if cfgs.dropout_rate > 0:
+            foreground_mask = (seg > 0)
+            large_missing_regions, labeled, filtered_labels = find_large_missing_regions(real_depth, foreground_mask, cfgs.dropout_min_size)
+
+            # 根据 dropout_rate 随机选择区域
+            dropout_regions = apply_dropout_to_regions(large_missing_regions, labeled, filtered_labels, cfgs.dropout_rate)
+            dropout_mask = dropout_regions > 0
             
         cloud = create_point_cloud_from_depth_image(depth, camera_info, organized=True)
 
@@ -247,6 +258,9 @@ def inference(scene_idx):
             cloud_masked = smooth_cloud[mask]
         elif cfgs.gaussian_noise_level > 0:
             cloud_masked = noisy_cloud[mask]
+        elif cfgs.dropout_rate > 0.0:
+            mask = mask & ~dropout_mask
+            cloud_masked = cloud[mask]
         else:
             cloud_masked = cloud[mask]
             
@@ -273,18 +287,18 @@ def inference(scene_idx):
             seg_masked_downsample[selected_rows, selected_cols] = seg_masked_org[selected_rows, selected_cols]
             seg_masked_org = seg_masked_downsample
         
-        # if cfgs.scene_pt_num > 0.0:
-        #     scene_sample_idx = sample_points(len(cloud_masked), cfgs.scene_pt_num)
-        #     cloud_masked = cloud_masked[scene_sample_idx] 
-        #     color_masked = color_masked[scene_sample_idx]
-        #     seg_masked = seg_masked[scene_sample_idx]
+        if cfgs.scene_pt_num > 0:
+            scene_sample_idx = sample_points(len(cloud_masked), cfgs.scene_pt_num)
+            cloud_masked = cloud_masked[scene_sample_idx] 
+            color_masked = color_masked[scene_sample_idx]
+            seg_masked = seg_masked[scene_sample_idx]
 
-        #     seg_masked_downsample = np.zeros_like(seg_masked_org)
-        #     valid_indices = np.nonzero(mask)  # 获取原图像中所有有效点的 (row, col) 索引
-        #     selected_rows = valid_indices[0][scene_sample_idx]  # 选中点的行坐标
-        #     selected_cols = valid_indices[1][scene_sample_idx]  # 选中点的列坐标
-        #     seg_masked_downsample[selected_rows, selected_cols] = seg_masked_org[selected_rows, selected_cols]
-        #     seg_masked_org = seg_masked_downsample
+            seg_masked_downsample = np.zeros_like(seg_masked_org)
+            valid_indices = np.nonzero(mask)  # 获取原图像中所有有效点的 (row, col) 索引
+            selected_rows = valid_indices[0][scene_sample_idx]  # 选中点的行坐标
+            selected_cols = valid_indices[1][scene_sample_idx]  # 选中点的列坐标
+            seg_masked_downsample[selected_rows, selected_cols] = seg_masked_org[selected_rows, selected_cols]
+            seg_masked_org = seg_masked_downsample
         
         # scene = o3d.geometry.PointCloud()
         # scene.points = o3d.utility.Vector3dVector(cloud_masked)

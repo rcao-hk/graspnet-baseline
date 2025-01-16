@@ -19,7 +19,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(BASE_DIR)
 sys.path.append(os.path.join(ROOT_DIR, 'utils'))
 from data_utils import CameraInfo, transform_point_cloud, create_point_cloud_from_depth_image,\
-                            get_workspace_mask, remove_invisible_grasp_points, add_gaussian_noise_point_cloud, apply_smoothing, random_point_dropout, add_gaussian_noise_depth_map, sample_points
+                            get_workspace_mask, remove_invisible_grasp_points, add_gaussian_noise_point_cloud, apply_smoothing, random_point_dropout, add_gaussian_noise_depth_map, sample_points, find_large_missing_regions, apply_dropout_to_regions
 
 img_width = 720
 img_length = 1280
@@ -51,8 +51,7 @@ def get_bbox(label):
 
 class GraspNetDataset(Dataset):
     def __init__(self, root, valid_obj_idxs, grasp_labels, camera='kinect', split='train', num_points=20000,
-                 remove_outlier=False, voxel_size=0.005, gaussian_noise_level=0.0, smooth_size=1, dropout_num=0, 
-                 downsample_voxel_size=0.0, remove_invisible=True, augment=False, load_label=True, depth_type='real'):
+                 remove_outlier=False, voxel_size=0.005, gaussian_noise_level=0.0, smooth_size=1, dropout_num=0, dropout_rate=0, downsample_voxel_size=0.0, remove_invisible=True, augment=False, load_label=True, depth_type='real'):
         assert(num_points<=50000)
         self.root = root
         self.split = split
@@ -71,6 +70,8 @@ class GraspNetDataset(Dataset):
         self.dropout_num = dropout_num
         self.downsample_voxel_size = downsample_voxel_size
         self.depth_type = depth_type
+        self.dropout_rate = dropout_rate
+        self.dropout_min_size = 200
         assert self.depth_type in ['real', 'virtual']
         if split == 'train':
             self.sceneIds = list( range(100) )
@@ -86,6 +87,7 @@ class GraspNetDataset(Dataset):
         
         self.colorpath = []
         self.depthpath = []
+        self.realdepthpath = []
         self.labelpath = []
         self.metapath = []
         self.scenename = []
@@ -95,11 +97,11 @@ class GraspNetDataset(Dataset):
         for x in tqdm(self.sceneIds, desc = 'Loading data path and collision labels...'):
             for img_num in range(256):
                 self.colorpath.append(os.path.join(root, 'scenes', x, camera, 'rgb', str(img_num).zfill(4)+'.png'))
+                self.realdepthpath.append(os.path.join(root, 'scenes', x, camera, 'depth', str(img_num).zfill(4)+'.png'))
+                self.depthpath.append(os.path.join(root, 'virtual_scenes', x, camera, str(img_num).zfill(4)+'_depth.png'))
                 if self.depth_type == 'real':
-                    self.depthpath.append(os.path.join(root, 'scenes', x, camera, 'depth', str(img_num).zfill(4)+'.png'))
                     self.labelpath.append(os.path.join(root, 'scenes', x, camera, 'label', str(img_num).zfill(4)+'.png'))
                 elif self.depth_type == 'virtual':
-                    self.depthpath.append(os.path.join(root, 'virtual_scenes', x, camera, str(img_num).zfill(4)+'_depth.png'))
                     self.labelpath.append(os.path.join(root, 'virtual_scenes', x, camera, str(img_num).zfill(4)+'_label.png'))
                 self.metapath.append(os.path.join(root, 'scenes', x, camera, 'meta', str(img_num).zfill(4)+'.mat'))
                 # self.normalpath.append(os.path.join(root, 'normals', x, camera, str(img_num).zfill(4)+'.npy'))
@@ -150,6 +152,7 @@ class GraspNetDataset(Dataset):
     def get_data(self, index, return_raw_cloud=False):
         color = np.array(Image.open(self.colorpath[index]), dtype=np.float32) / 255.0
         depth = np.array(Image.open(self.depthpath[index]))
+        real_depth = np.array(Image.open(self.realdepthpath[index]))
         seg = np.array(Image.open(self.labelpath[index]))
         meta = scio.loadmat(self.metapath[index])
         # normal = np.load(self.normalpath[index])
@@ -171,6 +174,14 @@ class GraspNetDataset(Dataset):
             noisy_depth = add_gaussian_noise_depth_map(depth, factor_depth, level=self.gaussian_noise_level, valid_min_depth=0.1)
             noisy_cloud = create_point_cloud_from_depth_image(noisy_depth, camera, organized=True)
             
+        if self.dropout_rate > 0:
+            foreground_mask = (seg > 0)
+            large_missing_regions, labeled, filtered_labels = find_large_missing_regions(real_depth, foreground_mask, self.dropout_min_size)
+
+            # 根据 dropout_rate 随机选择区域
+            dropout_regions = apply_dropout_to_regions(large_missing_regions, labeled, filtered_labels, self.dropout_rate)
+            dropout_mask = dropout_regions > 0
+            
         # generate cloud
         cloud = create_point_cloud_from_depth_image(depth, camera, organized=True)
 
@@ -184,6 +195,7 @@ class GraspNetDataset(Dataset):
             mask = (depth_mask & workspace_mask)
         else:
             mask = depth_mask
+            
         cloud_masked = cloud[mask]
         color_masked = color[mask]
         seg_masked = seg[mask]
@@ -195,9 +207,12 @@ class GraspNetDataset(Dataset):
             cloud_masked = smooth_cloud[mask]
         elif self.gaussian_noise_level > 0:
             cloud_masked = noisy_cloud[mask]
+        elif self.dropout_rate > 0.0:
+            mask = mask & ~dropout_mask
+            cloud_masked = cloud[mask]
         else:
             cloud_masked = cloud[mask]
-                
+            
         if self.dropout_num > 0:
             inst_cloud = []
             inst_color = []

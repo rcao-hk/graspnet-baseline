@@ -17,11 +17,11 @@ from tqdm import tqdm
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 from utils.data_utils import CameraInfo, transform_point_cloud, create_point_cloud_from_depth_image,\
-                            get_workspace_mask, remove_invisible_grasp_points, add_gaussian_noise_point_cloud, apply_smoothing, random_point_dropout
+                            get_workspace_mask, remove_invisible_grasp_points, add_gaussian_noise_point_cloud, apply_smoothing, random_point_dropout, add_gaussian_noise_depth_map, find_large_missing_regions, apply_dropout_to_regions
 
 class GraspNetDataset(Dataset):
     def __init__(self, root, valid_obj_idxs, grasp_labels, camera='kinect', split='train', num_points=20000,
-                 remove_outlier=False, gaussian_noise_level=0.0, smooth_size=1, dropout_num=0, downsample_voxel_size=0.0, remove_invisible=True, augment=False, load_label=True, depth_type='virtual'):
+                 remove_outlier=False, gaussian_noise_level=0.0, smooth_size=1, dropout_num=0, dropout_rate=0, downsample_voxel_size=0.0, remove_invisible=True, augment=False, load_label=True, depth_type='virtual'):
         assert(num_points<=50000)
         self.root = root
         self.split = split
@@ -34,6 +34,8 @@ class GraspNetDataset(Dataset):
         self.augment = augment
         self.load_label = load_label
         self.collision_labels = {}
+        self.dropout_rate = dropout_rate
+        self.dropout_min_size = 200
         # self.step = 100
         self.depth_type = depth_type
         assert self.depth_type in ['real', 'virtual']
@@ -57,6 +59,7 @@ class GraspNetDataset(Dataset):
         
         self.colorpath = []
         self.depthpath = []
+        self.realdepthpath = []
         self.labelpath = []
         self.metapath = []
         self.scenename = []
@@ -64,11 +67,11 @@ class GraspNetDataset(Dataset):
         for x in tqdm(self.sceneIds, desc = 'Loading data path and collision labels...'):
             for img_num in range(256):
                 self.colorpath.append(os.path.join(root, 'scenes', x, camera, 'rgb', str(img_num).zfill(4)+'.png'))
+                self.realdepthpath.append(os.path.join(root, 'scenes', x, camera, 'depth', str(img_num).zfill(4)+'.png'))
+                self.depthpath.append(os.path.join(root, 'virtual_scenes', x, camera, str(img_num).zfill(4)+'_depth.png'))
                 if self.depth_type == 'real':
-                    self.depthpath.append(os.path.join(root, 'scenes', x, camera, 'depth', str(img_num).zfill(4)+'.png'))
                     self.labelpath.append(os.path.join(root, 'scenes', x, camera, 'label', str(img_num).zfill(4)+'.png'))
                 elif self.depth_type == 'virtual':
-                    self.depthpath.append(os.path.join(root, 'virtual_scenes', x, camera, str(img_num).zfill(4)+'_depth.png'))
                     self.labelpath.append(os.path.join(root, 'virtual_scenes', x, camera, str(img_num).zfill(4)+'_label.png'))
                 self.metapath.append(os.path.join(root, 'scenes', x, camera, 'meta', str(img_num).zfill(4)+'.mat'))
                 self.scenename.append(x.strip())
@@ -125,6 +128,7 @@ class GraspNetDataset(Dataset):
     def get_data(self, index, return_raw_cloud=False):
         color = np.array(Image.open(self.colorpath[index]), dtype=np.float32) / 255.0
         depth = np.array(Image.open(self.depthpath[index]))
+        real_depth = np.array(Image.open(self.realdepthpath[index]))
         seg = np.array(Image.open(self.labelpath[index]))
         meta = scio.loadmat(self.metapath[index])
         scene = self.scenename[index]
@@ -138,8 +142,20 @@ class GraspNetDataset(Dataset):
         camera = CameraInfo(1280.0, 720.0, intrinsic[0][0], intrinsic[1][1], intrinsic[0][2], intrinsic[1][2], factor_depth)
 
         if self.smooth_size > 1:
-            depth_smoothed = apply_smoothing(depth, size=self.smooth_size)
-            cloud_smoothed = create_point_cloud_from_depth_image(depth_smoothed, camera, organized=True)
+            smooth_depth = apply_smoothing(depth, size=self.smooth_size)
+            smooth_cloud = create_point_cloud_from_depth_image(smooth_depth, camera, organized=True)
+
+        if self.gaussian_noise_level > 0:
+            noisy_depth = add_gaussian_noise_depth_map(depth, factor_depth, level=self.gaussian_noise_level, valid_min_depth=0.1)
+            noisy_cloud = create_point_cloud_from_depth_image(noisy_depth, camera, organized=True)
+            
+        if self.dropout_rate > 0:
+            foreground_mask = (seg > 0)
+            large_missing_regions, labeled, filtered_labels = find_large_missing_regions(real_depth, foreground_mask, self.dropout_min_size)
+
+            # 根据 dropout_rate 随机选择区域
+            dropout_regions = apply_dropout_to_regions(large_missing_regions, labeled, filtered_labels, self.dropout_rate)
+            dropout_mask = dropout_regions > 0
             
         # generate cloud
         cloud = create_point_cloud_from_depth_image(depth, camera, organized=True)
@@ -158,12 +174,20 @@ class GraspNetDataset(Dataset):
         cloud_masked = cloud[mask]
         color_masked = color[mask]
         seg_masked = seg[mask]
+        
         if return_raw_cloud:
             return cloud_masked, color_masked
 
         if self.smooth_size > 1:
-            cloud_masked = cloud_smoothed[mask]
-            
+            cloud_masked = smooth_cloud[mask]
+        elif self.gaussian_noise_level > 0:
+            cloud_masked = noisy_cloud[mask]
+        elif self.dropout_rate > 0.0:
+            mask = mask & ~dropout_mask
+            cloud_masked = cloud[mask]
+        else:
+            cloud_masked = cloud[mask]
+
         if self.dropout_num > 0:
             inst_cloud = []
             inst_color = []
@@ -207,8 +231,8 @@ class GraspNetDataset(Dataset):
         objectness_label = seg_sampled.copy()
         objectness_label[objectness_label > 1] = 1
 
-        if self.gaussian_noise_level > 0.0:
-            cloud_sampled = add_gaussian_noise_point_cloud(cloud_sampled, level=self.gaussian_noise_level, valid_min_z=0.1)
+        # if self.gaussian_noise_level > 0.0:
+        #     cloud_sampled = add_gaussian_noise_point_cloud(cloud_sampled, level=self.gaussian_noise_level, valid_min_z=0.1)
             
         ret_dict = {}
         ret_dict['point_clouds'] = cloud_sampled.astype(np.float32)
