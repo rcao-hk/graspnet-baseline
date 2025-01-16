@@ -5,6 +5,7 @@
 import numpy as np
 import open3d as o3d
 import cv2
+from scipy import ndimage
 
 class CameraInfo():
     """ Camera intrisics for point cloud creation. """
@@ -292,3 +293,66 @@ def random_point_dropout(point_cloud, min_num=50, num_points_to_drop=3, radius_p
     retained_indices = np.where(mask)[0]  # Indices of retained points
     dropped_indices = np.where(~mask)[0]  # Indices of dropped points
     return retained_point_cloud, retained_indices, dropped_indices
+
+
+def find_large_missing_regions(depth, foreground_mask, min_size=50):
+    """
+    通过连通组件标记找到成块缺失的部分，滤除小的缺失区域，并仅考虑foreground mask上的缺失。
+
+    输入:
+    - depth: (H, W) 形状的 numpy 数组，表示深度图。
+    - foreground_mask: (H, W) 形状的 numpy 数组，表示前景 mask（1 表示前景，0 表示背景）。
+    - min_size: 连通区域的最小大小，滤除小于该大小的缺失区域。
+
+    输出:
+    - large_missing_regions: (H, W) 形状的 numpy 数组，标记出大的缺失区域。
+    """
+    
+    # 1. 仅考虑前景区域的缺失点
+    depth_mask = (depth == 0)  # 假设缺失点的深度值为 0
+    valid_mask = depth_mask & foreground_mask  # 在前景区域内的缺失点
+
+    # 2. 找到连通区域
+    labeled, num_labels = ndimage.label(valid_mask)
+    
+    # 3. 获取各个区域的大小
+    region_sizes = np.bincount(labeled.ravel())
+    
+    # 4. 创建一个新的 mask，标记大的缺失区域
+    large_missing_regions = np.zeros_like(depth, dtype=np.int32)
+    
+    filtered_labels = []
+    for label in range(1, num_labels + 1):
+        if region_sizes[label] >= min_size:  # 如果区域的大小大于 min_size
+            large_missing_regions[labeled == label] = label
+            filtered_labels.append(label)
+            
+    return large_missing_regions, labeled, filtered_labels
+
+
+def apply_dropout_to_regions(large_missing_regions, labeled, filtered_labels, dropout_rate):
+    """
+    根据 dropout_rate 随机选择部分区域，生成 dropout mask。
+
+    输入:
+    - large_missing_regions: (H, W) 形状的 numpy 数组，表示大缺失区域的标记。
+    - labeled: (H, W) 形状的 numpy 数组，表示每个连通区域的标签。
+    - filtered_labels: 连通区域标签的列表。
+    - dropout_rate: 需要保留的区域比例。
+
+    输出:
+    - dropout_regions: (H, W) 形状的 numpy 数组，标记选择的 dropout 区域。
+    """
+    # 创建一个新的 dropout mask
+    dropout_regions = np.zeros_like(large_missing_regions, dtype=np.int32)
+    
+    # 根据 dropout_rate 随机选择区域
+    num_regions_to_keep = max(0, int(len(filtered_labels) * dropout_rate))  # 计算保留区域的数量
+    if num_regions_to_keep == 0:
+        return dropout_regions
+    
+    selected_labels = np.random.choice(filtered_labels, num_regions_to_keep, replace=False)  # 随机选择区域
+    for label in selected_labels:
+        dropout_regions[labeled == label] = label  # 标记选择的区域为 dropout 区域
+    
+    return dropout_regions
