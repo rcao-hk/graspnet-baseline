@@ -14,8 +14,6 @@ sys.path.append(os.path.join(ROOT_DIR, 'models'))
 sys.path.append(os.path.join(ROOT_DIR, 'dataset'))
 
 from utils.collision_detector import ModelFreeCollisionDetector, ModelFreeCollisionDetectorTorch
-from models.GSNet import GraspNet, pred_decode
-from dataset.graspnet_dataset import GraspNetDataset, load_grasp_labels, minkowski_collate_fn
 
 
 parser = argparse.ArgumentParser()
@@ -36,7 +34,9 @@ parser.add_argument('--gaussian_noise_level', type=float, default=0.0, help='Noi
 parser.add_argument('--smooth_size', type=int, default=0, help='Smooth size for scene points')
 parser.add_argument('--dropout_num', type=int, default=0, help='Gaussian noise level for scene points')
 parser.add_argument('--downsample_voxel_size', type=float, default=0.0, help='Voxel Size for scene points downsample')
+parser.add_argument('--worker_num', type=int, default=18, help='Worker number for dataloader [default: 4]')
 parser.add_argument('--depth_type', default='virtual', help='Depth type [real/virtual]')
+parser.add_argument('--mutli_modal', action='store_true', default=False)
 parser.add_argument('--infer', action='store_true', default=False)
 parser.add_argument('--eval', action='store_true', default=False)
 cfgs = parser.parse_args()
@@ -45,6 +45,13 @@ print(cfgs)
 if not os.path.exists(cfgs.dump_dir):
     os.mkdir(cfgs.dump_dir)
 
+if cfgs.mutli_modal:
+    from models.GSNet import GraspNet_multimodal, pred_decode
+    # from dataset.graspnet_dataset import GraspNetDataset, collate_fn, minkowski_collate_fn, load_grasp_labels
+    from dataset.graspnet_dataset import GraspNetMultiDataset, collate_fn, minkowski_collate_fn, load_grasp_labels
+else:
+    from models.GSNet import GraspNet, pred_decode
+    from dataset.graspnet_dataset import GraspNetDataset, load_grasp_labels, minkowski_collate_fn
 
 # Init datasets and dataloaders 
 def my_worker_init_fn(worker_id):
@@ -54,14 +61,31 @@ def my_worker_init_fn(worker_id):
 
 def inference():
     valid_obj_idxs, grasp_labels = load_grasp_labels(cfgs.dataset_root)
-    test_dataset = GraspNetDataset(cfgs.dataset_root, valid_obj_idxs, grasp_labels, split=cfgs.split, camera=cfgs.camera, num_points=cfgs.num_point, voxel_size=cfgs.voxel_size, gaussian_noise_level=cfgs.gaussian_noise_level, smooth_size=cfgs.smooth_size, dropout_num=cfgs.dropout_num, downsample_voxel_size=cfgs.downsample_voxel_size, remove_outlier=cfgs.remove_outlier, augment=False, load_label=False, depth_type=cfgs.depth_type)
-    print('Test dataset length: ', len(test_dataset))
-    scene_list = test_dataset.scene_list()
-    test_dataloader = DataLoader(test_dataset, batch_size=cfgs.batch_size, shuffle=False,
-                                 num_workers=0, worker_init_fn=my_worker_init_fn, collate_fn=minkowski_collate_fn)
-    print('Test dataloader length: ', len(test_dataloader))
+    if cfgs.mutli_modal:
+        test_dataset = GraspNetMultiDataset(cfgs.dataset_root, valid_obj_idxs, grasp_labels, camera=cfgs.camera, split=cfgs.split, num_points=cfgs.num_point, voxel_size=cfgs.voxel_size, remove_outlier=True, load_label=False, augment=False)
+        print('Test dataset length: ', len(test_dataset))
+        scene_list = test_dataset.scene_list()
+        test_dataloader = DataLoader(test_dataset, batch_size=cfgs.batch_size, shuffle=False,
+                                     num_workers=cfgs.worker_num, worker_init_fn=my_worker_init_fn, 
+                                     collate_fn=collate_fn)
+        print('Test dataloader length: ', len(test_dataloader))
+    else:
+        test_dataset = GraspNetDataset(cfgs.dataset_root, valid_obj_idxs, grasp_labels, split=cfgs.split, camera=cfgs.camera, num_points=cfgs.num_point, voxel_size=cfgs.voxel_size, gaussian_noise_level=cfgs.gaussian_noise_level, smooth_size=cfgs.smooth_size, dropout_num=cfgs.dropout_num, downsample_voxel_size=cfgs.downsample_voxel_size, remove_outlier=cfgs.remove_outlier, augment=False, load_label=False, depth_type=cfgs.depth_type)
+        
+        print('Test dataset length: ', len(test_dataset))
+        scene_list = test_dataset.scene_list()
+        test_dataloader = DataLoader(test_dataset, batch_size=cfgs.batch_size, shuffle=False,
+                                    num_workers=cfgs.worker_num, worker_init_fn=my_worker_init_fn, collate_fn=minkowski_collate_fn)
+        print('Test dataloader length: ', len(test_dataloader))
+            
+
+    
     # Init the model
-    net = GraspNet(seed_feat_dim=cfgs.seed_feat_dim, is_training=False)
+    if cfgs.mutli_modal:
+        net = GraspNet_multimodal(seed_feat_dim=cfgs.seed_feat_dim, img_feat_dim=64, is_training=False)
+    else:
+        net = GraspNet(seed_feat_dim=cfgs.seed_feat_dim, is_training=False)
+        
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     net.to(device)
     # Load checkpoint
@@ -115,15 +139,6 @@ def inference():
             tic = time.time()
 
 
-def evaluate(dump_dir):
-    ge = GraspNetEval(root=cfgs.dataset_root, camera=cfgs.camera, split=cfgs.split)
-    res, ap = ge.eval_seen(dump_folder=dump_dir, proc=6)
-    save_dir = os.path.join(cfgs.dump_dir, 'ap_{}_{}.npy'.format(cfgs.split, cfgs.camera))
-    np.save(save_dir, res)
-
-
 if __name__ == '__main__':
     if cfgs.infer:
         inference()
-    if cfgs.eval:
-        evaluate(cfgs.dump_dir)

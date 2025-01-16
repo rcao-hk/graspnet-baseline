@@ -23,7 +23,6 @@ from data_utils import CameraInfo, transform_point_cloud, create_point_cloud_fro
 
 img_width = 720
 img_length = 1280
-border_list = [-1, 40, 80, 120, 160, 200, 240, 280, 320, 360, 400, 440, 480, 520, 560, 600, 640, 680, 720, 760, 800, 840, 880, 920, 960, 1000, 1040, 1080, 1120, 1160, 1200, 1240]
 def get_bbox(label):
     rows = np.any(label, axis=1)
     cols = np.any(label, axis=0)
@@ -519,21 +518,27 @@ class GraspNetMultiDataset(Dataset):
             mask = depth_mask
         cloud_masked = cloud[mask]
         color_masked = color[mask]
-        seg_masked = seg[mask]
         
         if return_raw_cloud:
             return cloud_masked, color_masked
 
-        # sample points
-        if len(cloud_masked) >= self.num_points:
-            idxs = np.random.choice(len(cloud_masked), self.num_points, replace=False)
-        else:
-            idxs1 = np.arange(len(cloud_masked))
-            idxs2 = np.random.choice(len(cloud_masked), self.num_points-len(cloud_masked), replace=True)
-            idxs = np.concatenate([idxs1, idxs2], axis=0)
+        seg_masked = seg * mask
         
-        cloud_sampled = cloud_masked[idxs]
-        color_sampled = color_masked[idxs]
+        rmin, rmax, cmin, cmax = get_bbox(mask)
+        patch_color = color[rmin:rmax, cmin:cmax, :]
+        patch_cloud = cloud[rmin:rmax, cmin:cmax, :]
+        patch_seg = seg_masked[rmin:rmax, cmin:cmax]
+        
+        choose = patch_seg.flatten().nonzero()[0]
+        sampled_idxs = sample_points(len(choose), self.num_points)
+        choose = choose[sampled_idxs]
+
+        cloud_sampled = patch_cloud.reshape(-1, 3)[choose]
+        color_sampled = patch_color.reshape(-1, 3)[choose]
+
+        orig_width, orig_length, _ = patch_color.shape
+        resized_idxs = self.get_resized_idxs(choose, (orig_width, orig_length))
+        img = self.img_transforms(patch_color)
         
         ret_dict = {}
         ret_dict['point_clouds'] = cloud_sampled.astype(np.float32)
@@ -542,6 +547,8 @@ class GraspNetMultiDataset(Dataset):
         
         ret_dict['coors'] = cloud_sampled.astype(np.float32) / self.voxel_size
         ret_dict['feats'] = np.ones_like(cloud_sampled).astype(np.float32)
+        ret_dict['img'] = img
+        ret_dict['img_idxs'] = resized_idxs.astype(np.int64)
         return ret_dict
 
     def get_data_label(self, index):
