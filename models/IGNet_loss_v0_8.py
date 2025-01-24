@@ -18,6 +18,7 @@ def sym_loss(p1_key_points, p2_key_points, p2_key_points_sym):
     return dis
 
 
+eps = 1e-8
 def get_loss(end_points, device):
     graspness_loss, end_points = compute_graspness_loss(end_points, device)
     score_loss, end_points = compute_score_loss(end_points, device)
@@ -30,10 +31,14 @@ def get_loss(end_points, device):
     # classifcation-based
     # loss = 10 * graspness_loss + 0.5 * score_loss + 0.1 * width_loss
     # regression-based
-    loss = 5 * graspness_loss + 5 * score_loss + width_loss
+    loss = 5 * graspness_loss + 5 * score_loss + width_loss  # vanilla
+    # loss = 3 * graspness_loss + 5 * score_loss + width_loss
     # loss = 10 * graspness_loss + 10 * score_loss + width_loss
     # score only
     # loss = 5 * graspness_loss + score_loss
+    # loss = graspness_loss / (eps + graspness_loss.detach()) + \
+    #        score_loss / (eps + score_loss.detach()) + \
+    #        width_loss / (eps + width_loss.detach())
     end_points['loss/overall_loss'] = loss
     return loss, end_points
 
@@ -45,6 +50,39 @@ def compute_graspness_loss(end_points, device):
     loss = criterion(grasp_rot_graspness_pred, grasp_graspness_label)
     end_points['loss/rot_graspness_loss'] = loss
     return loss, end_points
+
+
+# def compute_graspness_loss(end_points, device, top_k=50):
+#     criterion = nn.SmoothL1Loss(reduction='none').to(device)
+    
+#     # 预测和标签的误差
+#     grasp_rot_graspness_pred = end_points['grasp_rot_graspness_pred']
+#     grasp_graspness_label = end_points['batch_grasp_rot_graspness']
+#     graspness_error = torch.abs(grasp_rot_graspness_pred - grasp_graspness_label)
+    
+#     # graspness_error 的形状是 (B, Ns, V*A)
+#     B, Ns, V_A = graspness_error.size()
+    
+#     # 计算每个点（每个实例的每个点）在最后一维（V*A）上的 top-k 错误
+#     graspness_error_flat = graspness_error.view(B, Ns, -1)  # 将 V*A 拉平为一维
+    
+#     # 对每个点（每个实例的每个点）选择 top_k 错误
+#     top_k_errors, top_k_indices = torch.topk(graspness_error_flat, top_k, dim=-1, largest=False)  # 选取 top-k 错误
+    
+#     # 创建掩码，标记 top-k 错误的位置
+#     loss_mask = torch.zeros_like(graspness_error_flat)  # 初始化一个全零的掩码，形状为 (B, Ns, V*A)
+    
+#     # 使用 scatter_ 来标记 top-k 错误位置为 1
+#     loss_mask = loss_mask.scatter_(2, top_k_indices, 1.0)  # 只标记 top-k 错误的位置
+    
+#     # 计算掩码后的损失
+#     loss = criterion(graspness_error, grasp_graspness_label)
+    
+#     # 只计算 top-k 错误位置的损失
+#     loss = loss[loss_mask.bool()].mean()  
+    
+#     end_points['loss/rot_graspness_loss'] = loss
+#     return loss, end_points
 
 
 # regression-based

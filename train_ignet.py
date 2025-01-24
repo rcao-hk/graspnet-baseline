@@ -2,7 +2,8 @@
 
 import sys
 import os
-# os.environ['CUDA_VISIBLE_DEVICES'] = '5'
+# os.environ['CUDA_VISIBLE_DEVICES'] = '7'
+
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:512"
 # os.environ['OMP_NUM_THREADS'] = '18'
 
@@ -89,7 +90,7 @@ parser.add_argument('--batch_size', type=int, default=20, help='Batch Size durin
 parser.add_argument('--learning_rate', type=float, default=0.002, help='Initial learning rate [default: 0.002]')
 parser.add_argument('--worker_num', type=int, default=18, help='Worker number for dataloader [default: 4]')
 parser.add_argument('--ckpt_save_interval', type=int, default=5, help='Number for save checkpoint[default: 5]')
-parser.add_argument('--weight_decay', type=float, default=0.001, help='Optimization L2 weight decay [default: 0]')
+parser.add_argument('--weight_decay', type=float, default=0.0, help='Optimization L2 weight decay [default: 0]')
 parser.add_argument('--inst_denoise', default=False, action='store_true', help='Denoise instance points during training and testing [default: False]')
 parser.add_argument('--pin_memory', action='store_true', help='Set pin_memory for faster training [default: False]')
 parser.add_argument('--multi_modal_pose_augment', action='store_true', help='Set multi_modal_pose_augment for multi-modal consistent pose augmentation [default: False]')
@@ -133,7 +134,7 @@ torch.cuda.set_device(device)
 valid_obj_idxs, grasp_labels = load_grasp_labels(cfgs.dataset_root)
 TRAIN_DATASET = GraspNetDataset(cfgs.dataset_root, valid_obj_idxs, grasp_labels, camera=cfgs.camera, split='train', 
                                 num_points=cfgs.num_point, remove_outlier=False, multi_modal_pose_augment=cfgs.multi_modal_pose_augment, point_augment=cfgs.point_augment, denoise=cfgs.inst_denoise, real_data=True, syn_data=True, visib_threshold=cfgs.visib_threshold, voxel_size=cfgs.voxel_size)
-TEST_DATASET = GraspNetDataset(cfgs.dataset_root, valid_obj_idxs, grasp_labels, camera=cfgs.camera, split='test', 
+TEST_DATASET = GraspNetDataset(cfgs.dataset_root, valid_obj_idxs, grasp_labels, camera=cfgs.camera, split='test_seen', 
                                num_points=cfgs.num_point, remove_outlier=False, multi_modal_pose_augment=False, point_augment=False, denoise=cfgs.inst_denoise, real_data=True, syn_data=False, visib_threshold=cfgs.visib_threshold, voxel_size=cfgs.voxel_size)
 
 print(len(TRAIN_DATASET), len(TEST_DATASET))
@@ -163,7 +164,7 @@ net = IGNet(num_view=cfgs.num_view, seed_feat_dim=cfgs.seed_feat_dim, img_feat_d
 net.to(device)
 
 # for param in net.img_backbone.dino.parameters():
-    # param.requires_grad = False
+#     param.requires_grad = False
     
 # optimizer = optim.AdamW(filter(lambda p: p.requires_grad, net.parameters()), lr=cfgs.learning_rate, weight_decay=cfgs.weight_decay)
 
@@ -222,6 +223,7 @@ def train_one_epoch():
                 stat_dict[key] += end_points[key].item()
 
         overall_loss += stat_dict['loss/overall_loss']
+        # overall_loss += (stat_dict['loss/score_loss'] + stat_dict['loss/width_loss'] + stat_dict['loss/rot_graspness_loss'])
         batch_interval = 10
         if (batch_idx+1) % batch_interval == 0:
             log_string(' ---- batch: %03d ----' % (batch_idx+1))
@@ -264,7 +266,7 @@ def evaluate_one_epoch():
                 stat_dict[key] += end_points[key].item()
     
         overall_loss += stat_dict['loss/overall_loss']
-        
+        # overall_loss += (stat_dict['loss/score_loss'] + stat_dict['loss/width_loss'] + stat_dict['loss/rot_graspness_loss'])
     for key in sorted(stat_dict.keys()):
         log_writer.add_scalar('test_' + key, stat_dict[key]/float(batch_idx+1), (EPOCH_CNT+1)*len(TRAIN_DATALOADER)*cfgs.batch_size)
         log_string('eval mean %s: %f'%(key, stat_dict[key]/(float(batch_idx+1))))
@@ -305,7 +307,7 @@ def train(start_epoch):
         except:
             save_dict['model_state_dict'] = net.state_dict()
             
-        if epoch > cfgs.eval_start_epoch:
+        if epoch >= cfgs.eval_start_epoch:
             eval_loss = evaluate_one_epoch()
             if eval_loss < min_loss:
                 min_loss = eval_loss

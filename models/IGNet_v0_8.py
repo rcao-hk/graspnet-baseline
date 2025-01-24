@@ -169,46 +169,91 @@ class CloudCrop(nn.Module):
         mlps = [3 + self.in_dim, 256, self.out_dim]   # use xyz, so plus 3
         self.grouper = RectangularQueryAndGroup(nsample=nsample, use_xyz=True)
         self.mlps = pt_utils.SharedMLP(mlps, bn=True)
+        # self.attnpool = AttentionPool1d(spacial_dim=nsample, embed_dim=256, num_heads=4)
 
     def forward(self, seed_xyz, seed_features, rot, crop_size):
         grouped_feature = self.grouper(seed_xyz, seed_xyz, rot, crop_size, seed_features)  # B*3 + feat_dim*M*K
-        new_features = self.mlps(grouped_feature)  # (batch_size, mlps[-1], M, nsample)
+        new_features = self.mlps(grouped_feature)  # (batch_size, mlps[-1], M, nsample) (32, 256, 1024, 32)
         new_features = F.max_pool2d(new_features, kernel_size=[1, new_features.size(3)])  # (batch_size, mlps[-1], M, 1)
+    
+        # Reshape to (B*M, C, K) to apply AttentionPool1d across K=32
+        # B, C, M, K = new_features.shape
+        # new_features = new_features.view(B * M, C, K)  # (32*1024, 256, 32)
+        # new_features = self.attnpool(new_features)  # (32*1024, 256, 1)
+        # new_features = new_features.view(B, C, M, 1)  # (32, 256, 1024, 1)
+        
         new_features = new_features.squeeze(-1)   # (batch_size, mlps[-1], M)
         return new_features
 
 
-class OperationNet(nn.Module):
-    """ Grasp configure estimation.
-
-        Input:
-            num_depth: [int]
-                number of gripper depth classes
-    """
-
-    def __init__(self, num_view, num_angle, num_depth, seed_feature_dim):
+class AttentionPool1d(nn.Module):
+    def __init__(self, spacial_dim: int, embed_dim: int, num_heads: int, output_dim: int = None):
         super().__init__()
-        self.in_dim = seed_feature_dim
-        self.num_view = num_view
-        self.num_angle = num_angle
-        self.num_depth = num_depth
+        # self.positional_embedding = nn.Parameter(torch.randn(spacial_dim + 1, embed_dim) / embed_dim ** 0.5)
+        self.k_proj = nn.Linear(embed_dim, embed_dim)
+        self.q_proj = nn.Linear(embed_dim, embed_dim)
+        self.v_proj = nn.Linear(embed_dim, embed_dim)
+        self.c_proj = nn.Linear(embed_dim, output_dim or embed_dim)
+        self.num_heads = num_heads
 
-        self.conv1 = nn.Conv1d(self.in_dim, 128, 1)
-        self.conv2 = nn.Conv1d(128, 128, 1)
-        self.conv3 = nn.Conv1d(128, self.num_depth * 2, 1)
-        self.bn1 = nn.BatchNorm1d(128)
-        self.bn2 = nn.BatchNorm1d(128)
+    def forward(self, x):
+        # x shape: (B*M, C, K)
+        B_M, C, K = x.shape
+        x = x.permute(2, 0, 1)  # (K, B*M, C)
+        x = torch.cat([x.mean(dim=0, keepdim=True), x], dim=0)  # (1 + K, B*M, C)
+        # x = x + self.positional_embedding[:, None, :].to(x.dtype)  # (1 + K, B*M, C)
+        x, _ = F.multi_head_attention_forward(
+            query=x[:1], key=x, value=x,
+            embed_dim_to_check=x.shape[-1],
+            num_heads=self.num_heads,
+            q_proj_weight=self.q_proj.weight,
+            k_proj_weight=self.k_proj.weight,
+            v_proj_weight=self.v_proj.weight,
+            in_proj_weight=None,
+            in_proj_bias=torch.cat([self.q_proj.bias, self.k_proj.bias, self.v_proj.bias]),
+            bias_k=None,
+            bias_v=None,
+            add_zero_attn=False,
+            dropout_p=0,
+            out_proj_weight=self.c_proj.weight,
+            out_proj_bias=self.c_proj.bias,
+            use_separate_proj_weight=True,
+            training=self.training,
+            need_weights=False
+        )
+        return x.squeeze(0).view(B_M, -1, 1)  # (B*M, output_dim, 1)
+    
+# class OperationNet(nn.Module):
+#     """ Grasp configure estimation.
 
-    def forward(self, seed_features, end_points):
-        B, _, num_seed = seed_features.size()
-        features = F.relu(self.bn1(self.conv1(seed_features)), inplace=True)
-        features = F.relu(self.bn2(self.conv2(features)), inplace=True)
-        features = self.conv3(features)
-        features = features.view(B, 2, self.num_depth, num_seed)
-        features = features.permute(0, 1, 3, 2) # (B, 2, num_seed, num_depth)
-        end_points['grasp_score_pred'] = features[:, 0]
-        end_points['grasp_width_pred'] = features[:, 1]
-        return end_points
+#         Input:
+#             num_depth: [int]
+#                 number of gripper depth classes
+#     """
+
+#     def __init__(self, num_view, num_angle, num_depth, seed_feature_dim):
+#         super().__init__()
+#         self.in_dim = seed_feature_dim
+#         self.num_view = num_view
+#         self.num_angle = num_angle
+#         self.num_depth = num_depth
+
+#         self.conv1 = nn.Conv1d(self.in_dim, 128, 1)
+#         self.conv2 = nn.Conv1d(128, 128, 1)
+#         self.conv3 = nn.Conv1d(128, self.num_depth * 2, 1)
+#         self.bn1 = nn.BatchNorm1d(128)
+#         self.bn2 = nn.BatchNorm1d(128)
+
+#     def forward(self, seed_features, end_points):
+#         B, _, num_seed = seed_features.size()
+#         features = F.relu(self.bn1(self.conv1(seed_features)), inplace=True)
+#         features = F.relu(self.bn2(self.conv2(features)), inplace=True)
+#         features = self.conv3(features)
+#         features = features.view(B, 2, self.num_depth, num_seed)
+#         features = features.permute(0, 1, 3, 2) # (B, 2, num_seed, num_depth)
+#         end_points['grasp_score_pred'] = features[:, 0]
+#         end_points['grasp_width_pred'] = features[:, 1]
+#         return end_points
         
         
 class DepthNet(nn.Module):
@@ -218,36 +263,109 @@ class DepthNet(nn.Module):
         self.num_view = num_view
         self.num_angle = num_angle
         self.num_depth = num_depth
-        self.conv1 = nn.Conv1d(self.in_dim, self.in_dim, 1)
-        # regression-based
-        self.conv2 = nn.Conv1d(self.in_dim, self.num_depth * 2, 1)
+        # self.conv1 = nn.Conv1d(self.in_dim, self.in_dim, 1)
+        self.mlp = nn.Sequential(
+            nn.Conv1d(self.in_dim, self.in_dim, 1),
+            nn.BatchNorm1d(self.in_dim),
+            nn.ReLU(inplace=True),
+            nn.Conv1d(self.in_dim, self.in_dim, 1),
+            nn.BatchNorm1d(self.in_dim),
+            nn.ReLU(inplace=True),
+        )
+
+        # self.mlp = nn.Sequential(
+        #     nn.Linear(self.in_dim, self.in_dim),
+        #     nn.LayerNorm(self.in_dim),
+        #     nn.ReLU(inplace=True),
+        #     nn.Linear(self.in_dim, self.in_dim),
+        #     nn.LayerNorm(self.in_dim),
+        #     # nn.ReLU(inplace=True),
+        # )
+        
+        # # # regression-based
+        # self.outconv = nn.Conv1d(self.in_dim, self.num_depth * 2, 1)
+        # self.outconv = nn.Linear(self.in_dim, self.num_depth * 2)
+        # self.widthnet = nn.Sequential(nn.Dropout(0.15),
+        #                               nn.Linear(self.in_dim, self.num_depth))
+        # self.scorenet = nn.Sequential(nn.Dropout(0.15),
+        #                               nn.Linear(self.in_dim, self.num_depth))
+        # self.widthnet = nn.Sequential(nn.Dropout(0.15),
+        #                               nn.Conv1d(self.in_dim, self.num_depth, 1))
+        # self.scorenet = nn.Sequential(nn.Dropout(0.15),
+        #                               nn.Conv1d(self.in_dim, self.num_depth, 1))
+        # self.widthnet = nn.Sequential(nn.Dropout(0.2),
+        #                               nn.Conv1d(self.in_dim, self.num_depth, 1))
+        # self.scorenet = nn.Sequential(nn.Dropout(0.2),
+        #                               nn.Conv1d(self.in_dim, self.num_depth, 1))
+        self.depthnet = nn.Sequential(nn.Dropout(0.15),
+                                      nn.Conv1d(self.in_dim, self.num_depth * 2, 1))
+        # self.widthnet = nn.Sequential(
+        #     nn.Linear(self.in_dim, self.in_dim),
+        #     nn.LayerNorm(self.in_dim),
+        #     nn.ReLU(inplace=True),
+        #     nn.Dropout(0.15),
+        #     nn.Linear(self.in_dim, self.num_depth))
+        # self.scorenet = nn.Sequential(
+        #     nn.Linear(self.in_dim, self.in_dim),
+        #     nn.LayerNorm(self.in_dim),
+        #     nn.ReLU(inplace=True),
+        #     nn.Dropout(0.15),
+        #     nn.Linear(self.in_dim, self.num_depth))
+        # self.depthnet = nn.Sequential(LinearLNReLU(self.in_dim, self.in_dim),
+        #                                nn.Dropout(0.2),
+        #                                nn.Linear(self.in_dim, self.num_depth * 2))
+        
         # classfication-based
         # self.conv2 = nn.Conv1d(self.in_dim, self.num_depth * 2 * (len(width_bins)+1), 1)
         # regression-based score only
         # self.conv2 = nn.Conv1d(self.in_dim, self.num_depth, 1)
-        self.act =  nn.ReLU(inplace=True)
+        # self.act =  nn.ReLU(inplace=True)
 
     def forward(self, seed_features, end_points):
         B, _, num_seed = seed_features.size()
 
-        features = self.act(self.conv1(seed_features))
-        features = self.conv2(features)
+        # features = self.act(self.conv1(seed_features))
+        # features = self.mlp(seed_features)
+        # predicts = self.depthnet(features)
+
+        # seed_features = seed_features.transpose(1, 2)
+        # res_features = self.mlp(seed_features)
+        # features = F.relu(seed_features + res_features, inplace=True)
+        # pred_width = self.widthnet(features)
+        # pred_score = self.scorenet(features)
+
+        # end_points['grasp_width_pred'] = pred_width
+        # end_points['grasp_score_pred'] = pred_score
+
+        # features = self.mlp(seed_features)
+        # pred_width = self.widthnet(features).transpose(1, 2)
+        # pred_score = self.scorenet(features).transpose(1, 2)
+        
+        # end_points['grasp_width_pred'] = pred_width
+        # end_points['grasp_score_pred'] = pred_score
+
+        features = self.mlp(seed_features)
+        predicts = self.depthnet(features)
+        
+        # predicts = self.depthnet(seed_features.transpose(1, 2).contiguous())
+        # predicts = predicts.transpose(1, 2).contiguous()
+        
         # regression-based
-        features = features.view(B, 2, self.num_depth, num_seed)
-        features = features.permute(0, 1, 3, 2) # (B, 2, num_seed, num_depth)
+        predicts = predicts.view(B, 2, self.num_depth, num_seed)
+        predicts = predicts.permute(0, 1, 3, 2) # (B, 2, num_seed, num_depth)
         
-        # classification-based
-        # features = features.view(B, 2, self.num_depth, len(width_bins)+1, num_seed)
-        # features = features.permute(0, 1, 4, 2, 3)
+        # # classification-based
+        # predicts = predicts.view(B, 2, self.num_depth, len(width_bins)+1, num_seed)
+        # predicts = predicts.permute(0, 1, 4, 2, 3)
         
-        end_points['grasp_score_pred'] = features[:, 0]
-        end_points['grasp_width_pred'] = features[:, 1]
+        end_points['grasp_score_pred'] = predicts[:, 0]
+        end_points['grasp_width_pred'] = predicts[:, 1]
         
         # regression-based score only
-        # features = features.view(B, self.num_depth, num_seed)
-        # features = features.permute(0, 2, 1) # (B, num_seed, num_depth)
+        # predicts = predicts.view(B, self.num_depth, num_seed)
+        # predicts = predicts.permute(0, 2, 1) # (B, num_seed, num_depth)
         
-        # end_points['grasp_score_pred'] = features
+        # end_points['grasp_score_pred'] = predicts
         return end_points
 
 
@@ -259,23 +377,92 @@ class RotationScoringNet(nn.Module):
         self.num_depth = num_depth
         self.in_dim = seed_feature_dim
         self.is_training = is_training
-        self.conv1 = nn.Conv1d(self.in_dim, self.in_dim, 1)
-        self.conv2 = nn.Conv1d(self.in_dim, self.in_dim, 1)
-        # # regression-based
-        self.conv3 = nn.Conv1d(self.in_dim, self.num_view * self.num_angle, 1)
+        # self.conv1 = nn.Conv1d(self.in_dim, self.in_dim, 1)
+        # self.conv2 = nn.Conv1d(self.in_dim, self.in_dim, 1)
+        self.mlp = nn.Sequential(
+            nn.Conv1d(self.in_dim, self.in_dim, 1),
+            nn.BatchNorm1d(self.in_dim),
+            nn.ReLU(inplace=True),
+            nn.Conv1d(self.in_dim, self.in_dim, 1),
+            nn.BatchNorm1d(self.in_dim),
+            nn.ReLU(inplace=True),
+        )
+        # self.mlp = nn.Sequential(
+        #     nn.Conv1d(self.in_dim, self.in_dim, 1),
+        #     nn.BatchNorm1d(self.in_dim),
+        #     nn.ReLU(inplace=True),
+        #     nn.Conv1d(self.in_dim, self.in_dim, 1),
+        #     nn.BatchNorm1d(self.in_dim),
+        #     nn.ReLU(inplace=True),
+        # )
+        
+        # self.mlp = nn.Sequential(
+        #     nn.Linear(self.in_dim, self.in_dim),
+        #     nn.LayerNorm(self.in_dim),
+        #     nn.ReLU(inplace=True),
+        #     nn.Linear(self.in_dim, self.in_dim),
+        #     nn.LayerNorm(self.in_dim),
+        #     # nn.ReLU(inplace=True),
+        # )
+        # self.mlp = ResMLP(self.in_dim, self.in_dim)
+                
+        # # # regression-based
+        # # self.outconv = nn.Conv1d(self.in_dim, self.num_view * self.num_angle, 1)
+        # self.outconv = nn.Sequential(
+        #     nn.Conv1d(self.in_dim, self.in_dim * 2, 1),
+        #     nn.BatchNorm1d(self.in_dim * 2),
+        #     nn.ReLU(inplace=True),
+        #     nn.Conv1d(self.in_dim * 2, self.in_dim * 4, 1),
+        #     nn.BatchNorm1d(self.in_dim * 4),
+        #     nn.ReLU(inplace=True),
+        #     nn.Dropout(0.2),
+        #     nn.Conv1d(self.in_dim * 4, self.num_view * self.num_angle, 1))
+        self.outconv = nn.Sequential(nn.Dropout(0.15),
+                                     nn.Conv1d(self.in_dim, self.num_view * self.num_angle, 1))
+        
+        # self.outconv = nn.Sequential(
+        #     nn.Linear(self.in_dim, self.in_dim * 2),
+        #     nn.LayerNorm(self.in_dim * 2),
+        #     nn.ReLU(inplace=True),
+        #     nn.Linear(self.in_dim * 2, self.in_dim * 4),
+        #     nn.LayerNorm(self.in_dim * 4),
+        #     nn.ReLU(inplace=True),
+        #     nn.Dropout(0.15),
+        #     nn.Linear(self.in_dim * 4, self.num_view * self.num_angle))
+        # self.outconv = nn.Sequential(LinearLNReLU(self.in_dim, self.in_dim),
+        #                              nn.Dropout(0.2),
+        #                              nn.Linear(self.in_dim, self.num_view * self.num_angle))
+        
         # classfication-based (len(score_bins)+1) CORN (len(score_bins))
         # self.conv3 = nn.Conv1d(self.in_dim * 2, self.num_view * self.num_angle * self.num_depth * len(score_bins), 1)
-        self.act =  nn.ReLU(inplace=True)
+        # self.act =  nn.ReLU(inplace=True)
         
     def forward(self, seed_features, end_points):
         B, _, num_seed = seed_features.size()
 
         # v0.3.6.8
-        res_features = self.act(self.conv1(seed_features))
-        res_features = self.act(self.conv2(res_features))
-        features = self.conv3(res_features)
-        rotation_scores = features.transpose(1, 2).contiguous()  # (B, num_seed, num_view * num_angle)
-
+        # res_features = self.act(self.conv1(seed_features))
+        # res_features = self.act(self.conv2(res_features))
+        # rotation_scores = self.outconv(res_features)
+        # rotation_scores = rotation_scores.transpose(1, 2).contiguous()  # (B, num_seed, num_view * num_angle)
+        
+        res_features = self.mlp(seed_features)
+        seed_features = seed_features + res_features
+        rotation_scores = self.outconv(seed_features)
+        rotation_scores = rotation_scores.transpose(1, 2).contiguous()  # (B, num_seed, num_view * num_angle)
+        
+        # seed_features = seed_features.transpose(1, 2)
+        # res_features = self.mlp(seed_features)
+        # seed_features = F.relu(seed_features + res_features, inplace=True)
+        # rotation_scores = self.outconv(seed_features)
+        # # rotation_scores = features.transpose(1, 2).contiguous()  # (B, num_seed, num_view * num_angle)
+        # seed_features = seed_features.transpose(1, 2)
+                
+        # seed_features = seed_features.transpose(1, 2).contiguous()
+        # res_features = self.mlp(seed_features, seed_features)
+        # rotation_scores = self.outconv(res_features) # (B, num_seed, num_view * num_angle)
+        # res_features = res_features.transpose(1, 2).contiguous()
+        
         # classification-based
         # rotation_scores = rotation_scores.view(B, num_seed, self.num_view * self.num_angle, len(score_bins))
         end_points['grasp_rot_graspness_pred'] = rotation_scores
@@ -303,7 +490,7 @@ class RotationScoringNet(nn.Module):
             end_points['grasp_top_rot'] = grasp_top_rot
 
         end_points['grasp_top_rot_inds'] = top_rot_inds
-        return end_points, res_features
+        return end_points, seed_features
 
 
 from transformers.activations import ACT2FN
@@ -338,24 +525,25 @@ class DepthNetGate(nn.Module):
         self.num_angle = num_angle
         self.num_depth = num_depth
         self.dropout_rate = dropout_rate
-        self.gate_ffn = GateFFN(self.in_dim, self.dropout_rate, 512)
-        self.conv_out = nn.Conv1d(self.in_dim, self.num_depth * 2, 1)
+        self.gate_ffn = GateFFN(self.in_dim, self.dropout_rate * 2, self.in_dim * 2)
+        self.depthnet = nn.Sequential(nn.Dropout(self.dropout_rate),
+                                      nn.Conv1d(self.in_dim, self.num_depth * 2, 1))
 
     def forward(self, seed_features, end_points):
         B, _, num_seed = seed_features.size()
 
         features = self.gate_ffn(seed_features)
-        features = self.conv_out(features)
+        predicts = self.depthnet(features)
 
-        features = features.view(B, 2, self.num_depth, num_seed)
-        features = features.permute(0, 1, 3, 2) # (B, 2, num_seed, num_depth)
+        predicts = predicts.view(B, 2, self.num_depth, num_seed)
+        predicts = predicts.permute(0, 1, 3, 2) # (B, 2, num_seed, num_depth)
 
-        end_points['grasp_score_pred'] = features[:, 0]
-        end_points['grasp_width_pred'] = features[:, 1]
+        end_points['grasp_score_pred'] = predicts[:, 0]
+        end_points['grasp_width_pred'] = predicts[:, 1]
 
         return end_points
-    
-    
+
+
 class RotationScoringNetGate(nn.Module):
     def __init__(self, num_view, num_angle, num_depth, seed_feature_dim, dropout_rate, is_training=True):
         super().__init__()
@@ -365,13 +553,15 @@ class RotationScoringNetGate(nn.Module):
         self.in_dim = seed_feature_dim
         self.is_training = is_training
         self.dropout_rate = dropout_rate       
-        self.gate_ffn = GateFFN(self.in_dim, self.dropout_rate, 512)
-        self.conv_out = nn.Conv1d(self.in_dim, self.num_view * self.num_angle, 1)
+        self.gate_ffn = GateFFN(self.in_dim, self.dropout_rate * 2, self.in_dim * 2)
+        self.conv_out = nn.Sequential(nn.Dropout(self.dropout_rate),
+                                      nn.Conv1d(self.in_dim, self.num_view * self.num_angle, 1))
 
     def forward(self, seed_features, end_points):
         B, _, num_seed = seed_features.size()
 
         res_features = self.gate_ffn(seed_features)
+        seed_features = seed_features + res_features
         features = self.conv_out(res_features)
         rotation_scores = features.transpose(1, 2).contiguous()  # (B, num_seed, num_view * num_angle)
 
@@ -400,53 +590,53 @@ class RotationScoringNetGate(nn.Module):
             end_points['grasp_top_rot'] = grasp_top_rot
 
         end_points['grasp_top_rot_inds'] = top_rot_inds
-        return end_points, res_features
+        return end_points, seed_features
     
     
-class RotationGraspableNet(nn.Module):
-    def __init__(self, num_view, num_angle, num_depth, seed_feature_dim, is_training=True):
-        super().__init__()
-        self.num_view = num_view
-        self.num_angle = num_angle
-        self.num_depth = num_depth
-        self.in_dim = seed_feature_dim
-        self.is_training = is_training
-        self.conv1 = nn.Conv1d(self.in_dim, self.in_dim, 1)
-        self.conv2 = nn.Conv1d(self.in_dim, self.in_dim, 1)
-        self.conv3 = nn.Conv1d(self.in_dim, self.num_view * self.num_angle, 1)
-        self.bn1 = nn.BatchNorm1d(self.in_dim)
-        self.bn2 = nn.BatchNorm1d(self.in_dim)
+# class RotationGraspableNet(nn.Module):
+#     def __init__(self, num_view, num_angle, num_depth, seed_feature_dim, is_training=True):
+#         super().__init__()
+#         self.num_view = num_view
+#         self.num_angle = num_angle
+#         self.num_depth = num_depth
+#         self.in_dim = seed_feature_dim
+#         self.is_training = is_training
+#         self.conv1 = nn.Conv1d(self.in_dim, self.in_dim, 1)
+#         self.conv2 = nn.Conv1d(self.in_dim, self.in_dim, 1)
+#         self.conv3 = nn.Conv1d(self.in_dim, self.num_view * self.num_angle, 1)
+#         self.bn1 = nn.BatchNorm1d(self.in_dim)
+#         self.bn2 = nn.BatchNorm1d(self.in_dim)
         
-    def forward(self, seed_features, end_points):
-        B, _, num_seed = seed_features.size()
+#     def forward(self, seed_features, end_points):
+#         B, _, num_seed = seed_features.size()
         
-        res_features = F.relu(self.bn1(self.conv1(seed_features)), inplace=True)
-        res_features = F.relu(self.bn2(self.conv2(res_features)), inplace=True)
-        rotation_scores = self.conv3(res_features)
-        rotation_scores = rotation_scores.transpose(1, 2).contiguous()  # (B, num_seed, num_view * num_angle)
+#         res_features = F.relu(self.bn1(self.conv1(seed_features)), inplace=True)
+#         res_features = F.relu(self.bn2(self.conv2(res_features)), inplace=True)
+#         rotation_scores = self.conv3(res_features)
+#         rotation_scores = rotation_scores.transpose(1, 2).contiguous()  # (B, num_seed, num_view * num_angle)
         
-        end_points['grasp_rot_graspness_pred'] = rotation_scores
+#         end_points['grasp_rot_graspness_pred'] = rotation_scores
 
-        if self.is_training:
-            # normalize view graspness score to 0~1
-            rot_score = rotation_scores.clone().detach()
-            rot_score = normalize_tensor(rot_score)
-            top_rot_inds = []
-            for i in range(B):
-                top_rot_inds_batch = torch.multinomial(rot_score[i], 1, replacement=False)
-                top_rot_inds.append(top_rot_inds_batch)
-            top_rot_inds = torch.stack(top_rot_inds, dim=0).squeeze(-1)  # B, num_seed
-        else:
-            _, top_rot_inds = torch.max(rotation_scores, dim=-1)  # (B, num_seed)
-            temp_grasp_rots = grasp_rot.clone().to(seed_features.device)
-            temp_grasp_rots = temp_grasp_rots.view(1, 1, self.num_view*self.num_angle, 3, 3)
-            temp_grasp_rots = temp_grasp_rots.expand(B, num_seed, -1, -1, -1).contiguous()
-            top_rot_inds_ = top_rot_inds.view(B, num_seed, 1, 1, 1).expand(-1, -1, -1, 3, 3)
-            grasp_top_rot = torch.gather(temp_grasp_rots, 2, top_rot_inds_).squeeze(2)
-            end_points['grasp_top_rot'] = grasp_top_rot
+#         if self.is_training:
+#             # normalize view graspness score to 0~1
+#             rot_score = rotation_scores.clone().detach()
+#             rot_score = normalize_tensor(rot_score)
+#             top_rot_inds = []
+#             for i in range(B):
+#                 top_rot_inds_batch = torch.multinomial(rot_score[i], 1, replacement=False)
+#                 top_rot_inds.append(top_rot_inds_batch)
+#             top_rot_inds = torch.stack(top_rot_inds, dim=0).squeeze(-1)  # B, num_seed
+#         else:
+#             _, top_rot_inds = torch.max(rotation_scores, dim=-1)  # (B, num_seed)
+#             temp_grasp_rots = grasp_rot.clone().to(seed_features.device)
+#             temp_grasp_rots = temp_grasp_rots.view(1, 1, self.num_view*self.num_angle, 3, 3)
+#             temp_grasp_rots = temp_grasp_rots.expand(B, num_seed, -1, -1, -1).contiguous()
+#             top_rot_inds_ = top_rot_inds.view(B, num_seed, 1, 1, 1).expand(-1, -1, -1, 3, 3)
+#             grasp_top_rot = torch.gather(temp_grasp_rots, 2, top_rot_inds_).squeeze(2)
+#             end_points['grasp_top_rot'] = grasp_top_rot
 
-        end_points['grasp_top_rot_inds'] = top_rot_inds
-        return end_points, res_features
+#         end_points['grasp_top_rot_inds'] = top_rot_inds
+#         return end_points, res_features
     
     
 # add two features
@@ -618,6 +808,80 @@ class GatedFusion(nn.Module):
 #         fused_feat = fused_feat.permute((0, 2, 1))  # (B, output_dim, num_pc)
 #         return fused_feat
 
+from flash_attn.modules.mha import CrossAttention
+from einops import rearrange
+class LearnableAlign(nn.Module):
+    def __init__(self, point_dim, img_dim, dropout, normalize=False, in_proj_bias=True):
+        super(LearnableAlign, self).__init__()
+        self.feat_dim = self.point_dim = point_dim
+        self.img_dim = img_dim
+        self.normalize = normalize
+        self.dropout = dropout
+        
+        if self.normalize:
+            self.point_norm = nn.LayerNorm(self.point_dim)
+            self.img_norm = nn.LayerNorm(self.img_dim)
+
+        self.img_mlp = nn.Sequential(
+            nn.Linear(img_dim, 128),
+            nn.LayerNorm(128), 
+            nn.ReLU(inplace=True),
+            nn.Linear(128, self.feat_dim),
+            nn.LayerNorm(self.feat_dim), 
+            nn.ReLU(inplace=True),
+        )
+        # self.point_kv_proj = nn.Linear(self.feat_dim, 2 * self.feat_dim, bias=in_proj_bias)
+        # self.img_q_proj = nn.Linear(self.feat_dim, self.feat_dim, bias=in_proj_bias)
+        
+        self.img_kv_proj = nn.Linear(self.feat_dim, 2 * self.feat_dim, bias=in_proj_bias)
+        self.point_q_proj = nn.Linear(self.feat_dim, self.feat_dim, bias=in_proj_bias)
+        
+        # self.point_cross_attn = FlashCrossAttention(attention_dropout=dropout)
+        # self.image_cross_attn = FlashCrossAttention(attention_dropout=dropout)
+        
+        # self.point_cross_attn = CrossAttention(attention_dropout=dropout)
+        self.image_cross_attn = CrossAttention(attention_dropout=dropout)
+        self.img_feat_out = nn.Linear(self.feat_dim, self.feat_dim)
+                                                        
+    def forward(self, point_feat, img_feat):
+        if self.normalize:
+            point_feat = self.point_norm(point_feat)
+            img_feat = self.img_norm(img_feat)
+
+        Bs, N, _ = point_feat.shape
+        
+        # point_feat = point_feat.transpose(1, 2)  # (B, point_dim, num_pc)
+        # img_feat = img_feat.transpose(1, 2)  # (B, img_dim, num_pc)
+        
+        img_feat = self.img_mlp(img_feat)
+        # img_q = self.img_q_proj(img_feat)
+        img_kv = self.img_kv_proj(img_feat)
+        point_q = self.point_q_proj(point_feat)
+        # point_kv = self.point_kv_proj(point_feat)
+        
+        # img_q = self.img_q_proj(img_feat).half()
+        # img_kv = self.img_kv_proj(img_feat).half()
+        # point_q = self.point_q_proj(point_feat).half()
+        # point_kv = self.point_kv_proj(point_feat).half()
+        
+        # img_q = rearrange(img_q.transpose(1, 2), "... (h d) -> ... h d", d=self.feat_dim)
+        # point_kv = rearrange(point_kv.transpose(1, 2), "... (two hkv d) -> ... two hkv d", two=2, d=self.feat_dim)
+        # point_fuse = self.point_cross_attn(img_q, point_kv)
+        # # point_fuse = point_feat + point_fuse.view(Bs, N, -1)
+        # # point_fuse = torch.concat([point_feat, point_fuse.view(Bs, N, -1)], dim=-1)
+
+        # fused_feat = torch.concat([point_feat.transpose(1, 2), point_fuse.view(Bs, N, -1)], dim=-1)
+        
+        point_q = rearrange(point_q, "... (h d) -> ... h d", d=self.feat_dim)
+        img_kv = rearrange(img_kv, "... (two hkv d) -> ... two hkv d", two=2, d=self.feat_dim)
+        image_fuse = self.image_cross_attn(point_q, img_kv)
+        img_feat = self.img_feat_out(image_fuse)
+        # image_fuse = img_feat + image_fuse.view(Bs, N, -1)
+        # image_fuse = torch.concat([img_feat, image_fuse.view(Bs, N, -1)], dim=-1)
+        fused_feat = torch.concat([point_feat, image_fuse.view(Bs, N, -1)], dim=-1)
+        fused_feat = fused_feat.transpose(1, 2)  # (B, output_dim, num_pc)
+        return fused_feat
+
 
 from models.pspnet import PSPUpsample
 class dino_extractor(nn.Module):
@@ -650,6 +914,27 @@ class dino_extractor(nn.Module):
         feat = F.interpolate(feat, (H, W), mode='bilinear')
         return feat
 
+class LinearLNReLU(nn.Sequential):
+
+    def __init__(self, in_dim, out_dim) -> None:
+        super().__init__()
+        self.append(nn.Linear(in_dim, out_dim))
+        self.append(nn.LayerNorm(out_dim))
+        self.append(nn.ReLU(inplace=True))
+
+
+class ResMLP(nn.Module):
+
+    def __init__(self, in_dim, out_dim, expand=0.25) -> None:
+        super().__init__()
+        neck_dim = int(expand * out_dim)
+        self.net = nn.Sequential(LinearLNReLU(in_dim, neck_dim),
+                                 nn.Linear(neck_dim, out_dim),
+                                 nn.LayerNorm(out_dim))
+
+    def forward(self, x1, x2):
+        return F.relu(x1 + self.net(x2), True)
+
 
 class IGNet(nn.Module):
     def __init__(self,  num_view=300, num_angle=12, num_depth=4, seed_feat_dim=256, img_feat_dim=64, 
@@ -662,6 +947,11 @@ class IGNet(nn.Module):
         self.num_angle = num_angle
         self.num_view = num_view
         self.multi_scale_grouping = multi_scale_grouping
+
+        # self.img_backbone = psp_models['resnet34'.lower()]()
+        self.img_backbone = PSPNet(sizes=(1, 2, 3, 6), psp_size=512, 
+                                   deep_features_size=img_feat_dim, backend='resnet34')
+        # self.img_backbone = dino_extractor(feat_ext='dino')
         
         # early fusion
         self.img_feature_dim = 0
@@ -676,8 +966,8 @@ class IGNet(nn.Module):
         # late fusion (Cross attention concatentation)
         # self.img_feature_dim = self.seed_feature_dim
         # self.point_backbone = MinkUNet14D(in_channels=3, out_channels=self.seed_feature_dim, D=3)
-        # self.fusion_module = CrossModalAttention(self.seed_feature_dim, img_feat_dim, dropout=0.0, normalize=False)
-        # print('late fusion (Cross attention concatentation)')
+        # self.fusion_module = LearnableAlign(self.seed_feature_dim, img_feat_dim, dropout=0.15, normalize=False)
+        # print('late fusion (LearnableAlign)')
         
         # late fusion (Gated fusion)
         # self.img_feature_dim = 0
@@ -690,12 +980,7 @@ class IGNet(nn.Module):
         # self.point_backbone = MinkUNet14D(in_channels=3, out_channels=self.seed_feature_dim, D=3)
         # self.fusion_module = AddFusion(point_dim=self.seed_feature_dim, img_dim=img_feat_dim)
         # print('late fusion (Add fusion)')
-        
-        # self.img_backbone = psp_models['resnet34'.lower()]()
-        # self.img_backbone = PSPNet(sizes=(1, 2, 3, 6), psp_size=512, 
-                                #    deep_features_size=img_feat_dim, backend='resnet34')
-        self.img_backbone = dino_extractor(feat_ext='dino', deep_features_size=img_feat_dim)
-        
+                
         self.rot_head = RotationScoringNet(self.num_view, num_angle=self.num_angle,
                                                 num_depth=self.num_depth,
                                                 seed_feature_dim=self.seed_feature_dim + self.img_feature_dim, 
@@ -707,12 +992,12 @@ class IGNet(nn.Module):
         # self.rot_head = RotationScoringNetGate(self.num_view, num_angle=self.num_angle,
         #                                         num_depth=self.num_depth,
         #                                         seed_feature_dim=self.seed_feature_dim + self.img_feature_dim, 
-        #                                         dropout_rate=0.0,
+        #                                         dropout_rate=0.15,
         #                                         is_training=self.is_training)
         # self.depth_head = DepthNetGate(self.num_view, num_angle=self.num_angle, 
         #                            num_depth=self.num_depth,
         #                            seed_feature_dim=self.seed_feature_dim,
-        #                            dropout_rate=0.0)
+        #                            dropout_rate=0.15)
         
         if self.multi_scale_grouping:
             feat_dim = self.seed_feature_dim + self.img_feature_dim
@@ -729,21 +1014,53 @@ class IGNet(nn.Module):
             self.crop_op_list = [self.crop1, self.crop2, self.crop3, self.crop4]
         else:
             self.crop = CloudCrop(nsample=32, seed_feature_dim=self.seed_feature_dim + self.img_feature_dim, out_dim=self.seed_feature_dim)
-        self.apply(self._init_weights)
+        # self.apply(self._init_weights)
+        self._init_weights()
 
-    def _init_weights(self, m):
-        if isinstance(m, nn.BatchNorm1d):
-            nn.init.constant_(m.bias, 0)
-            nn.init.constant_(m.weight, 1.0)
-        elif isinstance(m, nn.Conv1d):
-            trunc_normal_(m.weight, std=.02)
-            if m.bias is not None:
+    def _init_weights(self):
+        # # if isinstance(m, nn.BatchNorm1d):
+        # #     nn.init.constant_(m.bias, 0)
+        # #     nn.init.constant_(m.weight, 1.0)
+        # # elif isinstance(m, nn.Conv1d):
+        # #     trunc_normal_(m.weight, std=.02)
+        # #     if m.bias is not None:
+        # #         nn.init.constant_(m.bias, 0)
+        # if isinstance(self.img_backbone, PSPNet):
+        #     for name, m in self.img_backbone.named_modules():
+        #         if name.startswith('feats'):
+        #             continue
+        #         else:
+        #             if isinstance(m, nn.Conv2d):
+        #                 nn.init.xavier_normal_(m.weight)
+        #                 if m.bias is not None:
+        #                     # nn.init.normal_(m.bias)
+        #                     nn.init.constant_(m.bias, 0)
+        #             if isinstance(m, nn.BatchNorm2d):
+        #                 nn.init.constant_(m.bias, 0)
+        #                 nn.init.constant_(m.weight, 1.0)
+
+        # for head in [self.rot_head, self.depth_head]:
+        #     for m in head.modules():
+        #         if isinstance(m, nn.BatchNorm1d):
+        #             nn.init.constant_(m.bias, 0)
+        #             nn.init.constant_(m.weight, 1.0)
+        #         elif isinstance(m, nn.Conv1d):
+        #             nn.init.kaiming_normal_(m.weight, std=0.02)
+        #             if m.bias is not None:
+        #                 nn.init.constant_(m.bias, 0)
+                        
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                n = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
+                m.weight.data.normal_(0, np.math.sqrt(2. / n))
+            elif isinstance(m, (nn.LayerNorm, nn.BatchNorm1d, nn.BatchNorm2d)):
+                nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
-        # elif isinstance(m, nn.Conv2d):
-        #     nn.init.xavier_normal_(m.weight.data)
-        #     if m.bias is not None:
-        #         nn.init.normal_(m.bias.data)
-
+            elif isinstance(m, (nn.Linear, nn.Conv1d)):
+                nn.init.kaiming_normal_(m.weight)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+       
     def forward(self, end_points):
         # use all sampled point cloud, B*Ns*3
         seed_xyz = end_points['point_clouds']
@@ -794,8 +1111,9 @@ class IGNet(nn.Module):
         # seed_features = self.fusion_module(point_features, image_features)
         
         end_points['seed_features'] = seed_features  # (B, seed_feature_dim, num_seed)
-        end_points, rot_features = self.rot_head(seed_features, end_points)
-        seed_features = seed_features + rot_features
+        # end_points, rot_features = self.rot_head(seed_features, end_points)
+        # seed_features = seed_features + rot_features
+        end_points, seed_features = self.rot_head(seed_features, end_points)
 
         if self.is_training:
             end_points = process_grasp_labels(end_points)
@@ -825,7 +1143,6 @@ class IGNet(nn.Module):
                                        grasp_top_rots, crop_size)
         end_points = self.depth_head(group_features, end_points)
         return end_points
-
 
 
 def process_grasp_labels(end_points):

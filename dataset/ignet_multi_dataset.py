@@ -343,7 +343,7 @@ def inplane_pose_2D_rotation(pose, rotation_angle):
 #     return updated_pose
 
 
-def flip_image(rgb, depth, mask, flip_code):
+def flip_image(color, depth, mask, flip_code, intrinsic, fill_color=(0, 0, 0)):
     """
     Flip RGB, depth, and mask images.
 
@@ -354,7 +354,7 @@ def flip_image(rgb, depth, mask, flip_code):
     - flip_code: int, flip direction.
         0: Flip vertically.
         1: Flip horizontally.
-       -1: Flip both vertically and horizontally.
+        2: Flip both vertically and horizontally.
 
     Returns:
     - flipped_rgb: np.ndarray, flipped RGB image.
@@ -362,12 +362,43 @@ def flip_image(rgb, depth, mask, flip_code):
     - flipped_mask: np.ndarray, flipped mask image.
     """
     # Flip images using OpenCV's flip function
-    flipped_rgb = cv2.flip(rgb, flip_code)
-    flipped_depth = cv2.flip(depth, flip_code)
-    flipped_mask = cv2.flip(mask, flip_code)
+    h, w = color.shape[:2]
+    cx, cy = intrinsic[0, 2], intrinsic[1, 2]
+    
+    # 定义翻转类型对应的镜像矩阵
+    if flip_code == 1:
+        mirror_matrix = np.array([
+            [-1,  0, 2 * cx],
+            [ 0,  1,      0],
+            [ 0,  0,      1]
+        ], dtype=np.float32)
+    elif flip_code == 0:
+        mirror_matrix = np.array([
+            [ 1,  0,      0],
+            [ 0, -1, 2 * cy],
+            [ 0,  0,      1]
+        ], dtype=np.float32)
+    elif flip_code == 2:
+        mirror_matrix = np.array([
+            [-1,  0, 2 * cx],
+            [ 0, -1, 2 * cy],
+            [ 0,  0,      1]
+        ], dtype=np.float32)
+
+    affine_mirror = mirror_matrix[:2, :]
+    
+    # 执行仿射变换
+    flipped_rgb = cv2.warpAffine(
+        color, affine_mirror, (w, h), flags=cv2.INTER_LINEAR, borderValue=fill_color
+    )
+    flipped_depth = cv2.warpAffine(
+        depth, affine_mirror, (w, h), flags=cv2.INTER_NEAREST, borderValue=fill_color
+    )
+    flipped_mask = cv2.warpAffine(
+        mask, affine_mirror, (w, h), flags=cv2.INTER_NEAREST, borderValue=fill_color
+    )
 
     return flipped_rgb, flipped_depth, flipped_mask
-
 
 def rotate_image(color, depth, mask, rotation_angle, center=None, fill_color=(0, 0, 0)):
     """
@@ -611,7 +642,7 @@ class GraspNetDataset(Dataset):
         object_pose = np.dot(rot_mat, object_pose).astype(np.float32)
         return point_cloud, object_pose
 
-    def scene_pose_augment(self, images, object_poses):
+    def scene_pose_augment(self, images, object_poses, intrinsic, obj_idxs):
         (color, depth, mask) = images
         # Flipping along the YZ plane
         if np.random.random() > 0.5:
@@ -620,28 +651,33 @@ class GraspNetDataset(Dataset):
                                          [ 0, 1, 0],
                                          [ 0, 0, 1]])
             # point_clouds = transform_point_cloud(point_clouds, flip_mat, '3x3')
-            color, depth, mask = flip_image(color, depth, mask, 1)
+            color, depth, mask = flip_image(color, depth, mask, 1, intrinsic)
             for i in range(len(object_poses)):
                 object_pose = np.eye(4)
                 object_pose[:3, :] = object_poses[i]
                 object_poses[i] = (flip_mat @ object_pose)[:3, :].astype(np.float32)
 
         # Rotation along up-axis/Z-axis
-        rot_angle = (np.random.random()*np.pi/3) - np.pi/6 # -30 ~ +30 degree
+        # rot_angle = (np.random.random()*np.pi/3) - np.pi/6 # -30 ~ +30 degree
+        rot_angle = (np.random.random()*np.pi/2) - np.pi/4  # -45 ~ +45 degree
         c, s = np.cos(rot_angle), np.sin(rot_angle)
         rot_mat = np.eye(4)
         rot_mat[:3, :3] = np.array([[c, -s, 0],
                                     [s, c, 0],
                                     [0, 0, 1]])
 
-        color, depth, mask = rotate_image(color, depth, mask, -rot_angle)
+        object_pixel_num = [len(np.where(mask == obj_id)[0]) for obj_id in obj_idxs]
+        color, depth, mask = rotate_image(color, depth, mask, -rot_angle, (intrinsic[0][2], intrinsic[1][2]))
+        object_pixel_num_rot = [len(np.where(mask == obj_id)[0]) for obj_id in obj_idxs]
+        # object_occ_rate = [object_pixel_num_rot[i] / object_pixel_num[i] for i in range(len(object_pixel_num))]
+        object_occ_rate = np.array(object_pixel_num_rot) / (np.array(object_pixel_num) + 1e-8)
         # point_clouds = transform_point_cloud(point_clouds, rot_mat, '3x3')
         for i in range(len(object_poses)):
             object_pose = np.eye(4)
             object_pose[:3, :] = object_poses[i]
             object_poses[i] = (rot_mat @ object_pose)[:3, :].astype(np.float32)
 
-        return (color, depth, mask), object_poses
+        return (color, depth, mask), object_poses, object_occ_rate
     
     # def inplane_pose_transform(self, color, depth, mask, object_pose):
     #     # rot_angle = (np.random.random()*np.deg2rad(180)) - np.deg2rad(90) # -90 ~ +90 degree
@@ -651,10 +687,12 @@ class GraspNetDataset(Dataset):
     #     return rot_color, rot_depth, rot_mask, augment_pose
     
     def obj_idx_select(self, seg, obj_idxs, visib_info):
-        max_visib_fract = -1  # 初始化最大可见性比例
-        max_visib_idx = -1  # 初始化最大可见性对应的索引
+        max_visib_fract = 0  # 初始化最大可见性比例
+        max_visib_idx = 0  # 初始化最大可见性对应的索引
 
-        for idx in range(len(obj_idxs)):
+        obj_idxs_list = list(range(len(obj_idxs)))
+        np.random.shuffle(obj_idxs_list)
+        for idx in obj_idxs_list:
             inst_mask = seg == obj_idxs[idx]
             inst_mask_len = inst_mask.sum()
             # inst_visib_fract = float(visib_info[str(obj_idxs[idx])]['visib_fract'])
@@ -668,9 +706,7 @@ class GraspNetDataset(Dataset):
             # 如果满足条件，立即返回
             if inst_mask_len > self.minimum_num_pt and inst_visib_fract > self.visib_threshold:
                 return idx
-        else:
-            # 如果没有满足条件的索引，选择最大可见性的索引
-            return max_visib_idx
+        return max_visib_idx
             
     def __getitem__(self, index):
         if self.load_label:
@@ -914,13 +950,15 @@ class GraspNetDataset(Dataset):
         seg = seg * mask
        
         if self.multi_modal_pose_augment:
-            (color, depth, seg), poses = self.scene_pose_augment((color, depth, seg), poses)
+            (color, depth, seg), poses, rot_occ_rate = self.scene_pose_augment((color, depth, seg), poses, intrinsic, obj_idxs)
+        else:
+            rot_occ_rate = np.ones(len(obj_idxs))
                 
         while 1:
             choose_idx = np.random.choice(np.arange(len(obj_idxs)))
             inst_mask = seg == obj_idxs[choose_idx]
             inst_mask_len = inst_mask.sum()
-            inst_visib_fract = float(visib_info[str(obj_idxs[choose_idx])]['visib_fract'])
+            inst_visib_fract = float(rot_occ_rate[choose_idx] * visib_info[str(obj_idxs[choose_idx])]['visib_fract'])
             # inst_visib_fract = float(inst_mask_len / visib_info[str(obj_idxs[choose_idx])]['px_count_all'])
             if inst_mask_len > self.minimum_num_pt and inst_visib_fract > self.visib_threshold:
                 break

@@ -3,6 +3,11 @@
 import os
 import sys
 import numpy as np
+# compatible with numpy >= 1.24.4
+np.int = np.int32
+np.float = np.float64
+np.bool = np.bool_
+
 import argparse
 import time
 
