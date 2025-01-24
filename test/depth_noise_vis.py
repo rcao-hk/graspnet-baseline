@@ -1,17 +1,7 @@
 import os
 os.environ['CUDA_LAUNCH_BLOCKING'] = '1' 
 
-import resource
-# RuntimeError: received 0 items of ancdata. Issue: pytorch/pytorch#973
-rlimit = resource.getrlimit(resource.RLIMIT_NOFILE)
-hard_limit = rlimit[1]
-soft_limit = min(500000, hard_limit)
-print("soft limit: ", soft_limit, "hard limit: ", hard_limit)
-resource.setrlimit(resource.RLIMIT_NOFILE, (soft_limit, hard_limit))
-
 import sys
-ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
-sys.path.append(os.path.join(ROOT_DIR, 'pointnet2'))
 
 import cv2
 import time
@@ -23,12 +13,12 @@ import torch
 from PIL import Image
 import scipy.io as scio
 import open3d as o3d
-import MinkowskiEngine as ME
 
-from graspnetAPI import GraspGroup
+# from utils.collision_detector import ModelFreeCollisionDetector, ModelFreeCollisionDetectorTorch
 
-from utils.collision_detector import ModelFreeCollisionDetector, ModelFreeCollisionDetectorTorch
-from utils.data_utils import CameraInfo, create_point_cloud_from_depth_image, get_workspace_mask, sample_points, points_denoise, add_gaussian_noise_point_cloud
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(os.path.join(ROOT_DIR, 'utils'))
+from data_utils import CameraInfo, create_point_cloud_from_depth_image, get_workspace_mask, sample_points, points_denoise, add_gaussian_noise_point_cloud
 from torchvision import transforms
 
 import cv2
@@ -50,9 +40,7 @@ parser.add_argument('--split', default='test_seen', help='Dataset split [default
 parser.add_argument('--camera', default='realsense', help='Camera to use [kinect | realsense]')
 parser.add_argument('--seed_feat_dim', default=256, type=int, help='Point wise feature dim')
 parser.add_argument('--img_feat_dim', default=256, type=int, help='Image feature dim')
-parser.add_argument('--dataset_root', default='/media/user/data1/rcao/graspnet', help='Where dataset is')
-parser.add_argument('--network_ver', type=str, default='v0.8.0', help='Network version')
-parser.add_argument('--dump_dir', type=str, default='ignet_v0.8.0', help='Dump dir to save outputs')
+parser.add_argument('--dataset_root', default='/data/jhpan/dataset/graspnet', help='Where dataset is')
 parser.add_argument('--inst_pt_num', type=int, default=1024, help='Dump dir to save outputs')
 parser.add_argument('--inst_denoise', action='store_true', help='Denoise instance points during training and testing [default: False]')
 parser.add_argument('--multi_scale_grouping', action='store_true', help='Multi-scale grouping [default: False]')
@@ -203,19 +191,23 @@ def random_point_dropout(point_cloud, min_num=50, num_points_to_drop=3, radius_p
     return retained_point_cloud, retained_indices
 
 
-scene_idx = 0
+scene_idx = 100
 # elapsed_time_list = []
-for anno_idx in range(256):
+for anno_idx in range(1):
     rgb_path = os.path.join(dataset_root, 'scenes/scene_{:04d}/{}/rgb/{:04d}.png'.format(scene_idx, camera, anno_idx))
     depth_path = os.path.join(dataset_root, 'scenes/scene_{:04d}/{}/depth/{:04d}.png'.format(scene_idx, camera, anno_idx))
 
-    depth_path = os.path.join(dataset_root, 'virtual_scenes/scene_{:04d}/{}/{:04d}_depth.png'.format(scene_idx, camera, anno_idx))
+    clear_depth_path = os.path.join(dataset_root, 'virtual_scenes/scene_{:04d}/{}/{:04d}_depth.png'.format(scene_idx, camera, anno_idx))
     mask_path = os.path.join(dataset_root, 'virtual_scenes/scene_{:04d}/{}/{:04d}_label.png'.format(scene_idx, camera, anno_idx))
+
+    match_depth_path = os.path.join('/data/jhpan/dataset/graspnet_sim/rendered_output_raw', '{:05d}/{:04d}_depth_sim.png'.format(scene_idx, anno_idx))
         
     meta_path = os.path.join(dataset_root, 'scenes/scene_{:04d}/{}/meta/{:04d}.mat'.format(scene_idx, camera, anno_idx))
     
     color = np.array(Image.open(rgb_path), dtype=np.float32) / 255.0
     depth = np.array(Image.open(depth_path))
+    clear_depth = np.array(Image.open(clear_depth_path))
+    match_depth = np.array(Image.open(match_depth_path))
     seg = np.array(Image.open(mask_path))
     # normal = np.load(normal_path)['normals']
 
@@ -228,12 +220,13 @@ for anno_idx in range(256):
 
     # depth = apply_smoothing(depth.astype(np.uint16), size=filter_size)
 
-    cloud = create_point_cloud_from_depth_image(depth, camera_info, organized=True)
-
-    scene = o3d.geometry.PointCloud()
-    scene.points = o3d.utility.Vector3dVector(cloud.reshape(-1, 3))
-    scene.colors = o3d.utility.Vector3dVector(color.reshape(-1, 3))
-    o3d.visualization.draw_geometries([scene])
+    real_cloud = create_point_cloud_from_depth_image(depth, camera_info, organized=True)
+    match_cloud = create_point_cloud_from_depth_image(match_depth, camera_info, organized=True)
+    
+    # scene = o3d.geometry.PointCloud()
+    # scene.points = o3d.utility.Vector3dVector(cloud.reshape(-1, 3))
+    # scene.colors = o3d.utility.Vector3dVector(color.reshape(-1, 3))
+    # o3d.visualization.draw_geometries([scene])
     
     depth_mask = (depth > 0)
     camera_poses = np.load(
@@ -241,16 +234,26 @@ for anno_idx in range(256):
     align_mat = np.load(
         os.path.join(dataset_root, 'scenes/scene_{:04d}/{}/cam0_wrt_table.npy'.format(scene_idx, camera)))
     trans = np.dot(align_mat, camera_poses[anno_idx])
-    workspace_mask = get_workspace_mask(cloud, seg, trans=trans, organized=True, outlier=0.02)
+    workspace_mask = get_workspace_mask(real_cloud, seg, trans=trans, organized=True, outlier=0.02)
     mask = (depth_mask & workspace_mask)
 
-    cloud_masked = cloud[mask]
+    cloud_masked = real_cloud[mask]
     color_masked = color[mask]
+    match_cloud = match_cloud[mask]
     # normal_masked = normal
 
     scene = o3d.geometry.PointCloud()
     scene.points = o3d.utility.Vector3dVector(cloud_masked)
     scene.colors = o3d.utility.Vector3dVector(color_masked)
+    scene = scene.voxel_down_sample(voxel_size=cfgs.voxel_size)
+    
+    match_scene = o3d.geometry.PointCloud()
+    match_scene.points = o3d.utility.Vector3dVector(match_cloud.reshape(-1, 3))
+    match_scene.paint_uniform_color([1, 0, 0])
+    match_scene = match_scene.voxel_down_sample(voxel_size=cfgs.voxel_size)
+    
+    scene_vis = scene + match_scene
+    o3d.io.write_point_cloud('scene_vis.ply', scene_vis)
     # scene.estimate_normals(o3d.geometry.KDTreeSearchParamRadius(0.015), fast_normal_computation=False)
     # scene.orient_normals_to_align_with_direction(np.array([0., 0., -1.]))
     # normal_masked = np.asarray(scene.normals)

@@ -38,9 +38,9 @@ parser.add_argument('--voxel_size', type=float, default=0.01, help='Voxel Size t
 parser.add_argument('--gaussian_noise_level', type=float, default=0.0, help='Noise level for scene points')
 parser.add_argument('--smooth_size', type=int, default=0, help='Smooth size for scene points')
 parser.add_argument('--dropout_num', type=int, default=0, help='Gaussian noise level for scene points')
+parser.add_argument('--dropout_rate', type=float, default=0.0, help='Dropout rate for scene points')
 parser.add_argument('--downsample_voxel_size', type=float, default=0.0, help='Voxel Size for scene points downsample')
 parser.add_argument('--depth_type', default='virtual', help='Depth type [real/virtual]')
-parser.add_argument('--num_workers', type=int, default=30, help='Number of workers used in evaluation [default: 30]')
 cfgs = parser.parse_args()
 print(cfgs)
 
@@ -54,7 +54,7 @@ def my_worker_init_fn(worker_id):
 
 # Create Dataset and Dataloader
 # TEST_DATASET = GraspNetDataset(cfgs.dataset_root, None, None, split='test', camera=cfgs.camera, num_points=cfgs.num_point, remove_outlier=True, augment=False, load_label=False)
-TEST_DATASET = GraspNetDataset(cfgs.dataset_root, None, None, split=cfgs.split, camera=cfgs.camera, num_points=cfgs.num_point,  gaussian_noise_level=cfgs.gaussian_noise_level, smooth_size=cfgs.smooth_size, dropout_num=cfgs.dropout_num, downsample_voxel_size=cfgs.downsample_voxel_size, remove_outlier=cfgs.remove_outlier, augment=False, load_label=False, depth_type=cfgs.depth_type)
+TEST_DATASET = GraspNetDataset(cfgs.dataset_root, None, None, split=cfgs.split, camera=cfgs.camera, num_points=cfgs.num_point,  gaussian_noise_level=cfgs.gaussian_noise_level, smooth_size=cfgs.smooth_size, dropout_num=cfgs.dropout_num, downsample_voxel_size=cfgs.downsample_voxel_size, dropout_rate=cfgs.dropout_rate, remove_outlier=cfgs.remove_outlier, augment=False, load_label=False, depth_type=cfgs.depth_type)
 print(len(TEST_DATASET))
 SCENE_LIST = TEST_DATASET.scene_list()
 TEST_DATALOADER = DataLoader(TEST_DATASET, batch_size=cfgs.batch_size, shuffle=False,
@@ -66,7 +66,7 @@ net = GraspNet_MSCQ(input_feature_dim=0, num_view=cfgs.num_view, num_angle=12, n
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 net.to(device)
 # Load checkpoint
-checkpoint = torch.load(cfgs.checkpoint_path)
+checkpoint = torch.load(cfgs.checkpoint_path, weights_only=False)
 net.load_state_dict(checkpoint['model_state_dict'])
 start_epoch = checkpoint['epoch']
 print("-> loaded checkpoint %s (epoch: %d)"%(cfgs.checkpoint_path, start_epoch))
@@ -75,7 +75,7 @@ print("-> loaded checkpoint %s (epoch: %d)"%(cfgs.checkpoint_path, start_epoch))
 seg_net = DSN(input_feature_dim=0)
 seg_net.to(device)
 # Load checkpoint
-checkpoint = torch.load(cfgs.seg_checkpoint_path)
+checkpoint = torch.load(cfgs.seg_checkpoint_path, weights_only=False)
 seg_net.load_state_dict(checkpoint['model_state_dict'])
 
 # ------------------------------------------------------------------------- GLOBAL CONFIG END
@@ -145,12 +145,6 @@ def inference():
             print('Eval batch: %d, time: %fs'%(batch_idx, (toc-tic)/batch_interval))
             tic = time.time()
 
-def evaluate():
-    ge = GraspNetEval(root=cfgs.dataset_root, camera=cfgs.camera, split='test')
-    res, ap = ge.eval_all(cfgs.dump_dir, proc=cfgs.num_workers)
-    save_dir = os.path.join(cfgs.dump_dir, 'ap_{}.npy'.format(cfgs.camera))
-    np.save(save_dir, res)
 
 if __name__=='__main__':
     inference()
-    #evaluate()

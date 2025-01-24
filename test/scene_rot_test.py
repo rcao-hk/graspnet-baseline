@@ -1,6 +1,6 @@
 import os
 import os
-os.environ['CUDA_VISIBLE_DEVICES'] = '5'
+os.environ['CUDA_VISIBLE_DEVICES'] = '7'
 
 import numpy as np
 import open3d as o3d
@@ -11,7 +11,12 @@ from PIL import Image
 import copy
 from tqdm import tqdm
 
-from utils.data_utils import CameraInfo, transform_point_cloud, create_point_cloud_from_depth_image,\
+import sys
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+ROOT_DIR = os.path.dirname(BASE_DIR)
+sys.path.append(os.path.join(ROOT_DIR, 'utils'))
+
+from data_utils import CameraInfo, transform_point_cloud, create_point_cloud_from_depth_image,\
                             get_workspace_mask, remove_invisible_grasp_points, sample_points, points_denoise
                             
 img_width = 720
@@ -338,7 +343,7 @@ def place_meshes_graspnet(meshes, poses, cam_pos=np.array([None])):
     return meshes_list
 
 
-def flip_image(rgb, depth, mask, flip_code):
+def flip_image(color, depth, mask, flip_code, intrinsic, fill_color=(0, 0, 0)):
     """
     Flip RGB, depth, and mask images.
 
@@ -349,7 +354,7 @@ def flip_image(rgb, depth, mask, flip_code):
     - flip_code: int, flip direction.
         0: Flip vertically.
         1: Flip horizontally.
-       -1: Flip both vertically and horizontally.
+        2: Flip both vertically and horizontally.
 
     Returns:
     - flipped_rgb: np.ndarray, flipped RGB image.
@@ -357,9 +362,41 @@ def flip_image(rgb, depth, mask, flip_code):
     - flipped_mask: np.ndarray, flipped mask image.
     """
     # Flip images using OpenCV's flip function
-    flipped_rgb = cv2.flip(rgb, flip_code)
-    flipped_depth = cv2.flip(depth, flip_code)
-    flipped_mask = cv2.flip(mask, flip_code)
+    h, w = color.shape[:2]
+    cx, cy = intrinsic[0, 2], intrinsic[1, 2]
+    
+    # 定义翻转类型对应的镜像矩阵
+    if flip_code == 1:
+        mirror_matrix = np.array([
+            [-1,  0, 2 * cx],
+            [ 0,  1,      0],
+            [ 0,  0,      1]
+        ], dtype=np.float32)
+    elif flip_code == 0:
+        mirror_matrix = np.array([
+            [ 1,  0,      0],
+            [ 0, -1, 2 * cy],
+            [ 0,  0,      1]
+        ], dtype=np.float32)
+    elif flip_code == 2:
+        mirror_matrix = np.array([
+            [-1,  0, 2 * cx],
+            [ 0, -1, 2 * cy],
+            [ 0,  0,      1]
+        ], dtype=np.float32)
+
+    affine_mirror = mirror_matrix[:2, :]
+    
+    # 执行仿射变换
+    flipped_rgb = cv2.warpAffine(
+        color, affine_mirror, (w, h), flags=cv2.INTER_LINEAR, borderValue=fill_color
+    )
+    flipped_depth = cv2.warpAffine(
+        depth, affine_mirror, (w, h), flags=cv2.INTER_NEAREST, borderValue=fill_color
+    )
+    flipped_mask = cv2.warpAffine(
+        mask, affine_mirror, (w, h), flags=cv2.INTER_NEAREST, borderValue=fill_color
+    )
 
     return flipped_rgb, flipped_depth, flipped_mask
 
@@ -389,9 +426,9 @@ def load_grasp_labels(root):
     return valid_obj_idxs, grasp_labels
 
 
-scene_id = 14
-anno_id = 135
-root = '/media/gpuadmin/rcao/dataset/graspnet'
+scene_id = 1
+anno_id = 0
+root = '/data/jhpan/dataset/graspnet'
 valid_obj_idxs, grasp_labels = load_grasp_labels(root)
 
 scene_path = os.path.join(root, 'scenes', 'scene_{:04d}'.format(scene_id))
@@ -408,7 +445,7 @@ obj_idxs = meta['cls_indexes'].flatten().astype(np.int32)
 poses = meta['poses']
 intrinsic = meta['intrinsic_matrix']
 factor_depth = meta['factor_depth']
-choose_idx = 6
+choose_idx = 1
 output_name = os.path.join('augment_test', '{}_{}'.format(anno_id, choose_idx))
 
 color = np.array(Image.open(rgb_path), dtype=np.float32) / 255.0
@@ -430,8 +467,9 @@ cloud = create_point_cloud_from_depth_image(depth, camera, organized=False)
 scene = o3d.geometry.PointCloud()
 scene.points = o3d.utility.Vector3dVector(cloud.astype(np.float32))
 scene.colors = o3d.utility.Vector3dVector(color.reshape(-1, 3).astype(np.float32))
+scene_downsample = scene.voxel_down_sample(voxel_size=0.005)
 
-color, depth, seg = flip_image(color, depth, seg, 1)
+flip_color, flip_depth, flip_seg = flip_image(color, depth, seg, 1, intrinsic)
 flip_mat = np.array([[-1, 0, 0],
                     [ 0, 1, 0],
                     [ 0, 0, 1]])
@@ -439,52 +477,63 @@ filp_cloud = transform_point_cloud(cloud, flip_mat, '3x3')
 flip_pose = np.eye(4)
 flip_pose[:3, :3] = flip_mat
 
+trans_pose = np.eye(4)
+trans_pose[:3, :3] = flip_mat[:3, :3]
+
 # flip_mat = np.eye(4)
 
-degree = 40
-angle = np.deg2rad(degree)
-c, s = np.cos(angle), np.sin(angle)
+# degree = 45
+# angle = np.deg2rad(degree)
+# c, s = np.cos(angle), np.sin(angle)
 
-rot_pose = np.eye(4)
-rot_pose[:3, :3] = np.array([[c, -s, 0],
-                            [s, c, 0],
-                            [0, 0, 1]])
-trans_pose = np.eye(4)
-trans_pose[:3, :3] = rot_pose[:3, :3] @ flip_mat[:3, :3]
+# rot_pose = np.eye(4)
+# rot_pose[:3, :3] = np.array([[c, -s, 0],
+#                             [s, c, 0],
+#                             [0, 0, 1]])
+# trans_pose = np.eye(4)
+# trans_pose[:3, :3] = rot_pose[:3, :3]
+# trans_pose[:3, :3] = rot_pose[:3, :3] @ flip_mat[:3, :3]
 
-color, depth, seg = rotate_image(color, depth, seg, -angle)
+# rot_color, rot_depth, rot_seg = rotate_image(color, depth, seg, -angle, (intrinsic[0][2], intrinsic[1][2]))
 
-trans_cloud = create_point_cloud_from_depth_image(depth, camera, organized=False)
+# trans_cloud = create_point_cloud_from_depth_image(rot_depth, camera, organized=False)
 
-# scene = o3d.geometry.PointCloud()
-# scene.points = o3d.utility.Vector3dVector(cloud.astype(np.float32))
-# scene.paint_uniform_color([1.0, 0.0, 0.0])
+trans_cloud = create_point_cloud_from_depth_image(flip_depth, camera, organized=False)
+
+rot_scene = o3d.geometry.PointCloud()
+rot_scene.points = o3d.utility.Vector3dVector(trans_cloud.astype(np.float32))
+rot_scene.paint_uniform_color([1.0, 0.0, 0.0])
+rot_scene_downsample = rot_scene.voxel_down_sample(voxel_size=0.005)
+
 # rot_scene.colors = o3d.utility.Vector3dVector(color.reshape(-1, 3).astype(np.float32))
-# scene.transform(trans_pose)
+scene_downsample.transform(trans_pose)
 # scene.transform(rot_pose)
 
+scene_vis = rot_scene_downsample + scene_downsample
+o3d.io.write_point_cloud('{}_{}_scene.ply'.format(scene_id, anno_id), scene_vis)
+ 
 # inst_pose = np.eye(4)
 # inst_pose[:3, :] = poses[:, :, choose_idx]
 # inst_pose = trans_pose @ inst_pose
 # points, offsets, scores = grasp_labels[obj_idxs[choose_idx]]
 # inst_point = transform_point_cloud(points, inst_pose, '4x4')
 
-inst_pose = poses[:, :, choose_idx]
-points, offsets, scores = grasp_labels[obj_idxs[choose_idx]]
-inst_point = transform_point_cloud(points, inst_pose, '3x4')
+# inst_pose = poses[:, :, choose_idx]
+# points, offsets, scores = grasp_labels[obj_idxs[choose_idx]]
+# inst_point = transform_point_cloud(points, inst_pose, '3x4')
 
-inst_vis = o3d.geometry.PointCloud()
-inst_vis.points = o3d.utility.Vector3dVector(inst_point.astype(np.float32))
-inst_vis.paint_uniform_color([0.0, 1.0, 0.0])
-# inst_vis.colors = o3d.utility.Vector3dVector(color.reshape(-1, 3).astype(np.float32))
+# inst_vis = o3d.geometry.PointCloud()
+# inst_vis.points = o3d.utility.Vector3dVector(inst_point.astype(np.float32))
+# inst_vis.paint_uniform_color([0.0, 1.0, 0.0])
+# # inst_vis.colors = o3d.utility.Vector3dVector(color.reshape(-1, 3).astype(np.float32))
 
-proj_scene = o3d.geometry.PointCloud()
-proj_scene.points = o3d.utility.Vector3dVector(trans_cloud.astype(np.float32))
-proj_scene.colors = o3d.utility.Vector3dVector(color.reshape(-1, 3).astype(np.float32))
+# proj_scene = o3d.geometry.PointCloud()
+# proj_scene.points = o3d.utility.Vector3dVector(trans_cloud.astype(np.float32))
+# proj_scene.colors = o3d.utility.Vector3dVector(color.reshape(-1, 3).astype(np.float32))
 
-axis_mesh = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.5, origin=[0, 0, 0])
-axis_pcd = axis_mesh.sample_points_uniformly(number_of_points=1000)
+# axis_mesh = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.5, origin=[0, 0, 0])
+# axis_pcd = axis_mesh.sample_points_uniformly(number_of_points=1000)
 
-scene_vis = inst_vis + scene + axis_pcd
-# scene_vis = inst_vis + proj_scene + axis_pcd
-o3d.io.write_point_cloud('{}_{}_scene_gt.ply'.format(scene_id, anno_id), scene_vis)
+# scene_vis = inst_vis + scene + axis_pcd
+# # scene_vis = inst_vis + proj_scene + axis_pcd
+# o3d.io.write_point_cloud('{}_{}_scene_gt.ply'.format(scene_id, anno_id), scene_vis)
