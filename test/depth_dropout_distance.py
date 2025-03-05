@@ -236,5 +236,5 @@ if __name__ == '__main__':
     
     save_root = 'depth_distance'
     os.makedirs(save_root, exist_ok=True)
-    # np.save(os.path.join(save_root, 'dropout_rate_{}_depth_distance.npy'.format(cfgs.dropout_rate)), results)
-    np.save(os.path.join(save_root, 'clear_depth_distance.npy'.format(cfgs.dropout_rate)), results)
+    np.save(os.path.join(save_root, 'dropout_rate_{}_depth_distance.npy'.format(cfgs.dropout_rate)), results)
+    # np.save(os.path.join(save_root, 'clear_depth_distance.npy'.format(cfgs.dropout_rate)), results)

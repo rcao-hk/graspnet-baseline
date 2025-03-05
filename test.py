@@ -33,6 +33,7 @@ parser.add_argument('--voxel_size_cd', type=float, default=0.01, help='Voxel Siz
 parser.add_argument('--gaussian_noise_level', type=float, default=0.0, help='Noise level for scene points')
 parser.add_argument('--smooth_size', type=int, default=0, help='Smooth size for scene points')
 parser.add_argument('--dropout_num', type=int, default=0, help='Gaussian noise level for scene points')
+parser.add_argument('--dropout_rate', type=float, default=0.0, help='Dropout rate for instance points')
 parser.add_argument('--downsample_voxel_size', type=float, default=0.0, help='Voxel Size for scene points downsample')
 parser.add_argument('--worker_num', type=int, default=18, help='Worker number for dataloader [default: 4]')
 parser.add_argument('--depth_type', default='virtual', help='Depth type [real/virtual]')
@@ -70,7 +71,7 @@ def inference():
                                      collate_fn=collate_fn)
         print('Test dataloader length: ', len(test_dataloader))
     else:
-        test_dataset = GraspNetDataset(cfgs.dataset_root, valid_obj_idxs, grasp_labels, split=cfgs.split, camera=cfgs.camera, num_points=cfgs.num_point, voxel_size=cfgs.voxel_size, gaussian_noise_level=cfgs.gaussian_noise_level, smooth_size=cfgs.smooth_size, dropout_num=cfgs.dropout_num, downsample_voxel_size=cfgs.downsample_voxel_size, remove_outlier=cfgs.remove_outlier, augment=False, load_label=False, depth_type=cfgs.depth_type)
+        test_dataset = GraspNetDataset(cfgs.dataset_root, valid_obj_idxs, grasp_labels, split=cfgs.split, camera=cfgs.camera, num_points=cfgs.num_point, voxel_size=cfgs.voxel_size, gaussian_noise_level=cfgs.gaussian_noise_level, smooth_size=cfgs.smooth_size, dropout_num=cfgs.dropout_num, dropout_rate=cfgs.dropout_rate, downsample_voxel_size=cfgs.downsample_voxel_size, remove_outlier=cfgs.remove_outlier, augment=False, load_label=False, depth_type=cfgs.depth_type)
         
         print('Test dataset length: ', len(test_dataset))
         scene_list = test_dataset.scene_list()

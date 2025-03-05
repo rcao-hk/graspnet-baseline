@@ -174,7 +174,7 @@ class GraspNetDataset(Dataset):
             noisy_depth = add_gaussian_noise_depth_map(depth, factor_depth, level=self.gaussian_noise_level, valid_min_depth=0.1)
             noisy_cloud = create_point_cloud_from_depth_image(noisy_depth, camera, organized=True)
             
-        if self.dropout_rate > 0:
+        if self.dropout_rate > 0.0:
             foreground_mask = (seg > 0)
             large_missing_regions, labeled, filtered_labels = find_large_missing_regions(real_depth, foreground_mask, self.dropout_min_size)
 

@@ -196,7 +196,8 @@ from kornia.filters import median_blur, bilateral_blur
 
 
 def apply_smoothing(depth_map, size=3):
-    smoothed_depth = cv2.blur(depth_map.astype(np.uint16), (size, size))
+    # smoothed_depth = cv2.Blur(depth_map.astype(np.int16), (size, size))
+    smoothed_depth = cv2.medianBlur(depth_map.astype(np.int16), size)
     return smoothed_depth
 
 img_width = 720
@@ -263,10 +264,13 @@ def distance_compute(scene_idx, cfgs):
                 # noisy_depth = noisy_depth.squeeze(1)
             if cfgs.smooth_noise_level > 1:
                 noisy_depth = median_blur(clear_depth.unsqueeze(1), (cfgs.smooth_noise_level, cfgs.smooth_noise_level))
+            #     noise_depth = torch.tensor(np.array([noise_depth]), dtype=torch.float32, device=device)
                 noisy_depth = noisy_depth.squeeze(1)
+                # noisy_depth = apply_smoothing(clear_depth, size=cfgs.smooth_noise_level)
             else:
-                noisy_depth = clear_depth.clone()
-                
+                noisy_depth = clear_depth
+            
+            # noisy_depth = torch.tensor(np.array([noisy_depth]), dtype=torch.float32, device=device)
             if cfgs.gaussian_noise_level > 0:
                 noisy_depth = add_gaussian_noise(noisy_depth, factor_depth, level=gaussian_level)
                 
