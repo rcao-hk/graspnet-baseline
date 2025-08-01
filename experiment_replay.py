@@ -6,10 +6,12 @@ import pandas as pd
 # epoch_list = ['40', '45', '50', '55', '60']
 # model_list = [method + '_' + i for i in epoch_list]
 # model_list = [method]
-experiment_root = 'experiment'
-# experiment_root = '/media/gpuadmin/rcao/result/ignet/experiment'
+# experiment_root = 'experiment'
+experiment_root = '/media/gpuadmin/rcao/result/ignet/experiment'
 
-model_list = ['ignet_v0.8.2.15']
+# model_list = ['ignet_v0.6.2.dr0.2', 'ignet_v0.6.2.dr0.4', 'ignet_v0.6.2.dr0.6', 'ignet_v0.6.2.dr0.8', 'ignet_v0.6.2.dr1.0',
+#               'ignet_v0.8.2.dr0.2', 'ignet_v0.8.2.dr0.4', 'ignet_v0.8.2.dr0.6', 'ignet_v0.8.2.dr0.8', 'ignet_v0.8.2.dr1.0',]
+model_list = ['gsnet', 'gsnet_base', 'gsnet_multi']
 
 column = ['AP', 'AP0.8', 'AP0.4', 'AP', 'AP0.8', 'AP0.4', 'AP', 'AP0.8', 'AP0.4', 'AP_mean']
 camera_type = 'realsense'

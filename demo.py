@@ -371,7 +371,6 @@ def inference(scene_idx):
                                 "img_idxs": inst_img_idxs_tensor,
                                 "coors": inst_coors_tensor,
                                 "feats": inst_feats_tensor,
-                                "point_clouds": inst_cloud_tensor,
                                 "object_pose": inst_pose_tensor,
                                 "grasp_points": inst_grasp_point_tensor,
                                 "grasp_labels": inst_grasp_score_tensor,
