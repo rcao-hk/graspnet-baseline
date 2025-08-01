@@ -13,14 +13,19 @@ import sys
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(ROOT_DIR, 'pointnet2'))
 
+import numpy as np
+# compatible with numpy >= 1.24.4
+np.int = np.int32
+np.float = np.float64
+np.bool = np.bool_
+
 import cv2
 import time
 import re
 import glob
 import argparse
-import numpy as np
 import torch
-from PIL import Image
+from PIL import Image, ImageEnhance
 import scipy.io as scio
 import open3d as o3d
 import MinkowskiEngine as ME
@@ -63,6 +68,7 @@ parser.add_argument('--seg_root',type=str, default='/media/gpuadmin/rcao/dataset
 parser.add_argument('--seg_model',type=str, default='uois', help='Segmentation results [default: uois]')
 parser.add_argument('--multi_scale_grouping', action='store_true', help='Multi-scale grouping [default: False]')
 parser.add_argument('--voxel_size', type=float, default=0.002, help='Voxel Size to quantize point cloud [default: 0.005]')
+parser.add_argument('--rgb_noise', type=str, default='None', help=' [default: None]')
 parser.add_argument('--collision_voxel_size', type=float, default=0.01, help='Voxel Size to process point clouds before collision detection [default: 0.01]')
 parser.add_argument('--collision_thresh', type=float, default=0.01, help='Collision Threshold in collision detection [default: 0.01]')
 cfgs = parser.parse_args()
@@ -131,7 +137,99 @@ def get_resized_idxs(idxs, orig_shape, resize_shape):
     new_idxs = np.ravel_multi_index((new_coords_y, new_coords_x), resize_shape)
     return new_idxs
     
+
+def defocus_blur(image, kernel_size=9):
+    """
+    Apply defocus blur (a type of Gaussian blur) to the image.
     
+    Parameters:
+    - image: Input image (numpy array).
+    - kernel_size: Size of the kernel used for Gaussian blur (must be odd).
+    
+    Returns:
+    - Defocus blurred image.
+    """
+    # Apply Gaussian blur to simulate defocus
+    return cv2.GaussianBlur(image, (kernel_size, kernel_size), 0)
+
+
+def cutout(img, size_min=0.1, size_max=0.3, ratio_1=0.3, ratio_2=1/0.3):
+    img = np.array(img)  # 转换为 NumPy 数组
+    img_h, img_w, img_c = img.shape  # 处理 RGB 图像，形状 (H, W, 3)
+
+    while True:
+        size = np.random.uniform(size_min, size_max) * img_h * img_w
+        ratio = np.random.uniform(ratio_1, ratio_2)
+        erase_w = int(np.sqrt(size / ratio))
+        erase_h = int(np.sqrt(size * ratio))
+        x = np.random.randint(0, img_w)
+        y = np.random.randint(0, img_h)
+
+        if x + erase_w <= img_w and y + erase_h <= img_h:
+            break
+
+    # 生成全 0 遮挡区域
+    value = np.zeros((erase_h, erase_w, img_c), dtype=img.dtype)
+
+    # 应用遮挡
+    img[y:y + erase_h, x:x + erase_w, :] = value
+
+    return img
+
+
+def adjust_brightness(img, brightness_factor):
+    enhancer = ImageEnhance.Brightness(img)
+    img = enhancer.enhance(brightness_factor)
+    return img
+
+
+def adjust_contrast(img, contrast_factor):
+    enhancer = ImageEnhance.Contrast(img)
+    img = enhancer.enhance(contrast_factor)
+    return img
+
+
+def adjust_saturation(img, saturation_factor):
+    enhancer = ImageEnhance.Color(img)
+    img = enhancer.enhance(saturation_factor)
+    return img
+
+
+def adjust_hue(img, hue_factor):
+
+    if not(-0.5 <= hue_factor <= 0.5):
+        raise ValueError('hue_factor is not in [-0.5, 0.5].'.format(hue_factor))
+
+    input_mode = img.mode
+    if input_mode in {'L', '1', 'I', 'F'}:
+        return img
+
+    h, s, v = img.convert('HSV').split()
+
+    np_h = np.array(h, dtype=np.uint8)
+    # uint8 addition take cares of rotation across boundaries
+    with np.errstate(over='ignore'):
+        np_h += np.uint8(hue_factor * 255)
+    h = Image.fromarray(np_h, 'L')
+
+    img = Image.merge('HSV', (h, s, v)).convert(input_mode)
+    return img
+
+
+def colorjitter(img, brightness, contrast, saturation, hue):
+    img = Image.fromarray((img * 255).astype(np.uint8))
+    brightness_factor = np.random.uniform(max(0, 1 - brightness), 1 + brightness)
+    contrast_factor = np.random.uniform(max(0, 1 - contrast), 1 + contrast)
+    saturation_factor = np.random.uniform(max(0, 1 - saturation), 1 + saturation)
+    hue_factor = np.random.uniform(-hue, hue)
+
+    img = adjust_brightness(img, brightness_factor)
+    img = adjust_contrast(img, contrast_factor)
+    img = adjust_saturation(img, saturation_factor)
+    img = adjust_hue(img, hue_factor)
+    img = np.asarray(img, dtype=np.float32) / 255.0
+    return img
+
 data_type = 'real' # syn
 restored_depth = cfgs.restored_depth
 restored_depth_root = cfgs.depth_root
@@ -297,6 +395,14 @@ def inference(scene_idx):
             
             rmin, rmax, cmin, cmax = get_bbox(inst_mask_org.astype(np.uint8))
             img = color[rmin:rmax, cmin:cmax, :]
+            if cfgs.rgb_noise == 'blur':
+                img = defocus_blur(img)
+            elif cfgs.rgb_noise == 'cutout':
+                img = cutout(img)
+            elif cfgs.rgb_noise == 'colorjitter':
+                img = colorjitter(img, 0.3, 0.3, 0.3, 0.3)
+                
+            # cv2.imwrite('test_{}_{}_{}.png'.format(scene_idx, anno_idx, obj_idx), img*255.0)
             inst_mask_org = inst_mask_org[rmin:rmax, cmin:cmax]
             inst_mask_choose = inst_mask_org.flatten().nonzero()[0]
             orig_width, orig_length, _ = img.shape
