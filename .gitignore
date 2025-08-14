@@ -19,3 +19,5 @@ scripts
 *.png
 *.svg
 vis
+checkpoints
+data

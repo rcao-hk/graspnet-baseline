@@ -52,6 +52,8 @@ class dino_extractor(nn.Module):
         feat = F.interpolate(feat, (H, W), mode='bilinear')
         return feat
 
+
+print("Using PSPNet for feature extraction")
 H, W = 224, 224
 B = 4
 image_input = torch.randn(B, 3, H, W).to(device)
@@ -65,7 +67,21 @@ print(emb.shape)
 # features_dict = feat_extractor.forward_features(image_input)
 # dino_feats = features_dict['x_norm_patchtokens'].view(B, H//14, W//14, -1)
 # dino_feats = F.interpolate(dino_feats.permute(0, 3, 1, 2), (H, W), mode='bilinear')
+print("Using DINO for feature extraction")
 dino_img_extractor = dino_extractor("dino").to(device)
 dino_img_extractor.eval()
 dino_feats = dino_img_extractor(image_input)
 print(dino_feats.shape)
+
+print("Using segmentation_models_pytorch for ResNeXt feature extraction")
+import segmentation_models_pytorch as smp
+resnext_extractor = smp.Unet(encoder_name="resnext50_32x4d", encoder_weights="imagenet", in_channels=3, classes=64).to(device)
+resnext_extractor.eval()
+resnext_feats = resnext_extractor(image_input)
+
+print(resnext_feats.shape)
+
+for name, m in resnext_extractor.named_modules():
+    print(name, m)
+# for resnext_feat in resnext_feats:
+#     print(resnext_feat.shape)

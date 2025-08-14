@@ -935,6 +935,7 @@ class ResMLP(nn.Module):
     def forward(self, x1, x2):
         return F.relu(x1 + self.net(x2), True)
 
+# import segmentation_models_pytorch as smp
 
 class IGNet(nn.Module):
     def __init__(self,  num_view=300, num_angle=12, num_depth=4, seed_feat_dim=256, img_feat_dim=64, 
@@ -952,7 +953,12 @@ class IGNet(nn.Module):
         self.img_backbone = PSPNet(sizes=(1, 2, 3, 6), psp_size=512, 
                                    deep_features_size=img_feat_dim, backend='resnet34')
         # self.img_backbone = dino_extractor(feat_ext='dino')
-        
+        # self.img_backbone = smp.Unet(encoder_name="resnext50_32x4d", encoder_weights="imagenet", in_channels=3, classes=64)
+        # for param in self.img_backbone.encoder.parameters():
+        #     param.requires_grad = False
+        # for param in self.img_backbone.decoder.parameters():
+        #     param.requires_grad = False
+                
         # early fusion
         self.img_feature_dim = 0
         self.point_backbone = MinkUNet14D(in_channels=img_feat_dim, out_channels=self.seed_feature_dim, D=3)
@@ -1048,19 +1054,32 @@ class IGNet(nn.Module):
         #             nn.init.kaiming_normal_(m.weight, std=0.02)
         #             if m.bias is not None:
         #                 nn.init.constant_(m.bias, 0)
-                        
-        for m in self.modules():
-            if isinstance(m, nn.Conv2d):
-                n = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
-                m.weight.data.normal_(0, np.math.sqrt(2. / n))
-            elif isinstance(m, (nn.LayerNorm, nn.BatchNorm1d, nn.BatchNorm2d)):
-                nn.init.constant_(m.weight, 1)
-                nn.init.constant_(m.bias, 0)
-            elif isinstance(m, (nn.Linear, nn.Conv1d)):
-                nn.init.kaiming_normal_(m.weight)
-                if m.bias is not None:
-                    nn.init.constant_(m.bias, 0)
-       
+        # for m in self.modules():
+        #     if isinstance(m, nn.Conv2d):
+        #         n = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
+        #         m.weight.data.normal_(0, np.math.sqrt(2. / n))
+        #     elif isinstance(m, (nn.LayerNorm, nn.BatchNorm1d, nn.BatchNorm2d)):
+        #         nn.init.constant_(m.weight, 1)
+        #         nn.init.constant_(m.bias, 0)
+        #     elif isinstance(m, (nn.Linear, nn.Conv1d)):
+        #         nn.init.kaiming_normal_(m.weight)
+        #         if m.bias is not None:
+        #             nn.init.constant_(m.bias, 0)
+        for name, module in self.named_modules():
+            # 跳过 img_backbone 的所有子模块
+            # if name.startswith('img_backbone.encoder') or name.startswith('img_backbone.decoder'):
+            #     continue
+            if isinstance(module, nn.Conv2d):
+                n = module.kernel_size[0] * module.kernel_size[1] * module.out_channels
+                module.weight.data.normal_(0, np.math.sqrt(2. / n))
+            elif isinstance(module, (nn.LayerNorm, nn.BatchNorm1d, nn.BatchNorm2d)):
+                nn.init.constant_(module.weight, 1)
+                nn.init.constant_(module.bias, 0)
+            elif isinstance(module, (nn.Linear, nn.Conv1d)):
+                nn.init.kaiming_normal_(module.weight)
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, 0)
+                              
     def forward(self, end_points):
         # use all sampled point cloud, B*Ns*3
         seed_xyz = end_points['point_clouds']

@@ -50,10 +50,14 @@ def get_bbox(label):
 
 
 class GraspNetDataset(Dataset):
-    def __init__(self, root, valid_obj_idxs, grasp_labels, camera='kinect', split='train', num_points=20000,
+    def __init__(self, root, big_file_root, valid_obj_idxs, grasp_labels, camera='kinect', split='train', num_points=20000,
                  remove_outlier=False, voxel_size=0.005, gaussian_noise_level=0.0, smooth_size=1, dropout_num=0, dropout_rate=0, downsample_voxel_size=0.0, remove_invisible=True, augment=False, load_label=True, depth_type='real'):
         assert(num_points<=50000)
         self.root = root
+        if big_file_root is None:
+            self.big_file_root = big_file_root
+        else:
+            self.big_file_root = root
         self.split = split
         self.num_points = num_points
         self.remove_outlier = remove_outlier
@@ -110,7 +114,7 @@ class GraspNetDataset(Dataset):
                 if self.load_label:
                     self.graspnesspath.append(os.path.join(root, 'graspness', x, camera, str(img_num).zfill(4) + '.npy'))
             if self.load_label:
-                collision_labels = np.load(os.path.join(root, 'collision_label', x.strip(),  'collision_labels.npz'))
+                collision_labels = np.load(os.path.join(self.big_file_root, 'collision_label', x.strip(), 'collision_labels.npz'))
                 self.collision_labels[x.strip()] = {}
                 for i in range(len(collision_labels)):
                     self.collision_labels[x.strip()][i] = collision_labels['arr_{}'.format(i)]

@@ -531,9 +531,13 @@ def visualize_bbox_with_center(image, rmin, rmax, cmin, cmax, center, index):
 
 
 class GraspNetDataset(Dataset):
-    def __init__(self, root, valid_obj_idxs, grasp_labels, camera='kinect', split='train', num_points=1024,
+    def __init__(self, root, big_file_root, valid_obj_idxs, grasp_labels, camera='kinect', split='train', num_points=1024,
                  remove_outlier=False, remove_invisible=True, multi_modal_pose_augment=False, point_augment=False, denoise=False, load_label=True, real_data=True, syn_data=False, visib_threshold=0.0, voxel_size=0.005, match_point_num=350):
         self.root = root
+        if big_file_root is None:
+            self.big_file_root = big_file_root
+        else:
+            self.big_file_root = root
         self.split = split
         self.num_points = num_points
         self.remove_outlier = remove_outlier
@@ -610,7 +614,7 @@ class GraspNetDataset(Dataset):
                     self.real_flags.append(False)
                     
             if self.load_label:
-                collision_labels = np.load(os.path.join(root, 'collision_label', x.strip(), 'collision_labels.npz'))
+                collision_labels = np.load(os.path.join(self.big_file_root, 'collision_label', x.strip(), 'collision_labels.npz'))
                 # collision_labels = h5py.File(os.path.join(root, 'collision_label_hdf5', x.strip(), 'collision_labels.hdf5'), "r")
                 self.collision_labels[x.strip()] = {}
                 for i in range(len(collision_labels)):

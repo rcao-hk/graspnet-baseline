@@ -286,7 +286,7 @@ else:
     net = IGNet(num_view=300, seed_feat_dim=cfgs.seed_feat_dim, img_feat_dim=cfgs.img_feat_dim, is_training=False, multi_scale_grouping=cfgs.multi_scale_grouping)
 net.to(device)
 net.eval()
-checkpoint = torch.load(ckpt_name, map_location=device, weights_only=False)
+checkpoint = torch.load(ckpt_name, map_location=device)
 
 try:
     net.load_state_dict(checkpoint['model_state_dict'], strict=True)
