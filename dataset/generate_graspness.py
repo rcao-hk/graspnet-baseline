@@ -1,7 +1,13 @@
 import os
+os.environ['CUDA_VISIBLE_DEVICES'] = '1'
 os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
 
 import numpy as np
+
+np.int = np.int32
+np.float = np.float64
+np.bool = np.bool_
+
 from PIL import Image
 import scipy.io as scio
 import sys
@@ -23,16 +29,24 @@ torch.cuda.set_device(device)
 
 def generate_scene(scene_id, cfgs):
     dataset_root = cfgs.dataset_root   # set dataset root
+    virtual_dataset_root = cfgs.virtual_dataset_root   # set virtual dataset root
     camera_type = cfgs.camera_type   # kinect / realsense
-    save_path_root = os.path.join(dataset_root, 'graspness')
+    if cfgs.depth_type == 'virtual':
+        save_path_root = os.path.join(dataset_root, 'virtual_graspness')
+    elif cfgs.depth_type == 'real':
+        save_path_root = os.path.join(dataset_root, 'graspness')
     num_views, num_angles, num_depths = 300, 12, 4
     fric_coef_thresh = 0.6
     point_grasp_num = num_views * num_angles * num_depths
     for ann_id in range(256):
         # get scene point cloud
         print('generating scene: {} ann: {}'.format(scene_id, ann_id))
-        depth = np.array(Image.open(os.path.join(dataset_root, 'scenes', 'scene_' + str(scene_id).zfill(4),
-                                                    camera_type, 'depth', str(ann_id).zfill(4) + '.png')))
+        if cfgs.depth_type == 'virtual':
+            depth = np.array(Image.open(os.path.join(virtual_dataset_root, 'scene_' + str(scene_id).zfill(4),
+                                                        camera_type, str(ann_id).zfill(4) + '_depth.png')))
+        elif cfgs.depth_type == 'real':
+            depth = np.array(Image.open(os.path.join(dataset_root, 'scenes', 'scene_' + str(scene_id).zfill(4),
+                                                        camera_type, 'depth', str(ann_id).zfill(4) + '.png')))
         seg = np.array(Image.open(os.path.join(dataset_root, 'scenes', 'scene_' + str(scene_id).zfill(4),
                                                 camera_type, 'label', str(ann_id).zfill(4) + '.png')))
         meta = scio.loadmat(os.path.join(dataset_root, 'scenes', 'scene_' + str(scene_id).zfill(4),
@@ -127,7 +141,8 @@ def generate_scene(scene_id, cfgs):
         save_path = os.path.join(save_path_root, 'scene_' + str(scene_id).zfill(4), camera_type)
         if not os.path.exists(save_path):
             os.makedirs(save_path)
-        np.save(os.path.join(save_path, str(ann_id).zfill(4) + '.npy'), cloud_masked_graspness)
+        cloud_masked_graspness_f16 = cloud_masked_graspness.astype(np.float16)
+        np.save(os.path.join(save_path, str(ann_id).zfill(4) + '.npy'), cloud_masked_graspness_f16)
 
 
 def parallel_generate(scene_ids, cfgs, proc = 2):
@@ -142,8 +157,10 @@ def parallel_generate(scene_ids, cfgs, proc = 2):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dataset_root', default='/media/gpuadmin/rcao/dataset/graspnet')
+    parser.add_argument('--dataset_root', default='/data/jhpan/dataset/graspnet')
     parser.add_argument('--camera_type', default='realsense', help='Camera split [realsense/kinect]')
+    parser.add_argument('--virtual_dataset_root', default='/data/jhpan/dataset/graspnet/virtual_scenes')
+    parser.add_argument('--depth_type', default='virtual', help='Depth type [virtual/real]')
     cfgs = parser.parse_args()
     
     parallel_generate(list(range(130)), cfgs=cfgs, proc = 12)

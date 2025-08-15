@@ -102,17 +102,22 @@ class GraspNetDataset(Dataset):
             for img_num in range(256):
                 self.colorpath.append(os.path.join(root, 'scenes', x, camera, 'rgb', str(img_num).zfill(4)+'.png'))
                 self.realdepthpath.append(os.path.join(root, 'scenes', x, camera, 'depth', str(img_num).zfill(4)+'.png'))
-                self.depthpath.append(os.path.join(root, 'virtual_scenes', x, camera, str(img_num).zfill(4)+'_depth.png'))
                 if self.depth_type == 'real':
+                    self.depthpath.append(os.path.join(root, 'scenes', x, camera, 'depth', str(img_num).zfill(4)+'.png'))
                     self.labelpath.append(os.path.join(root, 'scenes', x, camera, 'label', str(img_num).zfill(4)+'.png'))
                 elif self.depth_type == 'virtual':
+                    self.depthpath.append(os.path.join(root, 'virtual_scenes', x, camera, str(img_num).zfill(4)+'_depth.png'))
                     self.labelpath.append(os.path.join(root, 'virtual_scenes', x, camera, str(img_num).zfill(4)+'_label.png'))
                 self.metapath.append(os.path.join(root, 'scenes', x, camera, 'meta', str(img_num).zfill(4)+'.mat'))
                 # self.normalpath.append(os.path.join(root, 'normals', x, camera, str(img_num).zfill(4)+'.npy'))
                 self.scenename.append(x.strip())
                 self.frameid.append(img_num)
                 if self.load_label:
-                    self.graspnesspath.append(os.path.join(root, 'graspness', x, camera, str(img_num).zfill(4) + '.npy'))
+                    if self.depth_type == 'real':
+                        self.graspnesspath.append(os.path.join(root, 'graspness', x, camera, str(img_num).zfill(4) + '.npy'))
+                    elif self.depth_type == 'virtual':
+                        self.graspnesspath.append(os.path.join(root, 'virtual_graspness', x, camera, str(img_num).zfill(4) + '.npy'))
+                    
             if self.load_label:
                 collision_labels = np.load(os.path.join(self.big_file_root, 'collision_label', x.strip(), 'collision_labels.npz'))
                 self.collision_labels[x.strip()] = {}

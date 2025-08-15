@@ -1,6 +1,10 @@
 """ Training routine for GraspNet baseline model. """
 
 import os
+# os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
+# os.environ['TORCH_SHOW_CPP_STACKTRACES'] = '1'
+# os.environ['CUDA_VISIBLE_DEVICES'] = '7'
+
 import sys
 import numpy as np
 from datetime import datetime
@@ -46,24 +50,24 @@ from dataset.graspnet_dataset import GraspNetDataset, collate_fn, minkowski_coll
 # from dataset.graspnet_dataset import GraspNetMultiDataset, collate_fn, minkowski_collate_fn, load_grasp_labels
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--dataset_root', default='/media/gpuadmin/rcao/dataset/graspnet', help='Dataset root')
-parser.add_argument('--big_file_root', default=None, help='Big file root')
+parser.add_argument('--dataset_root', default='/data/jhpan/dataset/graspnet', help='Dataset root')
+parser.add_argument('--big_file_root', default='data', help='Big file root')
 parser.add_argument('--camera', default='realsense', help='Camera split [realsense/kinect]')
 parser.add_argument('--resume_checkpoint', default=None, help='Model checkpoint path [default: None]')
-parser.add_argument('--ckpt_root', default='/media/gpuadmin/rcao/result/ignet', help='Checkpoint dir to save model [default: log]')
-parser.add_argument('--method_id', default='ignet_v0.8.2.x', help='Method version')
+parser.add_argument('--ckpt_root', default='/data/roboarm/result/mmgnet/checkpoint', help='Checkpoint dir to save model [default: log]')
+parser.add_argument('--method_id', default='gsnet_virtual', help='Method version')
 parser.add_argument('--log_root', default='log', help='Log dir to save log [default: log]')
 parser.add_argument('--num_point', type=int, default=15000, help='Point Number [default: 20000]')
 parser.add_argument('--seed_feat_dim', default=512, type=int, help='Point wise feature dim')
 parser.add_argument('--num_view', type=int, default=300, help='View Number [default: 300]')
 parser.add_argument('--max_epoch', type=int, default=18, help='Epoch to run [default: 18]')
-parser.add_argument('--batch_size', type=int, default=8, help='Batch Size during training [default: 2]')
+parser.add_argument('--batch_size', type=int, default=12, help='Batch Size during training [default: 2]')
 parser.add_argument('--learning_rate', type=float, default=0.002, help='Initial learning rate [default: 0.001]')
 parser.add_argument('--weight_decay', type=float, default=0, help='Optimization L2 weight decay [default: 0]')
-parser.add_argument('--worker_num', type=int, default=18, help='Worker number for dataloader [default: 4]')
+parser.add_argument('--worker_num', type=int, default=12, help='Worker number for dataloader [default: 4]')
 parser.add_argument('--voxel_size', type=float, default=0.005, help='Voxel Size for sparse convolution')
 parser.add_argument('--pin_memory', action='store_true', help='Set pin_memory for faster training [default: False]')
-parser.add_argument('--virtual_depth', action='store_true', help='Use virtual depth for training [default: False]')
+parser.add_argument('--virtual_depth', action='store_true', default=True, help='Use virtual depth for training [default: False]')
 cfgs = parser.parse_args()
 
 # ------------------------------------------------------------------------- GLOBAL CONFIG BEG
@@ -95,7 +99,7 @@ torch.cuda.set_device(device)
 
 # Create Dataset and Dataloader
 valid_obj_idxs, grasp_labels = load_grasp_labels(cfgs.big_file_root if cfgs.big_file_root is not None else cfgs.dataset_root)
-TRAIN_DATASET = GraspNetDataset(cfgs.dataset_root, cfgs.big_file_root, valid_obj_idxs, grasp_labels, camera=cfgs.camera, split='train', num_points=cfgs.num_point, voxel_size=cfgs.voxel_size, remove_outlier=True, augment=True, depth_type='virtual' if cfgs.virtual_depth else 'real')
+TRAIN_DATASET = GraspNetDataset(cfgs.dataset_root, cfgs.big_file_root, valid_obj_idxs, grasp_labels, camera=cfgs.camera, split='train', num_points=cfgs.num_point, voxel_size=cfgs.voxel_size, remove_outlier=True, augment=False, load_label=True, depth_type='virtual' if cfgs.virtual_depth else 'real')
 TEST_DATASET = GraspNetDataset(cfgs.dataset_root, cfgs.big_file_root, valid_obj_idxs, grasp_labels, camera=cfgs.camera, split='test_seen', num_points=cfgs.num_point, voxel_size=cfgs.voxel_size, remove_outlier=True, augment=False, depth_type='virtual' if cfgs.virtual_depth else 'real')
 TRAIN_DATALOADER = DataLoader(TRAIN_DATASET, batch_size=cfgs.batch_size, shuffle=True,
     num_workers=cfgs.worker_num, worker_init_fn=my_worker_init_fn, collate_fn=minkowski_collate_fn, pin_memory=cfgs.pin_memory)
