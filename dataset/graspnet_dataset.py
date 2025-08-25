@@ -750,7 +750,7 @@ def uncertainty_guided_sampling_multimodal(uncertainty_map, sample_num, low_conf
     uncertainty_map = torch.tensor(uncertainty_map, dtype=torch.float32)
     
     # 归一化不确定性图（值在0和1之间）
-    uncertainty_map = uncertainty_map - uncertainty_map.min() / (uncertainty_map.max() - uncertainty_map.min())
+    uncertainty_map = (uncertainty_map - uncertainty_map.min()) / (uncertainty_map.max() - uncertainty_map.min())
     
     # 通过不确定性图生成概率分布
     prob_distribution = 1 - uncertainty_map.flatten()
