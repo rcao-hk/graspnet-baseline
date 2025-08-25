@@ -154,6 +154,7 @@ voxel_size = cfgs.voxel_size
 network_ver = cfgs.network_ver
 ckpt_root = cfgs.ckpt_root
 dump_dir = os.path.join('/media/2TB/result/mmgnet/experiment', cfgs.dump_dir)
+vis_root = '/media/2TB/result/mmgnet/vis/feature_vis'
 ckpt_epoch = cfgs.ckpt_epoch
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 torch.cuda.set_device(device)
@@ -284,14 +285,15 @@ def inference(scene_idx):
         inst_grasp_score_list = []
         inst_grasp_offset_list = []
         seg_idxs = np.unique(net_seg)
+        batch_idx = 0
         for obj_idx in seg_idxs:
             if obj_idx == 0:
                 continue
-
+            
             inst_mask = seg_masked == obj_idx
-            inst_mask_len = inst_mask.sum()
-            if inst_mask_len < minimum_num_pt:
-                continue
+            # inst_mask_len = inst_mask.sum()
+            # if inst_mask_len < minimum_num_pt:
+            #     continue
             inst_mask_org = seg_masked_org == obj_idx
 
             inst_cloud = cloud_masked[inst_mask]
@@ -306,6 +308,10 @@ def inference(scene_idx):
             
             rmin, rmax, cmin, cmax = get_bbox(inst_mask_org.astype(np.uint8))
             img = color[rmin:rmax, cmin:cmax, :]
+            img_vis = img.copy()
+            cv2.imwrite(os.path.join(vis_root, 'scene_{:04d}_anno_{:04d}_batch_{:d}_img.png'.format(scene_idx, anno_idx, batch_idx)), img_vis[:,:,::-1] * 255.0)
+            batch_idx += 1
+            
             inst_mask_org = inst_mask_org[rmin:rmax, cmin:cmax]
             inst_mask_choose = inst_mask_org.flatten().nonzero()[0]
             orig_width, orig_length, _ = img.shape
@@ -393,7 +399,8 @@ def inference(scene_idx):
         with torch.no_grad(): 
             end_points = net(batch_data_label)
             grasp_preds = pred_decode(end_points, normalize=False)
-            preds = np.stack(grasp_preds).reshape(-1, 17)
+            preds_raw = np.stack(grasp_preds)
+            preds = preds_raw.reshape(-1, 17)
             gg = GraspGroup(preds)
             
         # torch.cuda.empty_cache()
@@ -426,18 +433,51 @@ def inference(scene_idx):
         # save grasps
         save_dir = os.path.join(dump_dir, 'scene_%04d'%scene_idx, cfgs.camera)
         os.makedirs(save_dir, exist_ok=True)
-        save_path = os.path.join(save_dir, '%04d'%anno_idx+'.npy')
-        gg.save_npy(save_path)
+        # save_path = os.path.join(save_dir, '%04d'%anno_idx+'.npy')
 
-        middle_feats = end_points['seed_features']
-        middle_feats = middle_feats.detach().cpu().numpy()
-        np.save(os.path.join(save_dir, '%04d_middle_feats.npy'%anno_idx), middle_feats)
+        # np.save(os.path.join(save_dir, '%04d_raw.npy'%anno_idx), preds_raw)
+        # gg.save_npy(save_path)
         
-        graspness = end_points['batch_grasp_rot_graspness']
-        graspness = graspness.detach().cpu().numpy()
-        np.save(os.path.join(save_dir, '%04d_graspness.npy'%anno_idx), graspness)
+        for batch_idx in range(len(inst_cloud_list)):
+            inst_cloud = inst_cloud_list[batch_idx]
+            inst_color = inst_color_list[batch_idx]
 
-        print('Saving {}, {}'.format(scene_idx, anno_idx))    
+            preds_inst = preds_raw[batch_idx]
+            inst_gg = GraspGroup(preds_inst.reshape(-1, 17))
+            
+            inst_pc_vis = o3d.geometry.PointCloud()
+            inst_pc_vis.points = o3d.utility.Vector3dVector(inst_cloud.astype(np.float32))
+            inst_pc_vis.colors = o3d.utility.Vector3dVector(inst_color.astype(np.float32))
+            inst_vis = inst_pc_vis.voxel_down_sample(voxel_size=0.001)
+
+            mfcdetector = ModelFreeCollisionDetectorTorch(inst_cloud, voxel_size=0.01)
+            collision_mask = mfcdetector.detect(inst_gg, approach_dist=0.05, collision_thresh=0.01)
+            collision_mask = collision_mask.detach().cpu().numpy()
+            inst_gg = inst_gg[~collision_mask]
+
+            inst_gg = inst_gg.sort_by_score()
+            inst_gg = inst_gg.nms()
+            inst_gg = inst_gg[:5]
+            inst_gg = inst_gg.to_open3d_geometry_list()
+            
+            for inst_g in inst_gg:
+                inst_vis += inst_g.sample_points_uniformly(number_of_points=1000)
+            
+            if network_ver.startswith('v0.8'):
+                o3d.io.write_point_cloud(os.path.join(vis_root, 'scene_{:04d}_anno_{:04d}_batch_{}_rgb_grasps.ply'.format(scene_idx, anno_idx, batch_idx)), inst_vis)
+            elif network_ver.startswith('v0.6'):
+                o3d.io.write_point_cloud(os.path.join(vis_root, 'scene_{:04d}_anno_{:04d}_batch_{}_geo_grasps.ply'.format(scene_idx, anno_idx, batch_idx)), inst_vis)
+                
+        # middle_feats = end_points['seed_features']
+        # middle_feats = middle_feats.detach().cpu().numpy()
+        # np.save(os.path.join(save_dir, '%04d_middle_feats.npy'%anno_idx), middle_feats)
+        
+        # graspness = end_points['batch_grasp_rot_graspness']
+        # graspness = graspness.detach().cpu().numpy()
+        # graspness_f16 = graspness.astype(np.float16)
+        # np.savez_compressed(os.path.join(save_dir, '%04d_graspness.npz'%anno_idx), graspness=graspness_f16)
+        # np.save(os.path.join(save_dir, '%04d_graspness.npy'%anno_idx), graspness)
+        print('Saving {}, {}'.format(scene_idx, anno_idx)) 
     
     # print(f"Mean Inference Time：{np.mean(elapsed_time_list[1:]):.3f} ms")
 

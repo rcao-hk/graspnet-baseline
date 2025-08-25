@@ -55,9 +55,9 @@ class GraspNetDataset(Dataset):
         assert(num_points<=50000)
         self.root = root
         if big_file_root is None:
-            self.big_file_root = big_file_root
-        else:
             self.big_file_root = root
+        else:
+            self.big_file_root = big_file_root
         self.split = split
         self.num_points = num_points
         self.remove_outlier = remove_outlier
@@ -721,6 +721,171 @@ class GraspNetMultiDataset(Dataset):
         ret_dict['grasp_labels_list'] = grasp_scores_list
         # ret_dict['grasp_tolerance_list'] = grasp_tolerance_list
 
+        return ret_dict
+
+
+def random_sampling(points_len, sample_num):
+    if points_len >= sample_num:
+        idxs = np.random.choice(points_len, sample_num, replace=False)
+    else:
+        idxs1 = np.arange(points_len)
+        idxs2 = np.random.choice(points_len, sample_num - points_len, replace=True)
+        idxs = np.concatenate([idxs1, idxs2], axis=0)
+    return idxs
+
+
+def uncertainty_guided_sampling_multimodal(uncertainty_map, sample_num, low_conf_threshold=0.5):
+    """
+    使用torch.multinomial进行不确定性引导的采样。
+    
+    参数:
+    uncertainty_map (np.ndarray): 图像尺寸的不确定性图，形状为 (H, W)。
+    sample_num (int): 需要采样的深度点的数量。
+
+    返回:
+    sampled_indices (torch.Tensor): 采样的像素索引。
+    """
+    
+    # 将不确定性图转换为Tensor并归一化
+    uncertainty_map = torch.tensor(uncertainty_map, dtype=torch.float32)
+    
+    # 归一化不确定性图（值在0和1之间）
+    uncertainty_map = uncertainty_map - uncertainty_map.min() / (uncertainty_map.max() - uncertainty_map.min())
+    
+    # 通过不确定性图生成概率分布
+    prob_distribution = 1 - uncertainty_map.flatten()
+    prob_distribution[prob_distribution < low_conf_threshold] = 0.0  # 设置低置信度阈值
+    
+    # 采样的数量为sample_num，从概率分布中进行无放回采样
+    sampled_indices = torch.multinomial(prob_distribution, sample_num, replacement=False)
+
+    return sampled_indices
+
+
+class GraspNetTransDataset(Dataset):
+    def __init__(self, root, sim_root, camera='kinect', split='train', num_points=20000, remove_outlier=False, voxel_size=0.005, augment=False, depth_type='real', depth_result_root=None, conf_threshold=0.0):
+        assert(num_points<=50000)
+        self.root = root
+        self.sim_root = sim_root
+        self.split = split
+        self.num_points = num_points
+        self.remove_outlier = remove_outlier
+        self.camera = camera
+        self.augment = augment
+        self.collision_labels = {}
+        self.voxel_size = voxel_size
+
+        self.depth_type = depth_type
+        self.depth_result_root = depth_result_root
+        self.conf_threshold = conf_threshold
+        assert self.depth_type in ['raw', 'gt', 'restored', 'restored_conf'], "Invalid depth type. Choose from ['raw', 'gt', 'restored', 'restored_conf']."
+        
+        if split == 'train':
+            self.sceneIds = list( range(100) )
+        elif split == 'test':
+            self.sceneIds = list( range(100,190) )
+        elif split == 'test_seen':
+            self.sceneIds = list( range(100,130) )
+        elif split == 'test_similar':
+            self.sceneIds = list( range(130,160) )
+        elif split == 'test_novel':
+            self.sceneIds = list( range(160,190) )
+        self.sceneIds = ['scene_{}'.format(str(x).zfill(4)) for x in self.sceneIds]
+        
+        self.colorpath = []
+        self.depthpath = []
+        self.depthconfpath = []
+        self.labelpath = []
+        self.metapath = []
+        self.scenename = []
+        self.frameid = []
+        self.graspnesspath = []
+        # self.normalpath = []
+        for x in tqdm(self.sceneIds, desc = 'Loading data path and collision labels...'):
+            for img_num in range(256):
+                self.colorpath.append(os.path.join(root, 'scenes', x, camera, 'rgb', str(img_num).zfill(4)+'.png'))
+                self.labelpath.append(os.path.join(root, 'scenes', x, camera, 'label', str(img_num).zfill(4)+'.png'))
+                scene_idx = int(x.split('_')[1])
+                if self.depth_type == 'raw':
+                    self.depthpath.append(os.path.join(self.sim_root, '{:05d}/{:06d}_depth.png'.format(scene_idx, img_num)))
+                elif self.depth_type == 'gt':
+                    self.depthpath.append(os.path.join(self.root, 'virtual_scenes', x, camera, str(img_num).zfill(4)+'_depth.png'))
+                elif self.depth_type == 'restored':
+                    self.depthpath.append(os.path.join(self.depth_result_root, '{:05d}/{:06d}_depth.png'.format(scene_idx, img_num)))
+                elif self.depth_type == 'restored_conf':
+                    self.depthpath.append(os.path.join(self.depth_result_root, '{:05d}/{:06d}_depth.png'.format(scene_idx, img_num)))
+                    self.depthconfpath.append(os.path.join(self.depth_result_root, '{:05d}/{:06d}_conf.npz'.format(scene_idx, img_num)))
+                self.metapath.append(os.path.join(root, 'scenes', x, camera, 'meta', str(img_num).zfill(4)+'.mat'))
+                # self.normalpath.append(os.path.join(root, 'normals', x, camera, str(img_num).zfill(4)+'.npy'))
+                self.scenename.append(x.strip())
+                self.frameid.append(img_num)
+
+    def scene_list(self):
+        return self.scenename
+
+    def __len__(self):
+        return len(self.depthpath)
+
+
+    def __getitem__(self, index):
+        return self.get_data(index)
+
+    def get_data(self, index, return_raw_cloud=False):
+        color = np.array(Image.open(self.colorpath[index]), dtype=np.float32) / 255.0
+        depth = np.array(Image.open(self.depthpath[index]))
+        seg = np.array(Image.open(self.labelpath[index]))
+        meta = scio.loadmat(self.metapath[index])
+        # normal = np.load(self.normalpath[index])
+        scene = self.scenename[index]
+        try:
+            obj_idxs = meta['cls_indexes'].flatten()
+            intrinsic = meta['intrinsic_matrix']
+            factor_depth = meta['factor_depth']
+        except Exception as e:
+            print(repr(e))
+            print(scene)
+        camera = CameraInfo(1280.0, 720.0, intrinsic[0][0], intrinsic[1][1], intrinsic[0][2], intrinsic[1][2], factor_depth)
+            
+        # generate cloud
+        cloud = create_point_cloud_from_depth_image(depth, camera, organized=True)
+
+        # get valid points
+        depth_mask = (depth > 0)
+        if self.remove_outlier:
+            camera_poses = np.load(os.path.join(self.root, 'scenes', scene, self.camera, 'camera_poses.npy'))
+            align_mat = np.load(os.path.join(self.root, 'scenes', scene, self.camera, 'cam0_wrt_table.npy'))
+            trans = np.dot(align_mat, camera_poses[self.frameid[index]])
+            workspace_mask = get_workspace_mask(cloud, seg, trans=trans, organized=True, outlier=0.02)
+            mask = (depth_mask & workspace_mask)
+        else:
+            mask = depth_mask
+            
+        cloud_masked = cloud[mask]
+        color_masked = color[mask]
+        seg_masked = seg[mask]
+        
+        if return_raw_cloud:
+            return cloud_masked, color_masked
+
+
+        if self.depth_type == 'restored_conf':
+            conf_map = np.load(self.depthconfpath[index])['conf']
+            conf = conf_map[mask].astype(np.float32)
+            idxs = uncertainty_guided_sampling_multimodal(conf, self.num_points, low_conf_threshold=self.conf_threshold)
+            # scene_sample_idx = uncertainty_guided_sampling_topk(conf, cfgs.scene_points_num)
+        else:
+            idxs = random_sampling(len(cloud_masked), self.num_points)
+
+        cloud_sampled = cloud_masked[idxs]
+        color_sampled = color_masked[idxs]
+
+        ret_dict = {}
+        ret_dict['point_clouds'] = cloud_sampled.astype(np.float32)
+        ret_dict['cloud_colors'] = color_sampled.astype(np.float32)
+        # ret_dict['cloud_normals'] = normal_sampled.astype(np.float32)
+        
+        ret_dict['coors'] = cloud_sampled.astype(np.float32) / self.voxel_size
+        ret_dict['feats'] = np.ones_like(cloud_sampled).astype(np.float32)
         return ret_dict
 
 

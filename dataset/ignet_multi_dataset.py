@@ -535,9 +535,9 @@ class GraspNetDataset(Dataset):
                  remove_outlier=False, remove_invisible=True, multi_modal_pose_augment=False, point_augment=False, denoise=False, load_label=True, real_data=True, syn_data=False, visib_threshold=0.0, voxel_size=0.005, match_point_num=350):
         self.root = root
         if big_file_root is None:
-            self.big_file_root = big_file_root
-        else:
             self.big_file_root = root
+        else:
+            self.big_file_root = big_file_root
         self.split = split
         self.num_points = num_points
         self.remove_outlier = remove_outlier

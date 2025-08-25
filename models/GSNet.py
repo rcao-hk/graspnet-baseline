@@ -355,7 +355,25 @@ class GraspNet(nn.Module):
         objectness_pred = torch.argmax(objectness_score, 1)
         objectness_mask = (objectness_pred == 1)
         graspness_mask = graspness_score > GRASPNESS_THRESHOLD
-        graspable_mask = objectness_mask & graspness_mask
+        graspable_mask = torch.zeros_like(graspness_mask, dtype=torch.bool)
+        
+        for i in range(B):
+            if graspness_mask[i].sum() < self.M_points:
+                # 选择 graspness_score 最高的 M_points 个点
+                topk = torch.topk(graspness_score[i], self.M_points)
+                new_mask = torch.zeros_like(graspness_mask[i], dtype=torch.bool)
+                new_mask[topk.indices] = True
+                graspness_mask[i] = new_mask
+            if objectness_mask[i].sum() < self.M_points:
+                # 选择 objectness_score 最高的 M_points 个点
+                topk = torch.topk(objectness_score[i, 1], self.M_points)
+                new_mask = torch.zeros_like(objectness_mask[i], dtype=torch.bool)
+                new_mask[topk.indices] = True
+                objectness_mask[i] = new_mask
+            
+            graspable_mask[i] = objectness_mask[i] & graspness_mask[i]
+            if graspable_mask[i].sum() < self.M_points:
+                graspable_mask[i] = graspness_mask[i]
 
         seed_features_graspable = []
         seed_xyz_graspable = []

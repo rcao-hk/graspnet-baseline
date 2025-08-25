@@ -1,12 +1,12 @@
 import os
-os.environ['CUDA_VISIBLE_DEVICES'] = '1'
+# os.environ['CUDA_VISIBLE_DEVICES'] = '1'
 os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
 
 import numpy as np
 
-np.int = np.int32
-np.float = np.float64
-np.bool = np.bool_
+# np.int = np.int32
+# np.float = np.float64
+# np.bool = np.bool_
 
 from PIL import Image
 import scipy.io as scio

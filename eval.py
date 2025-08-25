@@ -3,11 +3,6 @@
 import os
 import sys
 import numpy as np
-# compatible with numpy >= 1.24.4
-np.int = np.int32
-np.float = np.float64
-np.bool = np.bool_
-
 import argparse
 import time
 
@@ -18,7 +13,8 @@ parser.add_argument('--dataset_root', default='/media/gpuadmin/rcao/dataset/gras
 parser.add_argument('--dump_dir', default='ignet_v0.3.5.1', help='Dump dir to save outputs')
 parser.add_argument('--camera', default='realsense', help='Camera split [realsense/kinect]')
 parser.add_argument('--split', default='test_seen', help='Test set split [test_seen/test_similar/test_novel]')
-parser.add_argument('--num_workers', type=int, default=20, help='Number of workers used in evaluation [default: 30]')
+parser.add_argument('--anno_sample_ratio', type=float, default=1.0, help='Image sample ratio for evaluation')
+parser.add_argument('--num_workers', type=int, default=10, help='Number of workers used in evaluation [default: 30]')
 cfgs = parser.parse_args()
 print(cfgs)
 
@@ -26,11 +22,11 @@ print(cfgs)
 def evaluate():
     ge = GraspNetEval(root=cfgs.dataset_root, camera=cfgs.camera, split=cfgs.split)
     if cfgs.split == 'test_seen':
-        res, ap = ge.eval_seen(os.path.join(cfgs.dump_dir), proc=cfgs.num_workers)
+        res, ap = ge.eval_seen(os.path.join(cfgs.dump_dir), anno_sample_ratio=cfgs.anno_sample_ratio, proc=cfgs.num_workers)
     elif cfgs.split == 'test_similar':
-        res, ap = ge.eval_similar(os.path.join(cfgs.dump_dir), proc=cfgs.num_workers)
+        res, ap = ge.eval_similar(os.path.join(cfgs.dump_dir), anno_sample_ratio=cfgs.anno_sample_ratio, proc=cfgs.num_workers)
     else:
-        res, ap = ge.eval_novel(os.path.join(cfgs.dump_dir), proc=cfgs.num_workers)
+        res, ap = ge.eval_novel(os.path.join(cfgs.dump_dir), anno_sample_ratio=cfgs.anno_sample_ratio, proc=cfgs.num_workers)
     save_dir = os.path.join(cfgs.dump_dir, 'ap_{}_{}.npy'.format(cfgs.split, cfgs.camera))
     np.save(save_dir, res)
 

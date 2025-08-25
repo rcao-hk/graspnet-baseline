@@ -2,10 +2,25 @@ import numpy as np
 from sklearn.manifold import TSNE
 import matplotlib.pyplot as plt
 import os
+import copy
 from sklearn.preprocessing import StandardScaler
+from tqdm import tqdm
+import scipy.io as scio
+import open3d as o3d
+from utils.collision_detector import ModelFreeCollisionDetector, ModelFreeCollisionDetectorTorch
+from utils.data_utils import CameraInfo, create_point_cloud_from_depth_image, get_workspace_mask
+from PIL import Image
+from graspnetAPI import GraspGroup
+
+import argparse
+parser = argparse.ArgumentParser()
+parser.add_argument('--split', default='test_seen', help='Dataset split [default: test_seen]')
+cfgs = parser.parse_args()
 
 data_root = '/media/2TB/result/mmgnet/experiment'
-vis_root = 'vis'
+dataset_root = '/media/2TB/dataset/graspnet'
+
+vis_root = '/media/2TB/result/mmgnet/vis'
 os.makedirs(os.path.join(vis_root, 'feature_vis'), exist_ok=True)
 
 geo_feat_root = os.path.join(data_root, 'ignet_v0.6.2')
@@ -15,23 +30,76 @@ camera_type = 'realsense'
 perplexity = 50
 n_iter = 1000
 random_seed = 0
-
+width = 1280
+height = 720
 sample_ratio = 0.01
-for scene_idx in range(100, 130):
+if cfgs.split == 'test_seen':
+    scene_list = list(range(100, 130))  # 100-129
+elif cfgs.split == 'test_similar':
+    scene_list = list(range(130, 160))
+elif cfgs.split == 'test_novel':
+    scene_list = list(range(160, 190))
+
+for scene_idx in tqdm(scene_list):
     for anno_idx in range(0, 255, int(1/sample_ratio)):
         geo_feat_path = os.path.join(geo_feat_root, 'scene_{:04d}'.format(scene_idx), camera_type, '{:04d}_middle_feats.npy'.format(anno_idx))
         geo_feat = np.load(geo_feat_path, allow_pickle=True)
 
-        geo_graspness_path = os.path.join(geo_feat_root, 'scene_{:04d}'.format(scene_idx), camera_type, '{:04d}_graspness.npy'.format(anno_idx))
-        geo_graspness = np.load(geo_graspness_path, allow_pickle=True)
-
         rgb_feat_path = os.path.join(rgb_feat_root, 'scene_{:04d}'.format(scene_idx), camera_type, '{:04d}_middle_feats.npy'.format(anno_idx))
         rgb_feat = np.load(rgb_feat_path, allow_pickle=True)
 
-        rgb_graspness_path = os.path.join(rgb_feat_root, 'scene_{:04d}'.format(scene_idx), camera_type, '{:04d}_graspness.npy'.format(anno_idx))
-        rgb_graspness = np.load(rgb_graspness_path, allow_pickle=True)
+        geo_graspness_path = os.path.join(geo_feat_root, 'scene_{:04d}'.format(scene_idx), camera_type, '{:04d}_graspness.npy.npz'.format(anno_idx))
+        geo_graspness = np.load(geo_graspness_path)['graspness'].astype(np.float32)
+
+        rgb_graspness_path = os.path.join(rgb_feat_root, 'scene_{:04d}'.format(scene_idx), camera_type, '{:04d}_graspness.npy.npz'.format(anno_idx))
+        rgb_graspness = np.load(rgb_graspness_path)['graspness'].astype(np.float32)
 
         B, C, N = rgb_feat.shape
+        
+        rgb_path = os.path.join(dataset_root,
+                                'scenes/scene_{:04d}/{}/rgb/{:04d}.png'.format(scene_idx, camera_type, anno_idx))
+        depth_path = os.path.join(dataset_root,
+                                  'scenes/scene_{:04d}/{}/depth/{:04d}.png'.format(scene_idx, camera_type, anno_idx))
+
+        meta_path = os.path.join(dataset_root,
+                                 'scenes/scene_{:04d}/{}/meta/{:04d}.mat'.format(scene_idx, camera_type, anno_idx))
+        
+        mask_path = os.path.join(dataset_root,
+                                 'scenes/scene_{:04d}/{}/label/{:04d}.png'.format(scene_idx, camera_type, anno_idx))
+
+        color = np.array(Image.open(rgb_path), dtype=np.float32) / 255.0
+        depth = np.array(Image.open(depth_path))
+        seg = np.array(Image.open(mask_path))
+        
+        meta = scio.loadmat(meta_path)
+        obj_idxs = meta['cls_indexes'].flatten().astype(np.int32)
+
+        intrinsics = meta['intrinsic_matrix']
+        factor_depth = meta['factor_depth']
+        camera_info = CameraInfo(width, height, intrinsics[0][0], intrinsics[1][1], intrinsics[0][2], intrinsics[1][2],
+                                 factor_depth)
+        cloud = create_point_cloud_from_depth_image(depth, camera_info, organized=True)
+        depth_mask = (depth > 0)
+        camera_poses = np.load(
+            os.path.join(dataset_root, 'scenes/scene_{:04d}/{}/camera_poses.npy'.format(scene_idx, camera_type)))
+        align_mat = np.load(
+            os.path.join(dataset_root, 'scenes/scene_{:04d}/{}/cam0_wrt_table.npy'.format(scene_idx, camera_type)))
+        trans = np.dot(align_mat, camera_poses[anno_idx])
+        workspace_mask = get_workspace_mask(cloud, seg, trans=trans, organized=True, outlier=0.02)
+        mask = (depth_mask & workspace_mask)
+
+        cloud_masked = cloud[mask]
+        color_masked = color[mask]
+        seg_masked = seg[mask]
+        
+        # scene = o3d.geometry.PointCloud()
+        # scene.points = o3d.utility.Vector3dVector(cloud_masked)
+        # scene.colors = o3d.utility.Vector3dVector(color_masked)
+        # downsampled_scene = scene.voxel_down_sample(voxel_size=0.005)
+        
+        # gg_geo_numpy = np.load(os.path.join(geo_feat_root, 'scene_{:04d}'.format(scene_idx), camera_type, '{:04d}_raw.npy'.format(anno_idx)), allow_pickle=True)
+
+        # gg_rgb_numpy = np.load(os.path.join(rgb_feat_root, 'scene_{:04d}'.format(scene_idx), camera_type, '{:04d}_raw.npy'.format(anno_idx)), allow_pickle=True)
 
         for batch_idx in range(B):
             rgb_inst_feat = rgb_feat[batch_idx]
@@ -40,10 +108,51 @@ for scene_idx in range(100, 130):
             rgb_inst_graspness = np.mean(rgb_graspness[batch_idx], axis=1)
             geo_inst_graspness = np.mean(geo_graspness[batch_idx], axis=1)
 
-
             rgb_inst_feat = rgb_inst_feat.T  # [N, C]
             geo_inst_feat = geo_inst_feat.T  # [N, C]
 
+            # rgb_inst_gg = gg_rgb_numpy[batch_idx]
+            # rgb_inst_gg = GraspGroup(rgb_inst_gg)
+            # geo_inst_gg = gg_geo_numpy[batch_idx]
+            # geo_inst_gg = GraspGroup(geo_inst_gg)
+
+            # inst_mask = seg_masked == obj_idxs[batch_idx]
+
+            # inst_pc_vis = o3d.geometry.PointCloud()
+            # inst_pc_vis.points = o3d.utility.Vector3dVector(cloud_masked[inst_mask].astype(np.float32))
+            # inst_pc_vis.colors = o3d.utility.Vector3dVector(color_masked[inst_mask].astype(np.float32))
+            # geo_inst_vis = inst_pc_vis.voxel_down_sample(voxel_size=0.001)
+            # rgb_inst_vis = copy.deepcopy(geo_inst_vis)
+            
+            # mfcdetector = ModelFreeCollisionDetectorTorch(cloud_masked[inst_mask], voxel_size=0.01)
+            # collision_mask = mfcdetector.detect(rgb_inst_gg, approach_dist=0.05, collision_thresh=0.01)
+            # collision_mask = collision_mask.detach().cpu().numpy()
+            # rgb_inst_gg = rgb_inst_gg[~collision_mask]
+
+            # rgb_inst_gg = rgb_inst_gg.sort_by_score()
+            # rgb_inst_gg = rgb_inst_gg.nms()
+            # rgb_inst_gg = rgb_inst_gg[:5]
+            # rgb_inst_gg_vis = rgb_inst_gg.to_open3d_geometry_list()
+            
+            # for rgb_inst_g in rgb_inst_gg_vis:
+            #     rgb_inst_vis += rgb_inst_g.sample_points_uniformly(number_of_points=1000)
+            
+            # collision_mask = mfcdetector.detect(geo_inst_gg, approach_dist=0.05, collision_thresh=0.01)
+            # collision_mask = collision_mask.detach().cpu().numpy()
+            # geo_inst_gg = geo_inst_gg[~collision_mask]
+            
+            # geo_inst_gg = geo_inst_gg.sort_by_score()
+            # geo_inst_gg = geo_inst_gg.nms()
+            # geo_inst_gg = geo_inst_gg[:5]
+            # geo_inst_gg_vis = geo_inst_gg.to_open3d_geometry_list()
+
+            # for geo_inst_g in geo_inst_gg_vis:
+            #     geo_inst_vis += geo_inst_g.sample_points_uniformly(number_of_points=1000)
+            
+            # o3d.io.write_point_cloud(os.path.join(vis_root, 'feature_vis', 'scene_{:04d}_anno_{:04d}_batch_{}_geo_grasps.ply'.format(scene_idx, anno_idx, batch_idx)), geo_inst_vis)
+            
+            # o3d.io.write_point_cloud(os.path.join(vis_root, 'feature_vis', 'scene_{:04d}_anno_{:04d}_batch_{}_rgb_grasps.ply'.format(scene_idx, anno_idx, batch_idx)), rgb_inst_vis)
+            
             # features = np.concatenate([rgb_inst_feat, geo_inst_feat], axis=0)
             # tsne = TSNE(n_components=2, perplexity=50, n_iter=1000, random_state=42)
             # tsne_emb = tsne.fit_transform(features)  # [N, 2]

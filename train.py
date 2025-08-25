@@ -1,8 +1,8 @@
 """ Training routine for GraspNet baseline model. """
 
 import os
-# os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
-# os.environ['TORCH_SHOW_CPP_STACKTRACES'] = '1'
+os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
+os.environ['TORCH_SHOW_CPP_STACKTRACES'] = '1'
 # os.environ['CUDA_VISIBLE_DEVICES'] = '7'
 
 import sys
@@ -51,7 +51,7 @@ from dataset.graspnet_dataset import GraspNetDataset, collate_fn, minkowski_coll
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--dataset_root', default='/data/jhpan/dataset/graspnet', help='Dataset root')
-parser.add_argument('--big_file_root', default='data', help='Big file root')
+parser.add_argument('--big_file_root', default=None, help='Big file root')
 parser.add_argument('--camera', default='realsense', help='Camera split [realsense/kinect]')
 parser.add_argument('--resume_checkpoint', default=None, help='Model checkpoint path [default: None]')
 parser.add_argument('--ckpt_root', default='/data/roboarm/result/mmgnet/checkpoint', help='Checkpoint dir to save model [default: log]')
