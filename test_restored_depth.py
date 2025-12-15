@@ -137,7 +137,14 @@ def inference():
             gg = GraspGroup(preds)
             # collision detection
             if cfgs.collision_thresh > 0:
-                cloud, _ = test_dataset.get_data(data_idx, return_raw_cloud=True)
+                cloud, color = test_dataset.get_data(data_idx, return_raw_cloud=True)
+                
+                if (batch_idx + 1) % batch_interval == 0:
+                    pcd_vis = o3d.geometry.PointCloud()
+                    pcd_vis.points = o3d.utility.Vector3dVector(cloud.reshape(-1, 3))
+                    pcd_vis.colors = o3d.utility.Vector3dVector(color.reshape(-1, 3))
+                    o3d.io.write_point_cloud(os.path.join('vis', '{}_{}.ply'.format(cfgs.depth_type, data_idx)), pcd_vis)
+                
                 # mfcdetector = ModelFreeCollisionDetector(cloud, voxel_size=cfgs.voxel_size_cd)
                 mfcdetector = ModelFreeCollisionDetectorTorch(cloud.reshape(-1, 3), voxel_size=cfgs.voxel_size_cd)
                 collision_mask = mfcdetector.detect(gg, approach_dist=0.05, collision_thresh=cfgs.collision_thresh)
