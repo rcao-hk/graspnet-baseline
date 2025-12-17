@@ -54,7 +54,7 @@ parser.add_argument('--dataset_root', default='/data/jhpan/dataset/graspnet', he
 parser.add_argument('--big_file_root', default=None, help='Big file root')
 parser.add_argument('--camera', default='realsense', help='Camera split [realsense/kinect]')
 parser.add_argument('--resume_checkpoint', default=None, help='Model checkpoint path [default: None]')
-parser.add_argument('--ckpt_root', default='/data/roboarm/result/mmgnet/checkpoint', help='Checkpoint dir to save model [default: log]')
+parser.add_argument('--ckpt_root', default='log', help='Checkpoint dir to save model [default: log]')
 parser.add_argument('--method_id', default='gsnet_virtual', help='Method version')
 parser.add_argument('--log_root', default='log', help='Log dir to save log [default: log]')
 parser.add_argument('--num_point', type=int, default=15000, help='Point Number [default: 20000]')

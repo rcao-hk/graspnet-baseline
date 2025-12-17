@@ -803,11 +803,13 @@ class GraspNetTransDataset(Dataset):
         # self.normalpath = []
         for x in tqdm(self.sceneIds, desc = 'Loading data path and collision labels...'):
             for img_num in range(256):
-                self.colorpath.append(os.path.join(root, 'scenes', x, camera, 'rgb', str(img_num).zfill(4)+'.png'))
-                self.labelpath.append(os.path.join(root, 'scenes', x, camera, 'label', str(img_num).zfill(4)+'.png'))
                 scene_idx = int(x.split('_')[1])
+                # self.colorpath.append(os.path.join(root, 'scenes', x, camera, 'rgb', str(img_num).zfill(4)+'.png'))
+                self.colorpath.append(os.path.join(self.sim_root, '{:05d}/{:04d}_color.png'.format(scene_idx, img_num)))
+                self.labelpath.append(os.path.join(root, 'scenes', x, camera, 'label', str(img_num).zfill(4)+'.png'))
+
                 if self.depth_type == 'raw':
-                    self.depthpath.append(os.path.join(self.sim_root, '{:05d}/{:06d}_depth.png'.format(scene_idx, img_num)))
+                    self.depthpath.append(os.path.join(self.sim_root, '{:05d}/{:04d}_depth.png'.format(scene_idx, img_num)))
                 elif self.depth_type == 'gt':
                     self.depthpath.append(os.path.join(self.root, 'virtual_scenes', x, camera, str(img_num).zfill(4)+'_depth.png'))
                 elif self.depth_type == 'restored':
