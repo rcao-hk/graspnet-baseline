@@ -1132,24 +1132,42 @@ class GraspNetMultiDataset(Dataset):
     def __getitem__(self, index):
         return self.get_data_label(index) if self.load_label else self.get_data(index)
 
-    def augment_data(self, point_clouds, object_poses_list):
+    def scene_pose_augment(self, images, object_poses, intrinsic, obj_idxs):
+        (color, depth, mask) = images
+        aug_T = np.eye(4, dtype=np.float32)
+        # Flipping along the YZ plane
         if np.random.random() > 0.5:
-            flip_mat = np.array([[-1, 0, 0],
-                                 [ 0, 1, 0],
-                                 [ 0, 0, 1]], dtype=np.float32)
-            point_clouds = transform_point_cloud(point_clouds, flip_mat, '3x3')
-            for i in range(len(object_poses_list)):
-                object_poses_list[i] = (flip_mat @ object_poses_list[i]).astype(np.float32)
+            flip_mat = np.eye(4)
+            flip_mat[:3, :3] = np.array([[-1, 0, 0],
+                                         [ 0, 1, 0],
+                                         [ 0, 0, 1]])
+            aug_T = flip_mat @ aug_T
+            # point_clouds = transform_point_cloud(point_clouds, flip_mat, '3x3')
+            color, depth, mask = flip_image(color, depth, mask, 1, intrinsic)
+            for i in range(len(object_poses)):
+                object_pose = np.eye(4)
+                object_pose[:3, :] = object_poses[i]
+                object_poses[i] = (flip_mat @ object_pose)[:3, :].astype(np.float32)
 
-        rot_angle = (np.random.random() * np.pi / 3) - np.pi / 6
+        # Rotation along up-axis/Z-axis
+        # rot_angle = (np.random.random()*np.pi/3) - np.pi/6 # -30 ~ +30 degree
+        rot_angle = (np.random.random()*np.pi/2) - np.pi/4  # -45 ~ +45 degree
         c, s = np.cos(rot_angle), np.sin(rot_angle)
-        rot_mat = np.array([[1, 0, 0],
-                            [0, c, -s],
-                            [0, s,  c]], dtype=np.float32)
-        point_clouds = transform_point_cloud(point_clouds, rot_mat, '3x3')
-        for i in range(len(object_poses_list)):
-            object_poses_list[i] = (rot_mat @ object_poses_list[i]).astype(np.float32)
-        return point_clouds, object_poses_list
+        rot_mat = np.eye(4, dtype=np.float32)
+        rot_mat[:3, :3] = np.array([[c, -s, 0],
+                                    [s, c, 0],
+                                    [0, 0, 1]])
+
+        color, depth, mask = rotate_image(color, depth, mask, -rot_angle, (intrinsic[0][2], intrinsic[1][2]))
+        # object_occ_rate = [object_pixel_num_rot[i] / object_pixel_num[i] for i in range(len(object_pixel_num))]
+        # point_clouds = transform_point_cloud(point_clouds, rot_mat, '3x3')
+        aug_T = rot_mat @ aug_T
+        for i in range(len(object_poses)):
+            object_pose = np.eye(4)
+            object_pose[:3, :] = object_poses[i]
+            object_poses[i] = (rot_mat @ object_pose)[:3, :].astype(np.float32)
+
+        return (color, depth, mask), object_poses, aug_T
 
     def get_resized_idxs_from_flat(self, flat_idxs, orig_hw):
         """flat_idxs: flatten indices in original (H*W). -> flatten indices in resized (448*448)."""
@@ -1161,12 +1179,17 @@ class GraspNetMultiDataset(Dataset):
         new_x = np.clip((xs * scale_x).astype(np.int64), 0, self.resize_shape[1] - 1)
         return (new_y * self.resize_shape[1] + new_x).astype(np.int64)
 
-    def _build_mask(self, depth, seg, cloud, scene, frameid):
+    def _build_mask(self, depth, seg, cloud, scene, frameid, aug_T_cam=None):
         depth_mask = (depth > 0)
         if self.remove_outlier:
             camera_poses = np.load(os.path.join(self.root, 'scenes', scene, self.camera, 'camera_poses.npy'))
             align_mat = np.load(os.path.join(self.root, 'scenes', scene, self.camera, 'cam0_wrt_table.npy'))
-            trans = np.dot(align_mat, camera_poses[frameid])
+            trans = np.dot(align_mat, camera_poses[frameid])  # cam -> table
+
+            if aug_T_cam is not None:
+                # cloud/poses 都在“增强后的相机坐标系”，workspace 变换也要一致
+                trans = trans @ np.linalg.inv(aug_T_cam)
+
             workspace_mask = get_workspace_mask(cloud, seg, trans=trans, organized=True, outlier=0.02)
             return (depth_mask & workspace_mask)
         return depth_mask
@@ -1232,10 +1255,17 @@ class GraspNetMultiDataset(Dataset):
         intrinsic = meta['intrinsic_matrix']
         factor_depth = meta['factor_depth']
 
+        aug_T_cam = None
+        if self.augment:
+            poses_list = [poses[:, :, i].astype(np.float32) for i in range(poses.shape[2])]
+            (color, depth, seg), poses_list, aug_T_cam = self.scene_pose_augment(
+                (color, depth, seg), poses_list, intrinsic, obj_idxs
+            )
+        
         camera = CameraInfo(1280.0, 720.0, intrinsic[0][0], intrinsic[1][1], intrinsic[0][2], intrinsic[1][2], factor_depth)
         cloud = create_point_cloud_from_depth_image(depth, camera, organized=True)
 
-        mask = self._build_mask(depth, seg, cloud, scene, self.frameid[index])
+        mask = self._build_mask(depth, seg, cloud, scene, self.frameid[index], aug_T_cam=aug_T_cam)
 
         cloud_masked = cloud[mask]
         color_masked = color[mask]
@@ -1244,19 +1274,10 @@ class GraspNetMultiDataset(Dataset):
         if cloud_masked.shape[0] == 0:
             raise RuntimeError(f"[{scene}/{self.frameid[index]}] mask has 0 points.")
 
-        # ✅ eco-style alignment check: graspness must align with masked points
-        if graspness.shape[0] != cloud_masked.shape[0]:
-            raise RuntimeError(
-                f"[{scene}/{self.frameid[index]}] graspness length mismatch: "
-                f"graspness={graspness.shape[0]} vs mask_sum={cloud_masked.shape[0]}. "
-                f"(mask definition must match how graspness was generated.)"
-            )
-
         idxs = sample_points(len(cloud_masked), self.num_points)  # indices in masked-point order
         cloud_sampled = cloud_masked[idxs]
         color_sampled = color_masked[idxs]
         seg_sampled   = seg_masked[idxs]
-        graspness_sampled = graspness[idxs].astype(np.float32)     # ✅ no 2D map
 
         objectness_label = seg_sampled.copy()
         objectness_label[objectness_label > 1] = 1
@@ -1292,9 +1313,6 @@ class GraspNetMultiDataset(Dataset):
             grasp_offsets_list.append(offsets)
             grasp_scores_list.append(scores)
 
-        if self.augment:
-            cloud_sampled, object_poses_list = self.augment_data(cloud_sampled, object_poses_list)
-
         return {
             'point_clouds': cloud_sampled.astype(np.float32),
             'cloud_colors': color_sampled.astype(np.float32),
@@ -1305,7 +1323,6 @@ class GraspNetMultiDataset(Dataset):
             'img': img,
             'img_idxs': resized_idxs.astype(np.int64),
 
-            'graspness_label': graspness_sampled,
             'objectness_label': objectness_label.astype(np.int64),
 
             'object_poses_list': object_poses_list,
@@ -1317,538 +1334,6 @@ class GraspNetMultiDataset(Dataset):
             'seg': seg_sampled.astype(np.int32),
         }
 
-# class GraspNetGridDataset(Dataset):
-#     """
-#     Grid-cell supervision dataset:
-#     - 每个样本随机选 1 个 grid cell (grid_size x grid_size)
-#     - 输入：该 cell 内的点云采样 + cell patch 的RGB(224x224) + img_idxs
-#     - 监督：cell 内出现的所有物体的 grasp labels (lists)
-#     """
-#     def __init__(self, root, big_file_root, valid_obj_idxs, grasp_labels,
-#                  camera='kinect', split='train', num_points=1024,
-#                  remove_outlier=False, remove_invisible=True,
-#                  multi_modal_pose_augment=False, point_augment=False,
-#                  denoise=False, load_label=True,
-#                  real_data=True, syn_data=False,
-#                  visib_threshold=0.0, voxel_size=0.005,
-#                  match_point_num=350,
-#                  grid_size=2,
-#                  min_obj_pixels_in_cell=50,
-#                  max_cell_tries=50):
-#         self.root = root
-#         self.big_file_root = root if big_file_root is None else big_file_root
-
-#         self.split = split
-#         self.num_points = num_points
-#         self.remove_outlier = remove_outlier
-#         self.remove_invisible = remove_invisible
-#         self.valid_obj_idxs = set([int(x) for x in valid_obj_idxs])
-#         self.grasp_labels = grasp_labels
-#         self.camera = camera
-
-#         self.multi_modal_pose_augment = multi_modal_pose_augment
-#         self.point_augment = point_augment
-#         self.denoise = denoise
-#         self.denoise_pre_sample_num = int(self.num_points * 1.5)
-
-#         self.load_label = load_label
-#         self.collision_labels = {}
-#         self.voxel_size = voxel_size
-
-#         self.minimum_num_pt = 50
-#         self.real_data = real_data
-#         self.syn_data = syn_data
-#         self.visib_threshold = visib_threshold
-#         self.match_point_num = match_point_num
-
-#         # grid config
-#         self.grid_size = int(grid_size)
-#         self.min_obj_pixels_in_cell = int(min_obj_pixels_in_cell)
-#         self.max_cell_tries = int(max_cell_tries)
-
-#         if split == 'train':
-#             self.sceneIds = list(range(100))
-#         elif split == 'test':
-#             self.sceneIds = list(range(100, 190))
-#         elif split == 'test_seen':
-#             self.sceneIds = list(range(100, 130))
-#         elif split == 'test_similar':
-#             self.sceneIds = list(range(130, 160))
-#         elif split == 'test_novel':
-#             self.sceneIds = list(range(160, 190))
-#         else:
-#             raise ValueError(f"Unknown split: {split}")
-#         self.sceneIds = ['scene_{}'.format(str(x).zfill(4)) for x in self.sceneIds]
-
-#         self.resize_shape = (224, 224)
-#         self.img_transforms = transforms.Compose([
-#             transforms.ToTensor(),
-#             transforms.Resize(self.resize_shape),
-#             transforms.Normalize(mean=[0.485, 0.456, 0.406],
-#                                  std=[0.229, 0.224, 0.225]),
-#         ])
-
-#         self.collision_npz_paths = {}
-#         if self.load_label:
-#             for x in self.sceneIds:
-#                 scene = x.strip()
-#                 self.collision_npz_paths[scene] = os.path.join(
-#                     self.big_file_root, "collision_label", scene, "collision_labels.npz"
-#                 )
-#         self._collision_scene = None
-#         self._collision_npz = None
-        
-#         self.colorpath = []
-#         self.depthpath = []
-#         self.labelpath = []
-#         self.metapath = []
-#         self.scenename = []
-#         self.frameid = []
-#         self.visibpath = []
-#         self.real_flags = []
-
-#         for x in tqdm(self.sceneIds, desc='Loading data path and collision labels...'):
-#             for img_num in range(256):
-#                 if self.real_data:
-#                     self.colorpath.append(os.path.join(root, 'scenes', x, camera, 'rgb', str(img_num).zfill(4) + '.png'))
-#                     self.depthpath.append(os.path.join(root, 'scenes', x, camera, 'depth', str(img_num).zfill(4) + '.png'))
-#                     self.labelpath.append(os.path.join(root, 'scenes', x, camera, 'label', str(img_num).zfill(4) + '.png'))
-#                     self.metapath.append(os.path.join(root, 'scenes', x, camera, 'meta', str(img_num).zfill(4) + '.mat'))
-#                     self.visibpath.append(os.path.join(root, 'visib_info', x, camera, str(img_num).zfill(4) + '.mat'))
-#                     self.scenename.append(x.strip())
-#                     self.frameid.append(img_num)
-#                     self.real_flags.append(True)
-
-#                 if self.syn_data:
-#                     self.colorpath.append(os.path.join(root, 'virtual_scenes', x, camera, str(img_num).zfill(4) + '_rgb.png'))
-#                     self.depthpath.append(os.path.join(root, 'virtual_scenes', x, camera, str(img_num).zfill(4) + '_depth.png'))
-#                     self.labelpath.append(os.path.join(root, 'virtual_scenes', x, camera, str(img_num).zfill(4) + '_label.png'))
-#                     self.metapath.append(os.path.join(root, 'scenes', x, camera, 'meta', str(img_num).zfill(4) + '.mat'))
-#                     self.visibpath.append(os.path.join(root, 'visib_info', x, camera, str(img_num).zfill(4) + '.mat'))
-#                     self.scenename.append(x.strip())
-#                     self.frameid.append(img_num)
-#                     self.real_flags.append(False)
-
-#             # if self.load_label:
-#             #     collision_labels = np.load(os.path.join(self.big_file_root, 'collision_label', x.strip(), 'collision_labels.npz'))
-#             #     self.collision_labels[x.strip()] = {}
-#             #     for i in range(len(collision_labels)):
-#             #         self.collision_labels[x.strip()][i] = collision_labels['arr_{}'.format(i)]
-
-#     def _get_collision(self, scene: str, obj_i: int):
-#         if self._collision_scene != scene or self._collision_npz is None:
-#             # 换 scene 时把旧句柄关掉（防 fd 泄漏）
-#             if self._collision_npz is not None:
-#                 try: self._collision_npz.close()
-#                 except: pass
-#             self._collision_npz = np.load(self.collision_npz_paths[scene], allow_pickle=False)
-#             self._collision_scene = scene
-#         return self._collision_npz[f"arr_{obj_i}"]  # 只在这里解压/读取该 arr
-
-#     # spawn 下避免 pickle 打开句柄
-#     def __getstate__(self):
-#         d = self.__dict__.copy()
-#         d["_collision_npz"] = None
-#         d["_collision_scene"] = None
-#         return d
-                
-#     def scene_list(self):
-#         return self.scenename
-
-#     def __len__(self):
-#         return len(self.depthpath)
-
-#     # ===== augmentation (保持与你原dataset一致) =====
-#     def instance_pose_augment(self, point_cloud, object_pose):
-#         if np.random.random() > 0.5:
-#             flip_mat = np.array([[-1, 0, 0],
-#                                  [ 0, 1, 0],
-#                                  [ 0, 0, 1]])
-#             point_cloud = transform_point_cloud(point_cloud, flip_mat, '3x3')
-#             object_pose = np.dot(flip_mat, object_pose).astype(np.float32)
-
-#         rot_angle = (np.random.random()*np.pi/3) - np.pi/6
-#         c, s = np.cos(rot_angle), np.sin(rot_angle)
-#         rot_mat = np.array([[c, -s, 0],
-#                             [s,  c, 0],
-#                             [0,  0, 1]])
-
-#         point_cloud = transform_point_cloud(point_cloud, rot_mat, '3x3')
-#         object_pose = np.dot(rot_mat, object_pose).astype(np.float32)
-#         return point_cloud, object_pose
-
-#     def scene_pose_augment(self, images, object_poses, intrinsic, obj_idxs):
-#         (color, depth, mask) = images
-
-#         if np.random.random() > 0.5:
-#             flip_mat = np.eye(4)
-#             flip_mat[:3, :3] = np.array([[-1, 0, 0],
-#                                          [ 0, 1, 0],
-#                                          [ 0, 0, 1]])
-#             color, depth, mask = flip_image(color, depth, mask, 1, intrinsic)
-#             for i in range(len(object_poses)):
-#                 object_pose = np.eye(4)
-#                 object_pose[:3, :] = object_poses[i]
-#                 object_poses[i] = (flip_mat @ object_pose)[:3, :].astype(np.float32)
-
-#         rot_angle = (np.random.random()*np.pi/2) - np.pi/4
-#         c, s = np.cos(rot_angle), np.sin(rot_angle)
-#         rot_mat = np.eye(4)
-#         rot_mat[:3, :3] = np.array([[c, -s, 0],
-#                                     [s,  c, 0],
-#                                     [0,  0, 1]])
-
-#         object_pixel_num = [len(np.where(mask == obj_id)[0]) for obj_id in obj_idxs]
-#         color, depth, mask = rotate_image(color, depth, mask, -rot_angle, (intrinsic[0][2], intrinsic[1][2]))
-#         object_pixel_num_rot = [len(np.where(mask == obj_id)[0]) for obj_id in obj_idxs]
-#         object_occ_rate = np.array(object_pixel_num_rot) / (np.array(object_pixel_num) + 1e-8)
-
-#         for i in range(len(object_poses)):
-#             object_pose = np.eye(4)
-#             object_pose[:3, :] = object_poses[i]
-#             object_poses[i] = (rot_mat @ object_pose)[:3, :].astype(np.float32)
-
-#         return (color, depth, mask), object_poses, object_occ_rate
-
-#     # ===== basic utils =====
-#     def __getitem__(self, index):
-#         if self.load_label:
-#             return self.get_data_label(index)
-#         else:
-#             return self.get_data(index)
-
-#     def get_resized_idxs(self, idxs, orig_shape):
-#         orig_width, orig_length = orig_shape  # 实际是 (H,W)
-#         scale_x = self.resize_shape[1] / orig_length
-#         scale_y = self.resize_shape[0] / orig_width
-#         coords = np.unravel_index(idxs, (orig_width, orig_length))
-#         new_coords_y = np.clip((coords[0] * scale_y).astype(int), 0, self.resize_shape[0]-1)
-#         new_coords_x = np.clip((coords[1] * scale_x).astype(int), 0, self.resize_shape[1]-1)
-#         new_idxs = np.ravel_multi_index((new_coords_y, new_coords_x), self.resize_shape)
-#         return new_idxs
-
-#     def _roi_bbox_from_mask(self, mask):
-#         ys, xs = np.where(mask)
-#         if ys.size == 0:
-#             return 0, mask.shape[0], 0, mask.shape[1]
-#         return int(ys.min()), int(ys.max() + 1), int(xs.min()), int(xs.max() + 1)
-
-#     def _build_grid_seg_map(self, H, W, roi_mask, grid_size, start_idx=1, background=0, return_boxes=True):
-#         gs = max(int(grid_size), 1)
-#         grid_seg = np.full((H, W), background, dtype=np.int32)
-
-#         r0, r1, c0, c1 = self._roi_bbox_from_mask(roi_mask.astype(bool))
-#         h = r1 - r0
-#         w = c1 - c0
-
-#         y_edges = [r0 + (h * i) // gs for i in range(gs)] + [r1]
-#         x_edges = [c0 + (w * i) // gs for i in range(gs)] + [c1]
-
-#         cell_boxes = {}
-#         label = int(start_idx)
-#         for iy in range(gs):
-#             yy0, yy1 = y_edges[iy], y_edges[iy + 1]
-#             for ix in range(gs):
-#                 xx0, xx1 = x_edges[ix], x_edges[ix + 1]
-#                 grid_seg[yy0:yy1, xx0:xx1] = label
-#                 cell_boxes[label] = (yy0, yy1, xx0, xx1)
-#                 label += 1
-
-#         grid_seg[~roi_mask.astype(bool)] = background
-#         return (grid_seg, cell_boxes) if return_boxes else grid_seg
-
-#     def _sample_grasp_idxs_fixed(self, n, k):
-#         if n <= 0:
-#             return None
-#         if n >= k:
-#             return np.random.choice(n, k, replace=False)
-#         base = np.arange(n, dtype=np.int64)
-#         extra = np.random.choice(n, k - n, replace=True)
-#         return np.concatenate([base, extra], axis=0)
-
-#     # ===== unlabeled: only grid cell input =====
-#     def get_data(self, index):
-#         color = np.array(Image.open(self.colorpath[index]), dtype=np.float32) / 255.0
-#         depth = np.array(Image.open(self.depthpath[index]))
-#         seg = np.array(Image.open(self.labelpath[index]))
-#         meta = scio.loadmat(self.metapath[index])
-
-#         scene = self.scenename[index]
-
-#         obj_idxs = meta['cls_indexes'].flatten().astype(np.int32)
-#         intrinsic = meta['intrinsic_matrix']
-#         factor_depth = meta['factor_depth'][0] if isinstance(meta['factor_depth'], np.ndarray) else meta['factor_depth']
-
-#         depth_mask = (depth > 0)
-#         if self.remove_outlier:
-#             H, W = depth.shape
-#             camera_info = CameraInfo(float(W), float(H),
-#                                      intrinsic[0][0], intrinsic[1][1],
-#                                      intrinsic[0][2], intrinsic[1][2],
-#                                      factor_depth)
-#             cloud = create_point_cloud_from_depth_image(depth, camera_info, organized=True)
-#             camera_poses = np.load(os.path.join(self.root, 'scenes', scene, self.camera, 'camera_poses.npy'))
-#             align_mat = np.load(os.path.join(self.root, 'scenes', scene, self.camera, 'cam0_wrt_table.npy'))
-#             trans = np.dot(align_mat, camera_poses[self.frameid[index]])
-#             workspace_mask = get_workspace_mask(cloud, seg, trans=trans, organized=True, outlier=0.02)
-#             mask = (depth_mask & workspace_mask)
-#         else:
-#             mask = depth_mask
-
-#         seg = seg * mask
-
-#         H, W = depth.shape
-#         grid_seg, cell_boxes = self._build_grid_seg_map(H, W, mask, self.grid_size, return_boxes=True)
-#         cell_ids = np.array(list(cell_boxes.keys()), dtype=np.int32)
-
-#         # random choose a non-empty cell
-#         chosen = None
-#         for _ in range(self.max_cell_tries):
-#             cid = int(np.random.choice(cell_ids))
-#             rmin, rmax, cmin, cmax = cell_boxes[cid]
-#             patch_mask = (grid_seg[rmin:rmax, cmin:cmax] == cid) & mask[rmin:rmax, cmin:cmax]
-#             if patch_mask.sum() >= self.minimum_num_pt:
-#                 chosen = (cid, rmin, rmax, cmin, cmax, patch_mask)
-#                 break
-#         if chosen is None:
-#             cid = int(np.random.choice(cell_ids))
-#             rmin, rmax, cmin, cmax = cell_boxes[cid]
-#             patch_mask = (grid_seg[rmin:rmax, cmin:cmax] == cid) & mask[rmin:rmax, cmin:cmax]
-#             chosen = (cid, rmin, rmax, cmin, cmax, patch_mask)
-
-#         cid, rmin, rmax, cmin, cmax, patch_mask = chosen
-#         bbox = (rmin, rmax, cmin, cmax)
-
-#         patch_color = color[rmin:rmax, cmin:cmax, :]
-#         patch_depth = depth[rmin:rmax, cmin:cmax]
-
-#         choose_all = patch_mask.flatten().nonzero()[0]
-#         sampled_idxs = sample_points(len(choose_all), self.num_points)
-#         choose = choose_all[sampled_idxs]
-
-#         patch_cloud = get_patch_point_cloud(patch_depth, intrinsic, bbox, factor_depth)
-#         inst_cloud = patch_cloud[choose]
-#         inst_color = patch_color.reshape(-1, 3)[choose]
-
-#         ret_dict = {}
-#         ret_dict['point_clouds'] = inst_cloud.astype(np.float32)
-#         ret_dict['cloud_colors'] = inst_color.astype(np.float32)
-#         ret_dict['coors'] = inst_cloud.astype(np.float32) / self.voxel_size
-#         ret_dict['feats'] = np.ones_like(inst_cloud).astype(np.float32)
-
-#         orig_width, orig_length, _ = patch_color.shape
-#         resized_idxs = self.get_resized_idxs(choose, (orig_width, orig_length))
-#         img = self.img_transforms(patch_color)
-
-#         ret_dict['img'] = img
-#         ret_dict['img_idxs'] = resized_idxs.astype(np.int64)
-
-#         # debug (都是 ndarray，保证你原 collate_fn 不炸)
-#         ret_dict['grid_cell_id'] = np.array([cid], dtype=np.int32)
-#         ret_dict['grid_bbox'] = np.array([rmin, rmax, cmin, cmax], dtype=np.int32)
-#         return ret_dict
-
-#     # ===== labeled: grid cell + scene-level supervision lists =====
-#     def get_data_label(self, index):
-#         color = np.array(Image.open(self.colorpath[index]), dtype=np.float32) / 255.0
-#         depth = np.array(Image.open(self.depthpath[index]))
-#         seg = np.array(Image.open(self.labelpath[index]))
-#         meta = scio.loadmat(self.metapath[index])
-#         visib_info = scio.loadmat(self.visibpath[index])
-
-#         scene = self.scenename[index]
-#         real_flag = self.real_flags[index]
-
-#         obj_idxs = meta['cls_indexes'].flatten().astype(np.int32)
-#         poses = meta['poses']  # (3,4,N)
-#         intrinsic = meta['intrinsic_matrix']
-#         factor_depth = meta['factor_depth'][0] if isinstance(meta['factor_depth'], np.ndarray) else meta['factor_depth']
-
-#         depth_mask = (depth > 0)
-#         if self.remove_outlier:
-#             H, W = depth.shape
-#             camera_info = CameraInfo(float(W), float(H),
-#                                      intrinsic[0][0], intrinsic[1][1],
-#                                      intrinsic[0][2], intrinsic[1][2],
-#                                      factor_depth)
-#             cloud = create_point_cloud_from_depth_image(depth, camera_info, organized=True)
-#             camera_poses = np.load(os.path.join(self.root, 'scenes', scene, self.camera, 'camera_poses.npy'))
-#             align_mat = np.load(os.path.join(self.root, 'scenes', scene, self.camera, 'cam0_wrt_table.npy'))
-#             trans = np.dot(align_mat, camera_poses[self.frameid[index]])
-#             workspace_mask = get_workspace_mask(cloud, seg, trans=trans, organized=True, outlier=0.02)
-#             mask = (depth_mask & workspace_mask)
-#         else:
-#             mask = depth_mask
-
-#         poses = poses.transpose(2, 0, 1)  # (Nobj,3,4)
-#         seg = seg * mask
-
-#         if self.multi_modal_pose_augment:
-#             (color, depth, seg), poses, rot_occ_rate = self.scene_pose_augment((color, depth, seg), poses, intrinsic, obj_idxs)
-#         else:
-#             rot_occ_rate = np.ones(len(obj_idxs), dtype=np.float32)
-
-#         H, W = depth.shape
-#         grid_seg, cell_boxes = self._build_grid_seg_map(H, W, mask, self.grid_size, return_boxes=True)
-#         cell_ids = np.array(list(cell_boxes.keys()), dtype=np.int32)
-
-#         chosen = None
-
-#         for _ in range(self.max_cell_tries):
-#             cid = int(np.random.choice(cell_ids))
-#             rmin, rmax, cmin, cmax = cell_boxes[cid]
-#             patch_mask = (grid_seg[rmin:rmax, cmin:cmax] == cid) & mask[rmin:rmax, cmin:cmax]
-#             if patch_mask.sum() < self.minimum_num_pt:
-#                 continue
-
-#             seg_cell = seg[rmin:rmax, cmin:cmax]
-
-#             # 至少要找到一个可监督的物体
-#             ok = False
-#             for i, obj_id in enumerate(obj_idxs):
-#                 obj_id = int(obj_id)
-#                 if obj_id not in self.valid_obj_idxs:
-#                     continue
-#                 pix = ((seg_cell == obj_id) & patch_mask).sum()
-#                 if pix < self.min_obj_pixels_in_cell:
-#                     continue
-#                 vis = float(rot_occ_rate[i] * visib_info[str(obj_id)]['visib_fract'])
-#                 if vis > self.visib_threshold:
-#                     ok = True
-#                     break
-#             if not ok:
-#                 continue
-
-#             chosen = (cid, rmin, rmax, cmin, cmax, patch_mask)
-#             break
-
-#         # fallback：如果没找到合格cell，就退化成 grid_size=1 的 ROI cell
-#         if chosen is None:
-#             r0, r1, c0, c1 = self._roi_bbox_from_mask(mask)
-#             cid = 1
-#             rmin, rmax, cmin, cmax = r0, r1, c0, c1
-#             patch_mask = mask[rmin:rmax, cmin:cmax].astype(bool)
-#             chosen = (cid, rmin, rmax, cmin, cmax, patch_mask)
-
-#         cid, rmin, rmax, cmin, cmax, patch_mask = chosen
-#         bbox = (rmin, rmax, cmin, cmax)
-
-#         patch_color = color[rmin:rmax, cmin:cmax, :]
-#         patch_depth = depth[rmin:rmax, cmin:cmax]
-#         seg_cell = seg[rmin:rmax, cmin:cmax]
-
-#         # ----- point sampling within cell -----
-#         choose_all = patch_mask.flatten().nonzero()[0]
-#         sampled_idxs = sample_points(len(choose_all), self.num_points)
-#         choose = choose_all[sampled_idxs]
-
-#         patch_cloud = get_patch_point_cloud(patch_depth, intrinsic, bbox, factor_depth)
-#         inst_cloud = patch_cloud[choose]
-#         inst_color = patch_color.reshape(-1, 3)[choose]
-
-#         if self.point_augment:
-#             inst_cloud, dropout_idx = random_point_dropout(
-#                 inst_cloud, min_num=self.minimum_num_pt, num_points_to_drop=2, radius_percent=0.1
-#             )
-#             inst_color = inst_color[dropout_idx]
-#             if not real_flag:
-#                 inst_cloud = add_noise_point_cloud(inst_cloud.astype(np.float32), level=0.003, valid_min_z=0.1)
-
-#         orig_width, orig_length, _ = patch_color.shape
-#         resized_idxs = self.get_resized_idxs(choose, (orig_width, orig_length))
-#         img = self.img_transforms(patch_color)
-
-#         # ----- scene-level supervision restricted to this cell -----
-#         object_poses_list = []
-#         grasp_points_list = []
-#         grasp_offsets_list = []
-#         grasp_scores_list = []
-
-#         for i, obj_id in enumerate(obj_idxs):
-#             obj_id = int(obj_id)
-#             if obj_id not in self.valid_obj_idxs:
-#                 continue
-
-#             pix = ((seg_cell == obj_id) & patch_mask).sum()
-#             if pix < self.min_obj_pixels_in_cell:
-#                 continue
-
-#             inst_visib_fract = float(rot_occ_rate[i] * visib_info[str(obj_id)]['visib_fract'])
-#             if inst_visib_fract <= self.visib_threshold:
-#                 continue
-
-#             object_poses_list.append(poses[i])
-
-#             points, offsets, scores = self.grasp_labels[obj_id]
-#             # collision = self.collision_labels[scene][i]  # (Np, V, A, D)
-#             collision = self._get_collision(scene, i)
-#             idxs = self._sample_grasp_idxs_fixed(len(points), self.match_point_num)
-#             if idxs is None:
-#                 continue
-
-#             gp = points[idxs]
-#             go = offsets[idxs]
-#             col = collision[idxs].copy()
-#             sc = scores[idxs].copy()
-#             sc[col] = 0
-
-#             grasp_points_list.append(gp)
-#             grasp_offsets_list.append(go)
-#             grasp_scores_list.append(sc)
-
-#         # 保险：理论上不会空，但防止极端样本导致训练崩
-#         if len(object_poses_list) == 0:
-#             # 直接退化为 ROI cell 的监督（仍然不走 object-center）
-#             r0, r1, c0, c1 = self._roi_bbox_from_mask(mask)
-#             seg_cell2 = seg[r0:r1, c0:c1]
-#             patch_mask2 = mask[r0:r1, c0:c1].astype(bool)
-#             object_poses_list, grasp_points_list, grasp_offsets_list, grasp_scores_list = [], [], [], []
-#             for i, obj_id in enumerate(obj_idxs):
-#                 obj_id = int(obj_id)
-#                 if obj_id not in self.valid_obj_idxs:
-#                     continue
-#                 pix = ((seg_cell2 == obj_id) & patch_mask2).sum()
-#                 if pix < self.min_obj_pixels_in_cell:
-#                     continue
-#                 inst_visib_fract = float(rot_occ_rate[i] * visib_info[str(obj_id)]['visib_fract'])
-#                 if inst_visib_fract <= self.visib_threshold:
-#                     continue
-#                 object_poses_list.append(poses[i])
-#                 points, offsets, scores = self.grasp_labels[obj_id]
-#                 # collision = self.collision_labels[scene][i]
-#                 collision = self._get_collision(scene, i)
-#                 idxs = self._sample_grasp_idxs_fixed(len(points), self.match_point_num)
-#                 if idxs is None:
-#                     continue
-#                 gp = points[idxs]
-#                 go = offsets[idxs]
-#                 col = collision[idxs].copy()
-#                 sc = scores[idxs].copy()
-#                 sc[col] = 0
-#                 grasp_points_list.append(gp)
-#                 grasp_offsets_list.append(go)
-#                 grasp_scores_list.append(sc)
-
-#         ret_dict = {}
-#         ret_dict['point_clouds'] = inst_cloud.astype(np.float32)
-#         ret_dict['cloud_colors'] = inst_color.astype(np.float32)
-#         ret_dict['coors'] = inst_cloud.astype(np.float32) / self.voxel_size
-#         ret_dict['feats'] = np.ones_like(inst_cloud).astype(np.float32)
-
-#         ret_dict['img'] = img
-#         ret_dict['img_idxs'] = resized_idxs.astype(np.int64)
-
-#         # lists (cell-level multi-object supervision)
-#         ret_dict['object_poses_list'] = [p.astype(np.float32) for p in object_poses_list]
-#         ret_dict['grasp_points_list'] = [p.astype(np.float32) for p in grasp_points_list]
-#         ret_dict['grasp_offsets_list'] = [o.astype(np.float32) for o in grasp_offsets_list]
-#         ret_dict['grasp_labels_list'] = [s.astype(np.float32) for s in grasp_scores_list]
-
-#         # debug (ndarray，保证你原 collate_fn 能处理)
-#         ret_dict['grid_cell_id'] = np.array([cid], dtype=np.int32)
-#         ret_dict['grid_bbox'] = np.array([rmin, rmax, cmin, cmax], dtype=np.int32)
-#         return ret_dict
-    
     
 def load_grasp_labels(root):
     obj_names = list(range(88))
@@ -1875,82 +1360,6 @@ def load_grasp_labels(root):
     return valid_obj_idxs, grasp_labels
 
 
-# from collections import OrderedDict
-# class GraspLabelDB:
-#     """
-#     A tiny, spawn-friendly label accessor:
-#     - pickled to workers as only (root, cache_size, mmap_mode)
-#     - lazy loads obj labels on first access
-#     - per-worker LRU cache to reduce I/O
-#     """
-#     def __init__(self, root, subdir="grasp_label_simplified", cache_size=16, mmap_mode="r"):
-#         self.root = root
-#         self.subdir = subdir
-#         self.cache_size = int(cache_size)
-#         self.mmap_mode = mmap_mode
-#         self._cache = OrderedDict()
-
-#     def __getstate__(self):
-#         # don't pickle huge cache
-#         return {
-#             "root": self.root,
-#             "subdir": self.subdir,
-#             "cache_size": self.cache_size,
-#             "mmap_mode": self.mmap_mode,
-#         }
-
-#     def __setstate__(self, state):
-#         self.root = state["root"]
-#         self.subdir = state["subdir"]
-#         self.cache_size = state["cache_size"]
-#         self.mmap_mode = state["mmap_mode"]
-#         self._cache = OrderedDict()
-
-#     def _load_one(self, obj_id_1based: int):
-#         # your original key is obj_idx+1, so file index is (obj_id-1)
-#         obj_idx0 = int(obj_id_1based) - 1
-#         path = os.path.join(self.root, self.subdir, f"{obj_idx0:03d}_labels.npz")
-#         f = np.load(path, mmap_mode=self.mmap_mode)
-
-#         pts = f["points"]
-#         wid = f["width"]
-#         sco = f["scores"]
-
-#         # avoid unnecessary copies if already float32
-#         pts = pts.astype(np.float32, copy=False)
-#         wid = wid.astype(np.float32, copy=False)
-#         sco = sco.astype(np.float32, copy=False)
-#         return (pts, wid, sco)
-
-#     def __getitem__(self, obj_id_1based: int):
-#         k = int(obj_id_1based)
-#         v = self._cache.get(k, None)
-#         if v is not None:
-#             # refresh LRU
-#             self._cache.move_to_end(k)
-#             return v
-
-#         v = self._load_one(k)
-#         self._cache[k] = v
-#         if len(self._cache) > self.cache_size:
-#             self._cache.popitem(last=False)
-#         return v
-    
-# def load_grasp_labels_save(root, cache_size=16):
-#     obj_names = list(range(88))
-#     valid_obj_idxs = []
-#     for obj_idx in tqdm(obj_names, desc='Indexing grasping labels...'):
-#         valid_obj_idxs.append(obj_idx + 1)  # align with label png (1..88)
-
-#     grasp_labels = GraspLabelDB(
-#         root=root,
-#         subdir="grasp_label_simplified",
-#         cache_size=cache_size,
-#         mmap_mode="r",   # "r" 通常最省内存；不放心可设 None
-#     )
-#     return valid_obj_idxs, grasp_labels
-
-
 def collate_fn(batch):
     if isinstance(batch[0], torch.Tensor):
         return torch.stack(batch, 0)
@@ -1962,39 +1371,6 @@ def collate_fn(batch):
         return [[torch.from_numpy(sample) for sample in b] for b in batch]
     
     raise TypeError("batch must contain tensors, dicts or lists; found {}".format(type(batch[0])))
-
-# from collections.abc import Mapping, Sequence
-# def collate_fn(batch):
-#     elem = batch[0]
-
-#     if torch.is_tensor(elem):
-#         return torch.stack(batch, 0)
-
-#     if isinstance(elem, np.ndarray):
-#         return torch.stack([torch.from_numpy(b) for b in batch], 0)
-
-#     # numpy scalar / python scalar
-#     if isinstance(elem, (float, int, np.number)):
-#         return torch.tensor(batch)
-
-#     if isinstance(elem, Mapping):
-#         return {key: collate_fn([d[key] for d in batch]) for key in elem}
-
-#     if isinstance(elem, Sequence) and not isinstance(elem, (str, bytes)):
-#         out = []
-#         for b in batch:
-#             bb = []
-#             for x in b:
-#                 if isinstance(x, np.ndarray):
-#                     bb.append(torch.from_numpy(x))
-#                 elif torch.is_tensor(x):
-#                     bb.append(x)
-#                 else:
-#                     bb.append(x)
-#             out.append(bb)
-#         return out
-
-#     return batch
 
 
 import MinkowskiEngine as ME

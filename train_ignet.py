@@ -97,10 +97,11 @@ parser.add_argument('--ckpt_save_interval', type=int, default=5, help='Number fo
 parser.add_argument('--weight_decay', type=float, default=0.0, help='Optimization L2 weight decay [default: 0]')
 parser.add_argument('--inst_denoise', default=False, action='store_true', help='Denoise instance points during training and testing [default: False]')
 parser.add_argument('--pin_memory', action='store_true', help='Set pin_memory for faster training [default: False]')
-parser.add_argument('--multi_modal_pose_augment', action='store_true', help='Set multi_modal_pose_augment for multi-modal consistent pose augmentation [default: False]')
+# parser.add_argument('--multi_modal_pose_augment', action='store_true', help='Set multi_modal_pose_augment for multi-modal consistent pose augmentation [default: False]')
 # parser.add_argument('--pose_augment', action='store_true', help='Set pose_augment for pose augmentation [default: False]')
-parser.add_argument('--point_augment', action='store_true', help='Set point_augment for point cloud augmentation [default: False]')
+parser.add_argument('--augment', action='store_true', help='Set point_augment for point cloud augmentation [default: False]')
 parser.add_argument('--multi_scale_grouping', action='store_true', help='Multi-scale grouping [default: False]')
+parser.add_argument('--fuse_type', default='early', help='Fusion type [none/concat/add/gate/early]')
 # parser.add_argument('--bn_decay_step', type=int, default=2, help='Period of BN decay (in epochs) [default: 2]')
 # parser.add_argument('--bn_decay_rate', type=float, default=0.5, help='Decay rate for BN decay [default: 0.5]')
 # parser.add_argument('--lr_decay_steps', default='8,12,16', help='When to decay the learning rate (in epochs) [default: 8,12,16]')
@@ -138,7 +139,7 @@ torch.cuda.set_device(device)
 valid_obj_idxs, grasp_labels = load_grasp_labels(cfgs.big_file_root if cfgs.big_file_root is not None else cfgs.dataset_root)
 # TRAIN_DATASET = GraspNetDataset(cfgs.dataset_root, cfgs.big_file_root, valid_obj_idxs, grasp_labels, camera=cfgs.camera, split='train', num_points=cfgs.num_point, remove_outlier=False, multi_modal_pose_augment=cfgs.multi_modal_pose_augment, point_augment=cfgs.point_augment, denoise=cfgs.inst_denoise, real_data=True, syn_data=True, visib_threshold=cfgs.visib_threshold, voxel_size=cfgs.voxel_size)
 # TEST_DATASET = GraspNetDataset(cfgs.dataset_root, cfgs.big_file_root, valid_obj_idxs, grasp_labels, camera=cfgs.camera, split='test_seen', num_points=cfgs.num_point, remove_outlier=False, multi_modal_pose_augment=False, point_augment=False, denoise=cfgs.inst_denoise, real_data=True, syn_data=False, visib_threshold=cfgs.visib_threshold, voxel_size=cfgs.voxel_size)
-TRAIN_DATASET = GraspNetMultiDataset(cfgs.dataset_root, valid_obj_idxs, grasp_labels, camera=cfgs.camera, split='train', num_points=cfgs.num_point, remove_outlier=True, augment=False, voxel_size=cfgs.voxel_size)
+TRAIN_DATASET = GraspNetMultiDataset(cfgs.dataset_root, valid_obj_idxs, grasp_labels, camera=cfgs.camera, split='train', num_points=cfgs.num_point, remove_outlier=True, augment=cfgs.augment, voxel_size=cfgs.voxel_size)
 TEST_DATASET = GraspNetMultiDataset(cfgs.dataset_root, valid_obj_idxs, grasp_labels, camera=cfgs.camera, split='test_seen', num_points=cfgs.num_point, remove_outlier=True, augment=False, voxel_size=cfgs.voxel_size)
 print(len(TRAIN_DATASET), len(TEST_DATASET))
 # TRAIN_DATALOADER = DataLoader(TRAIN_DATASET, batch_size=cfgs.batch_size, shuffle=True,
@@ -163,7 +164,7 @@ print(len(TRAIN_DATALOADER), len(TEST_DATALOADER))
 
 # v0.8
 net = IGNet(m_point=cfgs.m_point, num_view=cfgs.num_view, seed_feat_dim=cfgs.seed_feat_dim, img_feat_dim=cfgs.img_feat_dim, 
-            is_training=True, multi_scale_grouping=cfgs.multi_scale_grouping)
+            is_training=True, multi_scale_grouping=cfgs.multi_scale_grouping, fuse_type=cfgs.fuse_type)
 net.to(device)
 
 # for param in net.img_backbone.dino.parameters():

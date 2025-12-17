@@ -534,9 +534,6 @@ class AddFusion(nn.Module):
         )
         
     def forward(self, point_feat, img_feat):
-        point_feat = point_feat.transpose(1, 2)
-        img_feat = img_feat.transpose(1, 2)
-        
         img_feat = self.img_mlp(img_feat)
         fused_feat = img_feat + point_feat
         return fused_feat
@@ -565,9 +562,6 @@ class GatedFusion(nn.Module):
         )
         
     def forward(self, point_feat, img_feat):
-        point_feat = point_feat.transpose(1, 2)
-        img_feat = img_feat.transpose(1, 2)
-        
         img_feat = self.expand_img(img_feat)
         img_feat = self.img_mlp(img_feat)
         point_fuse_feat = self.point_mlp(point_feat)
@@ -725,15 +719,16 @@ class LearnableAlign(nn.Module):
         self.img_feat_out = nn.Linear(self.feat_dim, self.feat_dim)
                                                         
     def forward(self, point_feat, img_feat):
+
+        Bs, N, _ = point_feat.shape
+        
+        point_feat = point_feat.transpose(1, 2)  # (B, point_dim, num_pc)
+        img_feat = img_feat.transpose(1, 2)  # (B, img_dim, num_pc)
+        
         if self.normalize:
             point_feat = self.point_norm(point_feat)
             img_feat = self.img_norm(img_feat)
 
-        Bs, N, _ = point_feat.shape
-        
-        # point_feat = point_feat.transpose(1, 2)  # (B, point_dim, num_pc)
-        # img_feat = img_feat.transpose(1, 2)  # (B, img_dim, num_pc)
-        
         img_feat = self.img_mlp(img_feat)
         # img_q = self.img_q_proj(img_feat)
         img_kv = self.img_kv_proj(img_feat)
@@ -835,7 +830,7 @@ class ObjectnessNet(nn.Module):
 
 class IGNet(nn.Module):
     def __init__(self,  m_point=1024, num_view=300, num_angle=12, num_depth=4, seed_feat_dim=256, img_feat_dim=64, 
-                 is_training=True, multi_scale_grouping=False):
+                 is_training=True, multi_scale_grouping=False, fuse_type='early'):
         super().__init__()
         self.is_training = is_training
         self.seed_feature_dim = seed_feat_dim
@@ -846,10 +841,11 @@ class IGNet(nn.Module):
         self.multi_scale_grouping = multi_scale_grouping
         self.M_points = m_point
         assert self.num_view == NUM_VIEW and self.num_angle == NUM_ANGLE and self.num_depth == NUM_DEPTH
-
+        self.fuse_type = fuse_type
         # self.img_backbone = psp_models['resnet34'.lower()]()
-        self.img_backbone = PSPNet(sizes=(1, 2, 3, 6), psp_size=512, 
-                                   deep_features_size=img_feat_dim, backend='resnet34')
+        if self.fuse_type != 'none':
+            self.img_backbone = PSPNet(sizes=(1, 2, 3, 6), psp_size=512, 
+                                    deep_features_size=img_feat_dim, backend='resnet34')
         # self.img_backbone = dino_extractor(feat_ext='dino')
         # self.img_backbone = smp.Unet(encoder_name="resnext50_32x4d", encoder_weights="imagenet", in_channels=3, classes=64)
         # for param in self.img_backbone.encoder.parameters():
@@ -857,34 +853,42 @@ class IGNet(nn.Module):
         # for param in self.img_backbone.decoder.parameters():
         #     param.requires_grad = False
         # early fusion
-        self.img_feature_dim = 0
-        self.point_backbone = MinkUNet14D(in_channels=img_feat_dim, out_channels=self.seed_feature_dim, D=3)
-        print('early fusion')
-        
-        # # late fusion (concatentation)
-        # self.img_feature_dim = img_feat_dim
-        # self.point_backbone = MinkUNet14D(in_channels=3, out_channels=self.seed_feature_dim, D=3)
-        # print('late fusion (concatentation)')
-        
+        if self.fuse_type == 'none':
+            self.img_feature_dim = 0
+            self.point_backbone = MinkUNet14D(in_channels=3, out_channels=self.seed_feature_dim, D=3)
+            print('no fusion')
+        elif self.fuse_type == 'early':
+            self.img_feature_dim = 0
+            self.point_backbone = MinkUNet14D(in_channels=img_feat_dim, out_channels=self.seed_feature_dim, D=3)
+            print('early fusion')
+        elif self.fuse_type == 'concat':
+            self.img_feature_dim = img_feat_dim
+            self.point_backbone = MinkUNet14D(in_channels=3, out_channels=self.seed_feature_dim, D=3)
+            print('late fusion (concatentation)')
+        elif self.fuse_type == 'gate':
+            self.img_feature_dim = 0
+            self.point_backbone = MinkUNet14D(in_channels=3, out_channels=self.seed_feature_dim, D=3)
+            self.fusion_module = GatedFusion(point_dim=self.seed_feature_dim, img_dim=img_feat_dim)
+            print('late fusion (Gated fusion)')
+        elif self.fuse_type == 'add':
+            self.img_feature_dim = 0
+            self.point_backbone = MinkUNet14D(in_channels=3, out_channels=self.seed_feature_dim, D=3)
+            self.fusion_module = AddFusion(point_dim=self.seed_feature_dim, img_dim=img_feat_dim)
+            print('late fusion (Add fusion)')
+        elif self.fuse_type == 'learnable_align':
+            raise NotImplementedError
+
+            # self.img_feature_dim = img_feat_dim
+            # self.point_backbone = MinkUNet14D(in_channels=3, out_channels=self.seed_feature_dim, D=3)
+            # self.fusion_module = LearnableAlign(self.seed_feature_dim, img_feat_dim, dropout=0.15, normalize=False)
+            # print('late fusion (LearnableAlign)')
         # late fusion (Cross attention concatentation)
         # self.img_feature_dim = self.seed_feature_dim
         # self.point_backbone = MinkUNet14D(in_channels=3, out_channels=self.seed_feature_dim, D=3)
         # self.fusion_module = LearnableAlign(self.seed_feature_dim, img_feat_dim, dropout=0.15, normalize=False)
         # print('late fusion (LearnableAlign)')
-        
-        # late fusion (Gated fusion)
-        # self.img_feature_dim = 0
-        # self.point_backbone = MinkUNet14D(in_channels=3, out_channels=self.seed_feature_dim, D=3)
-        # self.fusion_module = GatedFusion(point_dim=self.seed_feature_dim, img_dim=img_feat_dim)
-        # print('late fusion (Gated fusion)')
-        
-        # late fusion (Add fusion)
-        # self.img_feature_dim = 0
-        # self.point_backbone = MinkUNet14D(in_channels=3, out_channels=self.seed_feature_dim, D=3)
-        # self.fusion_module = AddFusion(point_dim=self.seed_feature_dim, img_dim=img_feat_dim)
-        # print('late fusion (Add fusion)')
     
-        self.objectness = ObjectnessNet(seed_feature_dim=self.seed_feature_dim)
+        self.objectness = ObjectnessNet(seed_feature_dim=self.seed_feature_dim + self.img_feature_dim)
         self.rot_head = RotationScoringNet(self.num_view, num_angle=self.num_angle,
                                                 num_depth=self.num_depth,
                                                 seed_feature_dim=self.seed_feature_dim + self.img_feature_dim, 
@@ -993,31 +997,43 @@ class IGNet(nn.Module):
         B, N, _ = xyz_full.shape
         device = xyz_full.device
         
-        img = end_points['img']
-        img_idxs = end_points['img_idxs']
-        img_feat = self.img_backbone(img)
-        _, Cimg, _, _ = img_feat.shape
-        
-        img_feat = img_feat.view(B, Cimg, -1)
-        img_idxs = img_idxs.unsqueeze(1).repeat(1, Cimg, 1)
-        image_features = torch.gather(img_feat, 2, img_idxs).transpose(1, 2).contiguous()
-        
-        # early fusion
+        if self.fuse_type != 'none':
+            img = end_points['img']
+            img_idxs = end_points['img_idxs']
+            img_feat = self.img_backbone(img)
+            _, Cimg, _, _ = img_feat.shape
+            
+            img_feat = img_feat.view(B, Cimg, -1)
+            img_idxs = img_idxs.unsqueeze(1).repeat(1, Cimg, 1)
+            image_features = torch.gather(img_feat, 2, img_idxs).transpose(1, 2).contiguous()
+            if self.fuse_type == 'early':
+                input_feats = image_features
+            else:
+                input_feats = end_points['feats']
+        else:
+            input_feats = end_points['feats']
+            
         coordinates_batch, features_batch = ME.utils.sparse_collate(coords=[c for c in end_points['coors']], 
-                                                                    feats=[f for f in image_features], 
+                                                                    feats=[f for f in input_feats], 
                                                                     dtype=torch.float32)
         coordinates_batch, features_batch, _, quantize2original = ME.utils.sparse_quantize(
             coordinates_batch, features_batch, return_index=True, return_inverse=True, device=device)
         mink_input = ME.SparseTensor(coordinates=coordinates_batch, features=features_batch)
         point_features = self.point_backbone(mink_input).F
-        feat_full = point_features[quantize2original].view(B, N, -1).transpose(1, 2).contiguous()
+        point_features = point_features[quantize2original].view(B, N, -1).transpose(1, 2).contiguous()
 
+        if self.fuse_type in ['concat']:
+            feat_full = torch.concat([point_features, image_features.transpose(1, 2)], dim=1)
+        elif self.fuse_type in ['gate', 'add']:
+            feat_full = self.fusion_module(point_features, image_features.transpose(1, 2))
+        else:
+            feat_full = point_features
         # late fusion (concatentation)
         # coordinates_batch, features_batch = ME.utils.sparse_collate(coords=[c for c in end_points['coors']], 
         #                                                             feats=[f for f in end_points['feats']], 
         #                                                             dtype=torch.float32)
         # coordinates_batch, features_batch, _, quantize2original = ME.utils.sparse_quantize(
-        #     coordinates_batch, features_batch, return_index=True, return_inverse=True, device=seed_xyz.device)
+        #     coordinates_batch, features_batch, return_index=True, return_inverse=True, device=device)
         # mink_input = ME.SparseTensor(features_batch, coordinates=coordinates_batch)
         # point_features = self.point_backbone(mink_input).F
         # point_features = point_features[quantize2original].view(B, point_num, -1).transpose(1, 2)
