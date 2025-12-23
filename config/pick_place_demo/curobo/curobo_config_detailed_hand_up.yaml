@@ -1,0 +1,447 @@
+arm:
+  - name: "arm_l"
+    joint_names: ["arm_J1_l", "arm_J2_l", "arm_J3_l", "arm_J4_l", "arm_J5_l", "arm_J6_l", "arm_J7_l"]
+    end_effector_offset: [0.155, 0.0, -0.04]
+    # end_effector_offset: [0.165, 0.0, -0.04] #For immutation
+  - name: "arm_r"
+    joint_names: ["arm_J1_r", "arm_J2_r", "arm_J3_r", "arm_J4_r", "arm_J5_r", "arm_J6_r", "arm_J7_r"]
+    end_effector_offset: [0.155, 0.0, -0.04]
+    # end_effector_offset: [0.165, 0.0, -0.04] #For immutation
+gripper: 
+  - name: "inspire_hand_l"
+    type: "inspire_dexterous_hand"
+    joint_names: ["hand_J1_l", "hand_J2_l", "hand_J3_l", "hand_J4_l", "hand_J5_l", "hand_J6_l"]
+  - name: "inspire_hand_r"
+    type: "inspire_dexterous_hand"
+    joint_names: ["hand_J1_r", "hand_J2_r", "hand_J3_r", "hand_J4_r", "hand_J5_r", "hand_J6_r"]
+
+#Curobo Official Configurations
+world_cfg: 
+  cuboid:
+    floor:
+      dims: [2.0, 2.0, 0.2] # x, y, z
+      # pose: [0.0, 0.0, 0.04, 1.0, 0.0, 0.0, 0.0] # x, y, z, qw, qx, qy, qz
+      pose: [0.0, 0.0, 0.02, 1.0, 0.0, 0.0, 0.0] # x, y, z, qw, qx, qy, qz
+      color: [0.6, 0.6, 0.8, 1.0]
+    wall_back:
+      dims: [0.05, 2.0, 1.0] # x, y, z
+      pose: [-0.4, 0.0, 0.51, 1.0, 0.0, 0.0, 0.0] # x, y, z, qw, qx, qy, qz
+      color: [0.6, 0.6, 0.8, 1.0]
+    wall_left:
+      dims: [0.7, 0.05, 1.0] # x, y, z
+      pose: [0.0, -1.0, 0.51, 1.0, 0.0, 0.0, 0.0] # x, y, z, qw, qx, qy, qz
+      color: [0.6, 0.6, 0.8, 1.0]
+    wall_right:
+      dims: [0.7, 0.05, 1.0] # x, y, z
+      pose: [0.0, 1.0, 0.51, 1.0, 0.0, 0.0, 0.0] # x, y, z, qw, qx, qy, qz
+      color: [0.6, 0.6, 0.8, 1.0]
+    # right_block1:
+    #   dims: [0.3, 0.5, 0.1] # x, y, z
+    #   pose: [-0.15, 0.4, 0.05, 1.0, 0.0, 0.0, 0.0] # x, y, z, qw, qx, qy, qz
+    #   color: [0.5, 0.5, 0.5, 1.0]
+    # right_block2:
+    #   dims: [0.2, 0.3, 0.36] # x, y, z
+    #   pose: [-0.1, 0.5, 0.18, 1.0, 0.0, 0.0, 0.0] # x, y, z, qw, qx, qy, qz
+    #   color: [0.5, 0.5, 0.5, 1.0]
+    # right_block3:
+    #   dims: [0.2, 0.15, 0.15] # x, y, z
+    #   pose: [-0.1, 0.65, 0.44, 1.0, 0.0, 0.0, 0.0] # x, y, z, qw, qx, qy, qz
+    #   color: [0.5, 0.5, 0.5, 1.0]
+robot_cfg:
+  kinematics:
+    usd_path: "../share/calibrated_dual_arm_with_hand_up_detailed_spheres.usd"
+    usd_robot_root: ""
+    isaac_usd_path: ""
+    usd_flip_joints: {}
+    usd_flip_joint_limits: []
+
+    urdf_path: "../share/calibrated_dual_arm_with_hand_up.urdf"
+    asset_root_path: ""
+
+    base_link: "base_link"
+    ee_link: "arm_end_effector_r"
+    link_names: ["arm_end_effector_l", "arm_end_effector_r"] # List[str]
+    lock_joints: null
+    extra_links: null
+
+    collision_link_names: [
+      "base_link", 
+      "arm_L1_l", "arm_L2_l", "arm_L3_l", "arm_L4_l", "arm_L5_l", "arm_L6_l", "arm_L7_l", "arm_end_effector_l",
+      "arm_L1_r", "arm_L2_r", "arm_L3_r", "arm_L4_r", "arm_L5_r", "arm_L6_r", "arm_L7_r", "arm_end_effector_r", 
+      L_thumb_proximal, L_thumb_intermediate, L_thumb_distal, L_index_proximal, L_index_distal,
+      L_middle_proximal, L_middle_distal, L_ring_proximal, L_ring_distal, L_pinky_proximal, L_pinky_distal, 
+      R_thumb_proximal, R_thumb_intermediate, R_thumb_distal, R_index_proximal, R_index_distal, 
+      R_middle_proximal, R_middle_distal, R_ring_proximal, R_ring_distal, R_pinky_proximal, R_pinky_distal] # List[str]
+    collision_spheres: 
+      base_link:
+        # - "center": [0.0, 0.0, 0.101]
+        #   "radius": 0.1
+        - "center": [0.0, -0.086, 0.294]
+          "radius": 0.1
+        - "center": [0.0, 0.087, 0.296]
+          "radius": 0.1
+        - "center": [0.0, 0.0, 0.472]
+          "radius": 0.05
+        - "center": [0.0, 0.0, 0.339]
+          "radius": 0.12
+        # - "center": [0.0, 0.0, 0.231]
+        #   "radius": 0.12
+        # - "center": [0.0, 0.0, 0.578]
+          # "radius": 0.08
+        # - "center": [0.043, -0.077, 0.04]
+        #   "radius": 0.04
+        # - "center": [-0.043, -0.077, 0.04]
+        #   "radius": 0.04
+        # - "center": [0.043, 0.077, 0.04]
+        #   "radius": 0.04
+        # - "center": [-0.043, 0.077, 0.04]
+        #   "radius": 0.04
+        - "center": [0.068, 0.0, 0.553] #Spheres for new head housing 40deg
+          "radius": 0.08
+        - "center": [0.096, 0.055, 0.563]
+          "radius": 0.06
+        - "center": [0.094, -0.051, 0.56]
+          "radius": 0.06
+        - "center": [0.148, 0.012, 0.498]
+          "radius": 0.08
+        - "center": [0.146, -0.048, 0.501]
+          "radius": 0.08
+        - "center": [0.143, 0.057, 0.504]
+          "radius": 0.08
+        - "center": [0.089, -0.061, 0.46]
+          "radius": 0.04
+        - "center": [0.084, -0.02, 0.476]
+          "radius": 0.04
+        - "center": [0.081, 0.068, 0.477]
+          "radius": 0.04
+        - "center": [0.073, 0.023, 0.478]
+          "radius": 0.04
+      arm_L1_l:
+        - "center": [-0.0, -0.001, 0.003]
+          "radius": 0.09
+      arm_L1_r:
+        - "center": [-0.0, 0.0, 0.006]
+          "radius": 0.09
+      arm_L2_l: {}
+      arm_L2_r: {}
+      arm_L3_l:
+        - "center": [-0.0, -0.002, -0.139]
+          "radius": 0.06
+        - "center": [-0.0, -0.0, -0.065]
+          "radius": 0.06
+      arm_L3_r:
+        - "center": [-0.0, -0.002, -0.139]
+          "radius": 0.06
+        - "center": [-0.0, -0.0, -0.065]
+          "radius": 0.06
+      arm_L4_l:
+        - "center": [-0.0, 0.003, -0.002]
+          "radius": 0.08
+      arm_L4_r:
+        - "center": [-0.0, 0.002, 0.0]
+          "radius": 0.08
+      arm_L5_l:
+        - "center": [-0.0, 0.0, -0.114]
+          "radius": 0.05
+        - "center": [-0.0, 0.003, -0.052]
+          "radius": 0.05
+      arm_L5_r:
+        - "center": [0.0, -0.005, -0.118]
+          "radius": 0.05
+        - "center": [0.0, -0.008, -0.057]
+          "radius": 0.05
+      arm_L6_l: 
+        - "center": [-0.01, 0.0, -0.002]
+          "radius": 0.067
+      arm_L6_r: 
+        - "center": [-0.003, -0.0, 0.001]
+          "radius": 0.067
+      arm_L7_r:
+        - "center": [0.0, 0.0, 0.004]
+          "radius": 0.057
+        - "center": [0.066, 0.0, 0.0]
+          "radius": 0.032
+        - "center": [0.109, 0.005, -0.02]
+          "radius": 0.025
+        - "center": [0.111, 0.003, 0.019]
+          "radius": 0.025
+        - "center": [0.137, 0.0, 0.022]
+          "radius": 0.02
+        - "center": [0.133, 0.002, -0.026]
+          "radius": 0.02
+        - "center": [0.11, 0.004, -0.0]
+          "radius": 0.025
+        - "center": [0.133, -0.002, -0.004]
+          "radius": 0.02
+        - "center": [0.156, -0.0, -0.028]
+          "radius": 0.02
+        - "center": [0.156, -0.0, -0.002]
+          "radius": 0.02
+        - "center": [0.16, -0.0, 0.024]
+          "radius": 0.02
+      arm_L7_l:
+        - "center": [0.001, 0.001, 0.0]
+          "radius": 0.057
+        - "center": [0.066, 0.0, 0.0]
+          "radius": 0.032
+        - "center": [0.108, -0.005, 0.017]
+          "radius": 0.025
+        - "center": [0.111, -0.005, -0.019]
+          "radius": 0.025
+        - "center": [0.137, -0.002, -0.025]
+          "radius": 0.02
+        - "center": [0.135, -0.002, 0.022]
+          "radius": 0.02
+        - "center": [0.11, -0.005, -0.0]
+          "radius": 0.025
+        - "center": [0.133, 0.0, -0.002]
+          "radius": 0.02
+        - "center": [0.159, 0.0, 0.023]
+          "radius": 0.02
+        - "center": [0.157, 0.0, -0.0]
+          "radius": 0.02
+        - "center": [0.16, 0.0, -0.026]
+          "radius": 0.02
+      arm_end_effector_l: {}
+      arm_end_effector_r: {}
+      L_thumb_proximal:
+        - "center": [0.0, 0.009, 0.0]
+          "radius": 0.017
+        - "center": [0.0, 0.028, 0.0]
+          "radius": 0.02
+        - "center": [0.003, 0.049, 0.003]
+          "radius": 0.015
+      L_thumb_intermediate:
+        - "center": [0.0, 0.013, 0.004]
+          "radius": 0.012
+      L_thumb_distal:
+        - "center": [0.0, 0.005, 0.001]
+          "radius": 0.01
+        - "center": [0.0, 0.018, 0.0]
+          "radius": 0.008
+      L_index_proximal:
+        - "center": [0.009, 0.001, -0.001]
+          "radius": 0.012
+        - "center": [0.009, 0.015, -0.003]
+          "radius": 0.01
+        - "center": [0.009, 0.028, -0.006]
+          "radius": 0.01
+      L_index_distal:
+        - "center": [0.007, 0.008, 0.002]
+          "radius": 0.008
+        - "center": [0.007, 0.017, -0.001]
+          "radius": 0.008
+        - "center": [0.007, 0.027, -0.005]
+          "radius": 0.008
+        - "center": [0.008, 0.037, -0.009]
+          "radius": 0.008
+      L_middle_proximal:
+        - "center": [0.008, 0.003, -0.001]
+          "radius": 0.012
+        - "center": [0.009, 0.015, -0.003]
+          "radius": 0.01
+        - "center": [0.008, 0.028, -0.006]
+          "radius": 0.01
+      L_ring_proximal:
+        - "center": [0.011, 0.002, -0.001]
+          "radius": 0.012
+        - "center": [0.011, 0.014, -0.003]
+          "radius": 0.01
+        - "center": [0.011, 0.026, -0.005]
+          "radius": 0.01
+      L_pinky_proximal:
+        - "center": [0.013, 0.004, -0.001]
+          "radius": 0.012
+        - "center": [0.014, 0.028, -0.007]
+          "radius": 0.01
+        - "center": [0.013, 0.017, -0.003]
+          "radius": 0.01
+      L_middle_distal:
+        - "center": [0.007, 0.009, 0.002]
+          "radius": 0.008
+        - "center": [0.006, 0.02, 0.0]
+          "radius": 0.008
+        - "center": [0.007, 0.031, -0.004]
+          "radius": 0.008
+        - "center": [0.006, 0.04, -0.008]
+          "radius": 0.008
+          # "radius": 0.0065
+      L_ring_distal:
+        - "center": [0.009, 0.007, 0.002]
+          "radius": 0.008
+        - "center": [0.009, 0.017, 0.0]
+          "radius": 0.008
+        - "center": [0.009, 0.027, -0.005]
+          "radius": 0.008
+        - "center": [0.009, 0.037, -0.008]
+          "radius": 0.008
+          # "radius": 0.0065
+      L_pinky_distal:
+        - "center": [0.014, 0.009, 0.001]
+          "radius": 0.008
+        - "center": [0.013, 0.019, -0.003]
+          "radius": 0.0065
+        - "center": [0.014, 0.029, -0.008]
+          "radius": 0.008
+        # - "center": [0.014, 0.02789, -0.008]
+        #   "radius": 0.0065
+      R_thumb_proximal:
+        - "center": [0.0, 0.009, 0.0]
+          "radius": 0.017
+        - "center": [0.0, 0.031, -0.001]
+          "radius": 0.02
+        - "center": [0.001, 0.051, -0.003]
+          "radius": 0.015
+      R_thumb_intermediate:
+        - "center": [0.0, 0.013, -0.005]
+          "radius": 0.012
+      R_thumb_distal:
+        - "center": [-0.0, 0.006, -0.002]
+          "radius": 0.01
+        - "center": [0.0, 0.018, 0.001]
+          "radius": 0.008
+      R_index_proximal:
+        - "center": [0.009, 0.003, 0.001]
+          "radius": 0.012
+        - "center": [0.01, 0.016, 0.003]
+          "radius": 0.01
+        - "center": [0.01, 0.029, 0.005]
+          "radius": 0.01
+      R_index_distal:
+        - "center": [0.009, 0.008, -0.002]
+          "radius": 0.008
+        - "center": [0.009, 0.017, 0.0]
+          "radius": 0.008
+        - "center": [0.008, 0.027, 0.005]
+          "radius": 0.008
+        - "center": [0.008, 0.037, 0.008]
+          "radius": 0.008
+      R_middle_proximal:
+        - "center": [0.008, 0.003, 0.001]
+          "radius": 0.012
+        - "center": [0.009, 0.016, 0.003]
+          "radius": 0.01
+        - "center": [0.008, 0.028, 0.006]
+          "radius": 0.01
+      R_ring_proximal:
+        - "center": [0.007, 0.005, 0.001]
+          "radius": 0.012
+        - "center": [0.007, 0.016, 0.003]
+          "radius": 0.01
+        - "center": [0.007, 0.028, 0.005]
+          "radius": 0.01
+      R_pinky_proximal:
+        - "center": [0.007, 0.004, 0.001]
+          "radius": 0.012
+        - "center": [0.008, 0.028, 0.005]
+          "radius": 0.01
+        - "center": [0.007, 0.017, 0.004]
+          "radius": 0.01
+      R_middle_distal:
+        - "center": [0.006, 0.009, -0.001]
+          "radius": 0.008
+        - "center": [0.006, 0.02, 0.001]
+          "radius": 0.008
+        - "center": [0.006, 0.032, 0.004]
+          "radius": 0.008
+        - "center": [0.006, 0.041, 0.008]
+          "radius": 0.008
+      R_ring_distal:
+        - "center": [0.008, 0.007, -0.002]
+          "radius": 0.008
+        - "center": [0.008, 0.016, 0.0]
+          "radius": 0.008
+        - "center": [0.008, 0.028, 0.004]
+          "radius": 0.008
+        - "center": [0.009, 0.037, 0.008]
+          "radius": 0.008
+      R_pinky_distal: 
+        - "center": [0.008, 0.009, -0.001]
+          "radius": 0.008
+        - "center": [0.008, 0.02, 0.003]
+          # "radius": 0.008
+          "radius": 0.0065
+        - "center": [0.00955, 0.03, 0.007]
+          # "radius": 0.008
+          "radius": 0.0065
+    collision_sphere_buffer: 0.000
+    extra_collision_spheres: {}
+    self_collision_ignore: # Dict[str, List[str]]
+      "base_link": ["arm_L1_l", "arm_L2_l", "arm_L1_r", "arm_L2_r"]
+      "arm_L1_l": ["arm_L2_l", "arm_L3_l"]
+      "arm_L2_l": ["arm_L3_l"]
+      "arm_L3_l": ["arm_L4_l", "arm_L5_l"]
+      "arm_L4_l": ["arm_L5_l"]
+      "arm_L5_l": ["arm_L6_l", "arm_L7_l"]
+      "arm_L6_l": ["arm_L7_l", "arm_end_effector_l"]
+      "arm_L7_l": ["arm_end_effector_l", 
+                  "L_thumb_proximal", "L_thumb_intermediate", "L_thumb_distal",
+                  "L_index_proximal", "L_index_distal", "L_middle_proximal", "L_middle_distal",
+                  "L_ring_proximal", "L_ring_distal", "L_pinky_proximal", "L_pinky_distal"] 
+      "arm_end_effector_l": []
+      "L_thumb_proximal": ["L_thumb_intermediate", "L_thumb_distal", "L_index_proximal", "L_index_distal", "L_middle_proximal", "L_middle_distal",
+                  "L_ring_proximal", "L_ring_distal", "L_pinky_proximal", "L_pinky_distal"]
+      "L_thumb_intermediate": ["L_thumb_distal", "L_index_proximal", "L_index_distal", "L_middle_proximal", "L_middle_distal",
+                  "L_ring_proximal", "L_ring_distal", "L_pinky_proximal", "L_pinky_distal"]
+      "L_thumb_distal": ["L_index_proximal", "L_index_distal", "L_middle_proximal", "L_middle_distal",
+                  "L_ring_proximal", "L_ring_distal", "L_pinky_proximal", "L_pinky_distal"]
+      "L_index_proximal": ["L_index_distal", "L_middle_proximal"]
+      "L_index_distal": []
+      "L_middle_proximal": ["L_middle_distal", "L_ring_proximal"]
+      "L_middle_distal": []
+      "L_ring_proximal": ["L_ring_distal", "L_pinky_proximal"]
+      "L_ring_distal": []
+      "L_pinky_proximal": ["L_pinky_distal"]
+      "L_pinky_distal": []
+
+      "arm_L1_r": ["arm_L2_r", "arm_L3_r"]
+      "arm_L2_r": ["arm_L3_r"]
+      "arm_L3_r": ["arm_L4_r", "arm_L5_r"]
+      "arm_L4_r": ["arm_L5_r"]
+      "arm_L5_r": ["arm_L6_r", "arm_L7_r"]
+      "arm_L6_r": ["arm_L7_r", "arm_end_effector_r"]
+      "arm_L7_r": ["arm_end_effector_r", 
+                  "R_thumb_proximal", "R_thumb_intermediate", "R_thumb_distal",
+                  "R_index_proximal", "R_index_distal", "R_middle_proximal", "R_middle_distal",
+                  "R_ring_proximal", "R_ring_distal", "R_pinky_proximal", "R_pinky_distal"]
+      "arm_end_effector_r": []
+      "R_thumb_proximal": ["R_thumb_intermediate", "R_thumb_distal", "R_index_proximal", "R_index_distal", "R_middle_proximal", "R_middle_distal",
+                  "R_ring_proximal", "R_ring_distal", "R_pinky_proximal", "R_pinky_distal"]
+      "R_thumb_intermediate": ["R_thumb_distal", "R_index_proximal", "R_index_distal", "R_middle_proximal", "R_middle_distal",
+                  "R_ring_proximal", "R_ring_distal", "R_pinky_proximal", "R_pinky_distal"]
+      "R_thumb_distal": ["R_index_proximal", "R_index_distal", "R_middle_proximal", "R_middle_distal",
+                  "R_ring_proximal", "R_ring_distal", "R_pinky_proximal", "R_pinky_distal"]
+      "R_index_proximal": ["R_index_distal", "R_middle_proximal"]
+      "R_index_distal": []
+      "R_middle_proximal": ["R_middle_distal", "R_ring_proximal"]
+      "R_middle_distal": []
+      "R_ring_proximal": ["R_ring_distal", "R_pinky_proximal"]
+      "R_ring_distal": []
+      "R_pinky_proximal": ["R_pinky_distal"]
+      "R_pinky_distal": []
+    self_collision_buffer: {} # Dict[str, float]
+    use_global_cumul: True
+    mesh_link_names: null # List[str]
+    cspace:
+      joint_names: [
+        "arm_J1_l", "arm_J2_l", "arm_J3_l", "arm_J4_l", "arm_J5_l", "arm_J6_l", "arm_J7_l", 
+        "arm_J1_r", "arm_J2_r", "arm_J3_r", "arm_J4_r", "arm_J5_r", "arm_J6_r", "arm_J7_r", 
+        "hand_J1_l", "hand_J2_l", "hand_J3_l", "hand_J4_l", "hand_J5_l", "hand_J6_l", 
+        "hand_J1_r", "hand_J2_r", "hand_J3_r", "hand_J4_r", "hand_J5_r", "hand_J6_r"] # List[str]
+      retract_config: [
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0,] # List[float]
+      null_space_weight: [
+        1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+        1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+        1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+        1.0, 1.0, 1.0, 1.0, 1.0, 1.0,] # List[float]
+      cspace_distance_weight: [
+        1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+        1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+        1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+        1.0, 1.0, 1.0, 1.0, 1.0, 1.0,] # List[float]
+      max_jerk: 500.0
+      max_acceleration: 15.0

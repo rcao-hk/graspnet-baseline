@@ -1,0 +1,1 @@
+CUDA_VISIBLE_DEVICES=1 python demo_restored_depth_in_wild.py
