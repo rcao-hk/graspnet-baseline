@@ -46,8 +46,8 @@ sys.path.append(os.path.join(ROOT_DIR, 'pointnet2'))
 # from graspnet import GraspNet, get_loss
 from models.GSNet import GraspNet, GraspNet_multimodal
 from models.GSNet_loss import get_loss
-from dataset.graspnet_dataset import GraspNetDataset, collate_fn, minkowski_collate_fn, load_grasp_labels
-# from dataset.graspnet_dataset import GraspNetMultiDataset, collate_fn, minkowski_collate_fn, load_grasp_labels
+from dataset.graspnet_dataset import GraspNetDataset, GraspNetMultiDataset, collate_fn, minkowski_collate_fn, load_grasp_labels
+
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--dataset_root', default='/data/jhpan/dataset/graspnet', help='Dataset root')
@@ -67,10 +67,12 @@ parser.add_argument('--weight_decay', type=float, default=0, help='Optimization 
 parser.add_argument('--worker_num', type=int, default=12, help='Worker number for dataloader [default: 4]')
 parser.add_argument('--voxel_size', type=float, default=0.005, help='Voxel Size for sparse convolution')
 parser.add_argument('--pin_memory', action='store_true', help='Set pin_memory for faster training [default: False]')
-parser.add_argument('--virtual_depth', action='store_true', default=True, help='Use virtual depth for training [default: False]')
+parser.add_argument('--multi_modal', action='store_true', default=False, help='Use multi-modal gsnet[default: False]')
+parser.add_argument('--virtual_depth', action='store_true', default=False, help='Use virtual depth for training [default: False]')
 cfgs = parser.parse_args()
 
 # ------------------------------------------------------------------------- GLOBAL CONFIG BEG
+print(cfgs)
 
 cfgs.ckpt_dir = os.path.join(cfgs.ckpt_root, cfgs.method_id, cfgs.camera)
 cfgs.log_dir = os.path.join(cfgs.log_root, cfgs.method_id, cfgs.camera)
@@ -99,19 +101,21 @@ torch.cuda.set_device(device)
 
 # Create Dataset and Dataloader
 valid_obj_idxs, grasp_labels = load_grasp_labels(cfgs.big_file_root if cfgs.big_file_root is not None else cfgs.dataset_root)
-TRAIN_DATASET = GraspNetDataset(cfgs.dataset_root, cfgs.big_file_root, valid_obj_idxs, grasp_labels, camera=cfgs.camera, split='train', num_points=cfgs.num_point, voxel_size=cfgs.voxel_size, remove_outlier=True, augment=False, load_label=True, depth_type='virtual' if cfgs.virtual_depth else 'real')
-TEST_DATASET = GraspNetDataset(cfgs.dataset_root, cfgs.big_file_root, valid_obj_idxs, grasp_labels, camera=cfgs.camera, split='test_seen', num_points=cfgs.num_point, voxel_size=cfgs.voxel_size, remove_outlier=True, augment=False, depth_type='virtual' if cfgs.virtual_depth else 'real')
-TRAIN_DATALOADER = DataLoader(TRAIN_DATASET, batch_size=cfgs.batch_size, shuffle=True,
-    num_workers=cfgs.worker_num, worker_init_fn=my_worker_init_fn, collate_fn=minkowski_collate_fn, pin_memory=cfgs.pin_memory)
-TEST_DATALOADER = DataLoader(TEST_DATASET, batch_size=cfgs.batch_size, shuffle=False,
-    num_workers=cfgs.worker_num, worker_init_fn=my_worker_init_fn, collate_fn=minkowski_collate_fn, pin_memory=cfgs.pin_memory)
+if cfgs.multi_modal:
+    TRAIN_DATASET = GraspNetMultiDataset(cfgs.dataset_root, valid_obj_idxs, grasp_labels, camera=cfgs.camera, split='train', num_points=cfgs.num_point, voxel_size=cfgs.voxel_size, remove_outlier=True, augment=False)
+    TEST_DATASET = GraspNetMultiDataset(cfgs.dataset_root, valid_obj_idxs, grasp_labels, camera=cfgs.camera, split='test_seen', num_points=cfgs.num_point, voxel_size=cfgs.voxel_size, remove_outlier=True, augment=False)
+    TRAIN_DATALOADER = DataLoader(TRAIN_DATASET, batch_size=cfgs.batch_size, shuffle=True,
+        num_workers=cfgs.worker_num, worker_init_fn=my_worker_init_fn, collate_fn=collate_fn, pin_memory=cfgs.pin_memory)
+    TEST_DATALOADER = DataLoader(TEST_DATASET, batch_size=cfgs.batch_size, shuffle=False,
+        num_workers=cfgs.worker_num, worker_init_fn=my_worker_init_fn, collate_fn=collate_fn, pin_memory=cfgs.pin_memory)
+else:
+    TRAIN_DATASET = GraspNetDataset(cfgs.dataset_root, cfgs.big_file_root, valid_obj_idxs, grasp_labels, camera=cfgs.camera, split='train', num_points=cfgs.num_point, voxel_size=cfgs.voxel_size, remove_outlier=True, augment=False, load_label=True, depth_type='virtual' if cfgs.virtual_depth else 'real')
+    TEST_DATASET = GraspNetDataset(cfgs.dataset_root, cfgs.big_file_root, valid_obj_idxs, grasp_labels, camera=cfgs.camera, split='test_seen', num_points=cfgs.num_point, voxel_size=cfgs.voxel_size, remove_outlier=True, augment=False, depth_type='virtual' if cfgs.virtual_depth else 'real')
+    TRAIN_DATALOADER = DataLoader(TRAIN_DATASET, batch_size=cfgs.batch_size, shuffle=True,
+        num_workers=cfgs.worker_num, worker_init_fn=my_worker_init_fn, collate_fn=minkowski_collate_fn, pin_memory=cfgs.pin_memory)
+    TEST_DATALOADER = DataLoader(TEST_DATASET, batch_size=cfgs.batch_size, shuffle=False,
+        num_workers=cfgs.worker_num, worker_init_fn=my_worker_init_fn, collate_fn=minkowski_collate_fn, pin_memory=cfgs.pin_memory)
 
-# TRAIN_DATASET = GraspNetMultiDataset(cfgs.dataset_root, valid_obj_idxs, grasp_labels, camera=cfgs.camera, split='train', num_points=cfgs.num_point, voxel_size=cfgs.voxel_size, remove_outlier=True, augment=False)
-# TEST_DATASET = GraspNetMultiDataset(cfgs.dataset_root, valid_obj_idxs, grasp_labels, camera=cfgs.camera, split='test_seen', num_points=cfgs.num_point, voxel_size=cfgs.voxel_size, remove_outlier=True, augment=False)
-# TRAIN_DATALOADER = DataLoader(TRAIN_DATASET, batch_size=cfgs.batch_size, shuffle=True,
-#     num_workers=cfgs.worker_num, worker_init_fn=my_worker_init_fn, collate_fn=collate_fn, pin_memory=cfgs.pin_memory)
-# TEST_DATALOADER = DataLoader(TEST_DATASET, batch_size=cfgs.batch_size, shuffle=False,
-#     num_workers=cfgs.worker_num, worker_init_fn=my_worker_init_fn, collate_fn=collate_fn, pin_memory=cfgs.pin_memory)
 
 print(len(TRAIN_DATASET), len(TEST_DATASET))
 print(len(TRAIN_DATALOADER), len(TEST_DATALOADER))
@@ -119,8 +123,10 @@ print(len(TRAIN_DATALOADER), len(TEST_DATALOADER))
 # net = GraspNet(input_feature_dim=0, num_view=cfgs.num_view, num_angle=12, num_depth=4,
 #                         cylinder_radius=0.05, hmin=-0.02, hmax_list=[0.01,0.02,0.03,0.04])
 
-net = GraspNet(seed_feat_dim=cfgs.seed_feat_dim, is_training=True)
-# net = GraspNet_multimodal(seed_feat_dim=cfgs.seed_feat_dim, img_feat_dim=64, is_training=True)
+if cfgs.multi_modal:
+    net = GraspNet_multimodal(seed_feat_dim=cfgs.seed_feat_dim, img_feat_dim=64, is_training=True)
+else:
+    net = GraspNet(seed_feat_dim=cfgs.seed_feat_dim, is_training=True)
 net.to(device)
 
 # Load the Adam optimizer

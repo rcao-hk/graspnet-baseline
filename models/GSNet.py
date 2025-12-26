@@ -487,29 +487,76 @@ class GraspNet_multimodal(nn.Module):
         seed_xyz_graspable = []
         seed_xyz_graspable_idxs = []
         graspable_num_batch = 0.
+        # for i in range(B):
+        #     cur_mask = graspable_mask[i]
+        #     graspable_num_batch += cur_mask.sum()
+        #     cur_feat = seed_features_flipped[i][cur_mask]  # Ns*feat_dim
+        #     cur_seed_xyz = seed_xyz[i][cur_mask]  # Ns*3
+
+        #     cur_seed_xyz = cur_seed_xyz.unsqueeze(0) # 1*Ns*3
+        #     fps_idxs = furthest_point_sample(cur_seed_xyz, self.M_points)
+        #     cur_seed_xyz_flipped = cur_seed_xyz.transpose(1, 2).contiguous()  # 1*3*Ns
+        #     cur_seed_xyz = gather_operation(cur_seed_xyz_flipped, fps_idxs).transpose(1, 2).squeeze(0).contiguous() # Ns*3
+        #     cur_feat_flipped = cur_feat.unsqueeze(0).transpose(1, 2).contiguous()  # 1*feat_dim*Ns
+        #     cur_feat = gather_operation(cur_feat_flipped, fps_idxs).squeeze(0).contiguous()  # feat_dim*Ns
+
+        #     seed_features_graspable.append(cur_feat)
+        #     seed_xyz_graspable.append(cur_seed_xyz)
+        #     seed_xyz_graspable_idxs.append(fps_idxs.squeeze(0))
+
         for i in range(B):
-            cur_mask = graspable_mask[i]
-            graspable_num_batch += cur_mask.sum()
-            cur_feat = seed_features_flipped[i][cur_mask]  # Ns*feat_dim
-            cur_seed_xyz = seed_xyz[i][cur_mask]  # Ns*3
+            cur_mask = graspable_mask[i]  # (N,)
+            cur_idx = torch.nonzero(cur_mask, as_tuple=False).squeeze(1)  # (Ng,)
+            graspable_num_batch += cur_idx.numel()
 
-            cur_seed_xyz = cur_seed_xyz.unsqueeze(0) # 1*Ns*3
-            fps_idxs = furthest_point_sample(cur_seed_xyz, self.M_points)
-            cur_seed_xyz_flipped = cur_seed_xyz.transpose(1, 2).contiguous()  # 1*3*Ns
-            cur_seed_xyz = gather_operation(cur_seed_xyz_flipped, fps_idxs).transpose(1, 2).squeeze(0).contiguous() # Ns*3
-            cur_feat_flipped = cur_feat.unsqueeze(0).transpose(1, 2).contiguous()  # 1*feat_dim*Ns
-            cur_feat = gather_operation(cur_feat_flipped, fps_idxs).squeeze(0).contiguous()  # feat_dim*Ns
+            # ========== Case 1: Ng == 0 -> random sample from all points ==========
+            if cur_idx.numel() == 0:
+                ridx = torch.randint(0, point_num, (self.M_points,), device=seed_xyz.device)
 
-            seed_features_graspable.append(cur_feat)
+                cur_seed_xyz = seed_xyz[i].index_select(0, ridx).contiguous()              # (M, 3)
+                cur_feat_mc  = seed_features_flipped[i].index_select(0, ridx).contiguous()# (M, C)
+                cur_feat     = cur_feat_mc.transpose(0, 1).contiguous()                   # ✅ (C, M)
+
+                seed_xyz_graspable.append(cur_seed_xyz)
+                seed_features_graspable.append(cur_feat)
+                continue
+
+            # ========== Case 2: 0 < Ng < M -> pad with replacement (no FPS/gather) ==========
+            if cur_idx.numel() < self.M_points:
+                rep = torch.randint(0, cur_idx.numel(), (self.M_points,), device=seed_xyz.device)
+                ridx = cur_idx[rep]  # (M,)
+
+                cur_seed_xyz = seed_xyz[i].index_select(0, ridx).contiguous()              # (M, 3)
+                cur_feat_mc  = seed_features_flipped[i].index_select(0, ridx).contiguous()# (M, C)
+                cur_feat     = cur_feat_mc.transpose(0, 1).contiguous()                   # ✅ (C, M)
+
+                seed_xyz_graspable.append(cur_seed_xyz)
+                seed_features_graspable.append(cur_feat)
+                continue
+
+            # ========== Case 3: Ng >= M -> FPS + gather_operation ==========
+            xyz_in = seed_xyz[i].index_select(0, cur_idx).unsqueeze(0).contiguous()        # (1, Ng, 3)
+            fps_idxs = furthest_point_sample(xyz_in, self.M_points)                        # (1, M)
+            fps_idxs = fps_idxs.to(device=xyz_in.device, dtype=torch.int32).contiguous()   # ✅ must be int32
+
+            cur_seed_xyz = gather_operation(xyz_in.transpose(1, 2).contiguous(), fps_idxs) \
+                            .transpose(1, 2).squeeze(0).contiguous()                      # (M, 3)
+
+            feat_in = seed_features_flipped[i].index_select(0, cur_idx).contiguous()       # (Ng, C)
+            cur_feat = gather_operation(feat_in.unsqueeze(0).transpose(1, 2).contiguous(), fps_idxs).squeeze(0).contiguous()                                          # ✅ (C, M)
+
             seed_xyz_graspable.append(cur_seed_xyz)
-            seed_xyz_graspable_idxs.append(fps_idxs.squeeze(0))
-
+            seed_features_graspable.append(cur_feat)
+            
         seed_xyz_graspable = torch.stack(seed_xyz_graspable, 0)  # B*Ns*3
         seed_features_graspable = torch.stack(seed_features_graspable, 0)  # B*feat_dim*Ns
-        seed_xyz_graspable_idxs = torch.stack(seed_xyz_graspable_idxs, 0)  # B*1*Ns
+        # seed_xyz_graspable_idxs = torch.stack(seed_xyz_graspable_idxs, 0)  # B*1*Ns
         end_points['xyz_graspable'] = seed_xyz_graspable
-        end_points['xyz_graspable_idxs'] = seed_xyz_graspable_idxs
-        end_points['graspable_count_stage1'] = graspable_num_batch / B
+        # end_points['xyz_graspable_idxs'] = seed_xyz_graspable_idxs
+        end_points['graspable_count_stage1'] = (
+            torch.as_tensor(graspable_num_batch, device=seed_xyz.device, dtype=torch.float32)
+            / float(B)
+        ).detach().reshape(())
         
         end_points, res_feat = self.rotation(seed_features_graspable, end_points)
         seed_features_graspable = seed_features_graspable + res_feat
