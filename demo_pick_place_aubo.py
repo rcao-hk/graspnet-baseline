@@ -5,10 +5,10 @@ import os
 import sys
 
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
-sys.path.append(os.path.join(ROOT_DIR, 'pointnet2'))
-sys.path.append(os.path.join(ROOT_DIR, 'utils'))
-sys.path.append(os.path.join(ROOT_DIR, 'models'))
-sys.path.append(os.path.join(ROOT_DIR, 'dataset'))
+sys.path.append(os.path.join(ROOT_DIR, "pointnet2"))
+sys.path.append(os.path.join(ROOT_DIR, "utils"))
+sys.path.append(os.path.join(ROOT_DIR, "models"))
+sys.path.append(os.path.join(ROOT_DIR, "dataset"))
 
 import json
 import time
@@ -36,27 +36,35 @@ from models.GSNet import GraspNet, pred_decode
 
 np.set_printoptions(precision=6, suppress=True)
 
-
 # -------------------------
 # cfg
 # -------------------------
 DEFAULT_CFG = dict(
     robot_ip="192.168.1.115",
-
-    # tool offset mounted on eef: mainly z offset
     robot_eef_offset=[0.0, 0.0, 0.12],
 
-    sensing_joint_pose=[float(np.deg2rad(-19.19)), float(np.deg2rad(-37.32)), float(np.deg2rad(-102.487)),
-                        0.0, float(np.deg2rad(-83.69)), float(np.deg2rad(-17.93))],
+    sensing_joint_pose=[
+        float(np.deg2rad(-19.19)),
+        float(np.deg2rad(-37.32)),
+        float(np.deg2rad(-102.487)),
+        0.0,
+        float(np.deg2rad(-83.69)),
+        float(np.deg2rad(-17.93)),
+    ],
 
-    place_joint_pose=[float(np.deg2rad(-38.30)), float(np.deg2rad(25.64)), float(np.deg2rad(-83.99)),
-                      float(np.deg2rad(-18.57)), float(np.deg2rad(-90.48)), float(np.deg2rad(-38.97))],
+    place_joint_pose=[
+        float(np.deg2rad(-38.30)),
+        float(np.deg2rad(25.64)),
+        float(np.deg2rad(-83.99)),
+        float(np.deg2rad(-18.57)),
+        float(np.deg2rad(-90.48)),
+        float(np.deg2rad(-38.97)),
+    ],
 
-    pick_speed=0.15,
-    place_speed=0.15,
+    pick_speed=0.2,
+    place_speed=0.2,
 
-    # IMPORTANT: keep consistent with your current working pipeline
-    # eMc (4x4)
+    # eMc (4x4) eef->cam
     handeye_tf=np.eye(4).tolist(),
 
     rs_w=1280,
@@ -77,21 +85,59 @@ DEFAULT_CFG = dict(
 
     # --------- filtering / execution control ---------
     rotation_filtering=True,
-    filter_angle_deg=60.0,
+    filter_angle_deg=30.0,
 
-    min_grasp_score=0.20,        # skip execution if best score < this
-    max_attempts=10,             # max perception attempts
-    max_exec=10,                 # max executed pick&place cycles (successful executions)
+    min_grasp_score=0.3,
+    max_attempts=20,
+    max_exec=20,
 
-    VIS=True,
+    VIS=False,
     DO_PLACE=True,
 
     planning_cfg=dict(
-        eef_offset=[0.0, 0.0, 0.03],
-        # local in pick frame
+        eef_offset=[0.0, 0.0, 0.06],
         pre_pick_offset=[0.0, 0.0, -0.05],
-        free_move_height=0.2,
+        free_move_height=0.25,
     ),
+
+    # =======================
+    # Depth restoration config
+    # =======================
+    use_restored_depth=True,
+    dr_project_root="/home/hkclr-user/projects/object_depth_percetion",
+    dr_method="dreds_clearpose_hiss_50k_dav2_complete_obs_iter_unc_cali_convgru_l1_only_scale_norm_robust_init_wo_soft_fuse_l1+grad_sigma_conf_518x518",
+    dr_encoder="vitl",
+    dr_ckpt_epoch=None,
+    dr_latest_ckpt=False,
+
+    dr_iter_num=5,
+    dr_refine_downsample=2,
+    dr_min_depth=0.001,
+    dr_max_depth=5.0,
+    dr_input_width=518,
+    dr_input_height=518,
+
+    dr_scale_norm=True,
+    dr_sn_mode="logbias",
+    dr_robust_init=True,
+
+    dr_depth_factor=1000.0,
+    dr_save_debug=False,
+    dr_debug_dir="debug_depth_restoration",
+
+    # =======================
+    # Data saving (NEW)
+    # =======================
+    save_data=True,                 # <<< 主开关
+    save_root="demo_saved_data",     # run dir root
+    save_only_on_success=True,      # False: 每次 attempt 都存（即使没 grasp 或 score gate 失败）
+
+    # --------- NEW: save grasp visualization pointcloud ---------
+    save_grasp_vis_pcd=True,           # <<< 是否额外输出 pcd_with_grasps.ply
+    save_grasp_vis_voxel=0.005,
+    save_grasp_vis_topk=1,
+    save_grasp_vis_points_per_grasp=2000,
+    save_grasp_vis_use_filtered=True, # True: 用 angle/collision/nms 后的 grasps_filtered; False: 用 grasps_raw
 )
 
 
@@ -110,6 +156,205 @@ def load_cfg(path="demo/config.json"):
 
 
 # -------------------------
+# small io helpers
+# -------------------------
+def ensure_dir(p: str):
+    os.makedirs(p, exist_ok=True)
+
+
+def _jsonable_cfg(cfg: dict):
+    # avoid dumping huge/np types
+    out = {}
+    for k, v in cfg.items():
+        if isinstance(v, np.ndarray):
+            out[k] = v.tolist()
+        elif isinstance(v, (list, tuple, dict, str, int, float, bool)) or v is None:
+            out[k] = v
+        else:
+            out[k] = str(v)
+    return out
+
+
+class DataSaver:
+    def __init__(self, cfg: dict):
+        self.cfg = cfg
+        self.enable = bool(cfg.get("save_data", False))
+        self.only_on_success = bool(cfg.get("save_only_on_success", False))
+        self.run_dir = None
+        if not self.enable:
+            return
+
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        root = str(cfg.get("save_root", "demo_saved_data"))
+        self.run_dir = os.path.join(root, ts)
+        ensure_dir(self.run_dir)
+
+        with open(os.path.join(self.run_dir, "cfg.json"), "w") as f:
+            json.dump(_jsonable_cfg(cfg), f, indent=2, ensure_ascii=False)
+
+        print(f"[SAVE] enabled. run_dir = {self.run_dir}")
+
+    def _write_u16_png(self, path, depth_u16):
+        if depth_u16 is None:
+            return
+        depth_u16 = np.asarray(depth_u16)
+        if depth_u16.dtype != np.uint16:
+            depth_u16 = depth_u16.astype(np.uint16)
+        cv2.imwrite(path, depth_u16)
+
+    def _write_npy(self, path, arr):
+        if arr is None:
+            return
+        np.save(path, np.asarray(arr))
+
+    def _build_o3d_scene_from_crop(self, crop_cloud, crop_color_bgr):
+        """
+        crop_cloud: (H,W,3) float (camera frame)
+        crop_color_bgr: (H,W,3) uint8
+        """
+        if crop_cloud is None:
+            return None
+
+        pts = np.asarray(crop_cloud).reshape(-1, 3).astype(np.float64)
+        if pts.size == 0:
+            return None
+
+        # 过滤无效点：z<=0 或 非有限
+        m = np.isfinite(pts).all(axis=1) & (pts[:, 2] > 1e-6)
+        pts = pts[m]
+        if pts.shape[0] < 10:
+            return None
+
+        scene = o3d.geometry.PointCloud()
+        scene.points = o3d.utility.Vector3dVector(pts)
+
+        if crop_color_bgr is not None:
+            col = np.asarray(crop_color_bgr).reshape(-1, 3).astype(np.float64) / 255.0
+            col = col[m]
+            # open3d color is RGB
+            col = col[:, ::-1].copy()
+            scene.colors = o3d.utility.Vector3dVector(col)
+
+        return scene
+
+    def _save_grasp_vis_pcd(self, save_path, scene, grasps_arr):
+        """
+        Save a single pointcloud containing:
+          - downsampled scene points
+          - sampled points from grasp geometries (top-k after sort+nms)
+        """
+        if scene is None or grasps_arr is None:
+            return False
+        grasps_arr = np.asarray(grasps_arr)
+        if grasps_arr.ndim != 2 or grasps_arr.shape[1] != 17 or grasps_arr.shape[0] == 0:
+            return False
+
+        try:
+            voxel = float(self.cfg.get("save_grasp_vis_voxel", 0.005))
+            topk = int(self.cfg.get("save_grasp_vis_topk", 50))
+            npts = int(self.cfg.get("save_grasp_vis_points_per_grasp", 2000))
+
+            downsampled_scene = scene.voxel_down_sample(voxel_size=voxel)
+
+            gg = GraspGroup(grasps_arr)
+            gg = gg.sort_by_score()
+            gg = gg.nms()
+            gg_vis = gg[:min(topk, len(gg))]
+
+            gg_vis_geo = gg_vis.to_open3d_geometry_list()
+
+            pcd_vis = o3d.geometry.PointCloud(downsampled_scene)
+            for g in gg_vis_geo:
+                # g 通常是 TriangleMesh
+                try:
+                    pcd_vis += g.sample_points_uniformly(number_of_points=npts)
+                except Exception:
+                    # 容错：如果返回不是 mesh
+                    if isinstance(g, o3d.geometry.PointCloud):
+                        pcd_vis += g
+
+            ok = o3d.io.write_point_cloud(save_path, pcd_vis)
+            return bool(ok)
+        except Exception as e:
+            print(f"[SAVE][WARN] save_grasp_vis_pcd failed: {repr(e)}")
+            return False
+
+    def save_attempt(self, attempt_idx: int, payload: dict):
+        if not self.enable:
+            return
+
+        status = payload.get("status", "unknown")
+        if self.only_on_success and status != "ok":
+            return
+
+        ddir = os.path.join(self.run_dir)
+        ensure_dir(ddir)
+
+        # -------- raw / used image & depth --------
+        if payload.get("raw_color_bgr", None) is not None:
+            cv2.imwrite(os.path.join(ddir, f"{attempt_idx:03d}_raw_color.png"), payload["raw_color_bgr"])
+            self._write_npy(os.path.join(ddir, f"{attempt_idx:03d}_raw_color.npy"), payload["raw_color_bgr"])
+
+        self._write_u16_png(os.path.join(ddir, f"{attempt_idx:03d}_raw_depth_u16.png"), payload.get("raw_depth_u16", None))
+        self._write_npy(os.path.join(ddir, f"{attempt_idx:03d}_raw_depth_u16.npy"), payload.get("raw_depth_u16", None))
+        self._write_u16_png(os.path.join(ddir, f"{attempt_idx:03d}_used_depth_u16.png"), payload.get("used_depth_u16", None))
+        self._write_npy(os.path.join(ddir, f"{attempt_idx:03d}_used_depth_u16.npy"), payload.get("used_depth_u16", None))
+
+        if payload.get("restored_depth_u16", None) is not None:
+            self._write_u16_png(os.path.join(ddir, f"{attempt_idx:03d}_restored_depth_u16.png"), payload["restored_depth_u16"])
+            self._write_npy(os.path.join(ddir, f"{attempt_idx:03d}_restored_depth_u16.npy"), payload["restored_depth_u16"])
+
+        # -------- crop image & crop depth --------
+        if payload.get("crop_color_bgr", None) is not None:
+            cv2.imwrite(os.path.join(ddir, f"{attempt_idx:03d}_crop_color.png"), payload["crop_color_bgr"])
+            self._write_npy(os.path.join(ddir, f"{attempt_idx:03d}_crop_color.npy"), payload["crop_color_bgr"])
+
+        self._write_u16_png(os.path.join(ddir, f"{attempt_idx:03d}_crop_depth_u16.png"), payload.get("crop_depth_u16", None))
+        self._write_npy(os.path.join(ddir, f"{attempt_idx:03d}_crop_depth_u16.npy"), payload.get("crop_depth_u16", None))
+        
+        # -------- grasps --------
+        self._write_npy(os.path.join(ddir, f"{attempt_idx:03d}_grasps_raw.npy"), payload.get("grasps_raw", None))
+        self._write_npy(os.path.join(ddir, f"{attempt_idx:03d}_grasps_filtered.npy"), payload.get("grasps_filtered", None))
+        self._write_npy(os.path.join(ddir, f"{attempt_idx:03d}_grasp_best_row.npy"), payload.get("grasp_best_row", None))
+        self._write_npy(os.path.join(ddir, f"{attempt_idx:03d}_cTg_raw.npy"), payload.get("cTg_raw", None))
+        self._write_npy(os.path.join(ddir, f"{attempt_idx:03d}_cTg_aligned.npy"), payload.get("cTg_aligned", None))
+        self._write_npy(os.path.join(ddir, f"{attempt_idx:03d}_bTe.npy"), payload.get("bTe", None))
+        self._write_npy(os.path.join(ddir, f"{attempt_idx:03d}_eMc.npy"), payload.get("eMc", None))
+        self._write_npy(os.path.join(ddir, f"{attempt_idx:03d}_K.npy"), payload.get("K", None))
+
+        # -------- NEW: pointcloud + grasps visualization --------
+        if bool(self.cfg.get("save_grasp_vis_pcd", False)):
+            crop_cloud = payload.get("crop_cloud", None)  # (H,W,3)
+            crop_color = payload.get("crop_color_bgr", None)
+
+            scene = self._build_o3d_scene_from_crop(crop_cloud, crop_color)
+            use_filtered = bool(self.cfg.get("save_grasp_vis_use_filtered", True))
+            grasps_arr = payload.get("grasps_filtered", None) if use_filtered else payload.get("grasps_raw", None)
+
+            vis_path = os.path.join(ddir, f"{attempt_idx:03d}_pcd_with_grasps.ply")
+            ok = self._save_grasp_vis_pcd(vis_path, scene, grasps_arr)
+            if ok:
+                # 可选：再写一个更轻的纯 scene
+                try:
+                    o3d.io.write_point_cloud(os.path.join(ddir, f"{attempt_idx:03d}_pcd_scene_downsampled.ply"),
+                                             scene.voxel_down_sample(voxel_size=float(self.cfg.get("save_grasp_vis_voxel", 0.005))))
+                except Exception:
+                    pass
+
+        # -------- meta --------
+        meta = payload.get("meta", {})
+        meta_out = {
+            "status": status,
+            "attempt_idx": int(attempt_idx),
+            "ts": time.time(),
+            **meta,
+        }
+        with open(os.path.join(ddir, f"{attempt_idx:03d}_meta.json"), "w") as f:
+            json.dump(meta_out, f, indent=2, ensure_ascii=False)
+
+        print(f"[SAVE] attempt {attempt_idx:03d} -> {ddir} (status={status})")
+
+# -------------------------
 # Realsense
 # -------------------------
 def rs_init(w, h, fps):
@@ -120,7 +365,7 @@ def rs_init(w, h, fps):
 
     profile = pipe.start(cfg)
     depth_sensor = profile.get_device().first_depth_sensor()
-    depth_scale = depth_sensor.get_depth_scale()
+    depth_scale = float(depth_sensor.get_depth_scale())
     align = rs.align(rs.stream.color)
 
     color_stream = profile.get_stream(rs.stream.color)
@@ -149,22 +394,21 @@ def rs_get_frame(pipe, align):
 
 # -------------------------
 # grasp alignment: +90 around +Y then -90 around +Z (local)
-# cTg_aligned.R = cTg.R @ (Ry(+90) @ Rz(-90))
 # -------------------------
 def _Ry(deg):
     th = np.deg2rad(deg)
     c, s = np.cos(th), np.sin(th)
-    return np.array([[ c, 0,  s],
-                     [ 0, 1,  0],
-                     [-s, 0,  c]], dtype=np.float64)
+    return np.array([[c, 0, s],
+                     [0, 1, 0],
+                     [-s, 0, c]], dtype=np.float64)
 
 
 def _Rz(deg):
     th = np.deg2rad(deg)
     c, s = np.cos(th), np.sin(th)
-    return np.array([[ c, -s, 0],
-                     [ s,  c, 0],
-                     [ 0,  0, 1]], dtype=np.float64)
+    return np.array([[c, -s, 0],
+                     [s,  c, 0],
+                     [0,  0, 1]], dtype=np.float64)
 
 
 _R_OFF = _Ry(+90.0) @ _Rz(-90.0)
@@ -177,197 +421,92 @@ def align_grasp_pose(cTg: np.ndarray) -> np.ndarray:
 
 
 # -------------------------
-# angle filter
-# - approach axis = R[:,0]
-# - compute angle to either camera +Z or base +Z (recommended)
+# angle filter (base -Z in camera as gravity-down)
 # -------------------------
 def filter_by_approach_angle(
     gg: GraspGroup,
     angle_deg: float,
     bTe: np.ndarray,
     eMc: np.ndarray,
-    use_gravity_down: bool = True,
     apply_grasp_alignment: bool = True,
-    debug: bool = True,
-    debug_topk: int = 10,
 ):
-    """
-    Keep grasps whose (aligned) grasp Z-axis is within angle_deg to gravity direction.
-
-    Prints:
-    - base +Z in camera, gravity direction in camera
-    - alignment rotation summary (R_off, and its z-axis v = R_off[:,2])
-    - angle stats and top-k (best) angles with their scores
-    - which grasps are kept
-
-    Note:
-      Here we test (aligned grasp Z) vs gravity direction.
-    """
     if len(gg) == 0:
-        if debug:
-            print("[ANGLE] empty gg")
         return gg
 
     bTe = np.asarray(bTe, dtype=np.float64)
     eMc = np.asarray(eMc, dtype=np.float64)
 
-    # base->cam
-    bTc = bTe @ eMc
-    z_base_cam = bTc[:3, :3] @ np.array([0.0, 0.0, 1.0], dtype=np.float64)
+    bTc_raw = bTe @ eMc
+    cTb = np.linalg.inv(bTc_raw)
 
-    # gravity direction in camera
-    g_cam = (-z_base_cam) if use_gravity_down else (z_base_cam)
-    g_cam = g_cam / (np.linalg.norm(g_cam) + 1e-12)
+    z_base_cam = cTb[:3, :3] @ np.array([0.0, 0.0, 1.0], dtype=np.float64)
+    z_base_cam = z_base_cam / (np.linalg.norm(z_base_cam) + 1e-12)
+    base_minus_z_cam = -z_base_cam
 
-    # grasp rotations in camera
     R_all = np.asarray(gg.rotation_matrices, dtype=np.float64)  # (N,3,3)
 
-    v = None
-    R_off = None
     if apply_grasp_alignment:
-        th_y = np.deg2rad(90.0)
-        th_z = np.deg2rad(-90.0)
-        Ry = np.array([[ np.cos(th_y), 0.0, np.sin(th_y)],
-                       [ 0.0,         1.0, 0.0        ],
-                       [-np.sin(th_y), 0.0, np.cos(th_y)]], dtype=np.float64)
-        Rz = np.array([[ np.cos(th_z), -np.sin(th_z), 0.0],
-                       [ np.sin(th_z),  np.cos(th_z), 0.0],
-                       [ 0.0,           0.0,          1.0]], dtype=np.float64)
-        R_off = Ry @ Rz
-
-        # z-axis of aligned grasp in camera: cRg @ (R_off[:,2])
-        v = R_off[:, 2]
-        z_grasp_cam = np.einsum("nij,j->ni", R_all, v)  # (N,3)
+        v = _R_OFF[:, 2]
+        z_grasp_cam = np.einsum("nij,j->ni", R_all, v)
     else:
         z_grasp_cam = R_all[:, :, 2]
 
-    # angle(z_grasp_cam, g_cam)
-    zn = np.linalg.norm(z_grasp_cam, axis=1) + 1e-12
-    cosv = (z_grasp_cam @ g_cam) / zn
+    z_grasp_cam = z_grasp_cam / (np.linalg.norm(z_grasp_cam, axis=1, keepdims=True) + 1e-12)
+
+    cosv = z_grasp_cam @ base_minus_z_cam
     cosv = np.clip(cosv, -1.0, 1.0)
-    ang = np.degrees(np.arccos(cosv))  # (N,)
+    ang = np.degrees(np.arccos(cosv))
 
     keep = np.where(ang <= float(angle_deg))[0].tolist()
-
-    if debug:
-        N = len(gg)
-        scores = np.asarray(gg.scores, dtype=np.float64) if hasattr(gg, "scores") else None
-
-        print("\n[ANGLE] ===== angle filter debug =====")
-        print(f"[ANGLE] N={N}, thresh={float(angle_deg):.2f} deg, "
-              f"use_gravity_down={use_gravity_down}, apply_grasp_alignment={apply_grasp_alignment}")
-        print(f"[ANGLE] z_base_cam = {z_base_cam}  (should match your debug)")
-        print(f"[ANGLE] g_cam      = {g_cam}")
-
-        if apply_grasp_alignment:
-            print("[ANGLE] R_off = Ry(+90) @ Rz(-90):\n", R_off)
-            print(f"[ANGLE] v = R_off[:,2] (aligned grasp Z in original grasp frame) = {v}")
-
-        print(f"[ANGLE] ang stats: min={ang.min():.2f}, max={ang.max():.2f}, mean={ang.mean():.2f}")
-        print(f"[ANGLE] kept {len(keep)}/{N}")
-
-        # show top-k smallest angles (most aligned to gravity direction)
-        order = np.argsort(ang)
-        k = int(min(max(debug_topk, 1), N))
-        print(f"[ANGLE] top-{k} smallest angles:")
-        for rank in range(k):
-            i = int(order[rank])
-            if scores is not None:
-                print(f"  idx={i:4d}  ang={ang[i]:7.2f}  score={scores[i]:.4f}")
-            else:
-                print(f"  idx={i:4d}  ang={ang[i]:7.2f}")
-
-        # also show how close each kept grasp is to the threshold
-        if len(keep) > 0:
-            kept_ang = ang[keep]
-            print(f"[ANGLE] kept angles: min={kept_ang.min():.2f}, max={kept_ang.max():.2f}")
-        else:
-            print("[ANGLE] kept angles: <none>")
-
-        print("[ANGLE] ===== end debug =====\n")
-
     return gg[keep] if len(keep) > 0 else gg[[]]
-
 
 
 # -------------------------
 # visualization (camera frame)
 # -------------------------
 def visualize_camera_scene_with_frames(cfg, crop_cloud, crop_color, cTg, grasp_meta, bTe, eMc):
-    """
-    Visualize everything in *camera frame*:
-      - cropped scene point cloud (camera)
-      - camera frame (I)
-      - base frame projected into camera: cTb = inv(bTc), where bTc = bTe @ eMc
-      - raw eef frame in camera: cT_eef = inv(eMc)    (since eMc is eef->cam)
-      - tool frame in camera: cT_tool = cT_eef @ eefTtool (cfg["robot_eef_offset"])
-      - aligned grasp frame (cTg_aligned): rotate +90 about +Y then -90 about +Z in grasp local frame
-      - gripper geometry plotted at aligned grasp pose
-    """
-    import numpy as np
-    import open3d as o3d
-    from graspnetAPI.utils.utils import plot_gripper_pro_max
-
     score, width, depth = grasp_meta
 
-    # ---------------- scene (camera) ----------------
     scene = o3d.geometry.PointCloud()
     scene.points = o3d.utility.Vector3dVector(crop_cloud.reshape(-1, 3))
     scene.colors = o3d.utility.Vector3dVector((crop_color.reshape(-1, 3) / 255.0).astype(np.float64))
 
     cam_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.05)
 
-    # ---------------- base frame in camera ----------------
-    # Assumption consistent with your chain: bTg = bTe @ eMc @ cTg
-    # => bTe: base->eef, eMc: eef->cam, so bTc = base->cam = bTe @ eMc, and cTb = inv(bTc)
     bTe = np.asarray(bTe, dtype=np.float64)
     eMc = np.asarray(eMc, dtype=np.float64)
     bTc = bTe @ eMc
     cTb = np.linalg.inv(bTc)
-
     base_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.12)
     base_frame.transform(cTb)
 
-    # ---------------- eef/tool in camera ----------------
-    # eMc: eef->cam  => cT_eef = inv(eMc)
     cT_eef = np.linalg.inv(eMc)
-
     eef_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.10)
     eef_frame.transform(cT_eef)
 
     tool_offset = np.array(cfg.get("robot_eef_offset", [0.0, 0.0, 0.0]), dtype=np.float64).reshape(3)
     eefTtool = np.eye(4, dtype=np.float64)
     eefTtool[:3, 3] = tool_offset
-
     cT_tool = cT_eef @ eefTtool
     tool_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.10)
     tool_frame.transform(cT_tool)
 
     cTg = np.asarray(cTg, dtype=np.float64)
-    R_off = _Ry(+90.0) @ _Rz(-90.0)              # local: +Y then -Z
-    cTg_aligned = cTg.copy()
-    cTg_aligned[:3, :3] = cTg[:3, :3] @ R_off    # right-multiply => rotate about grasp local axes
+    cTg_aligned = align_grasp_pose(cTg)
 
     grasp_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.10)
     grasp_frame.transform(cTg_aligned)
 
-    # gripper geometry at aligned grasp pose
     gr = plot_gripper_pro_max(
         cTg[:3, 3],
         cTg[:3, :3],
         float(width), float(depth), float(score)
     )
 
-    # ---------------- optional debug print ----------------
-    # base +Z expressed in camera (direction)
-    z_base_in_cam = bTc[:3, :3] @ np.array([0.0, 0.0, 1.0], dtype=np.float64)
-    print("[VIS DEBUG] base +Z in camera =", z_base_in_cam)
-
     o3d.visualization.draw_geometries(
         [scene, cam_frame, base_frame, eef_frame, tool_frame, grasp_frame, gr],
         width=1536, height=864
     )
-
     return cTg_aligned
 
 
@@ -456,24 +595,218 @@ def resolve_waypoints_nearest_gripper_pose(aubo, pose_list, q_start=None, verbos
     return new_list, q_curr
 
 
-# -------------------------
-# inference: now supports base-frame angle filter
-# -------------------------
+# ==========================================================
+# Depth Restoration: init + run
+# ==========================================================
+def _maybe_add_sys_path(p: str):
+    p = os.path.abspath(p)
+    if p not in sys.path:
+        sys.path.insert(0, p)
+
+
+def build_depth_restorer(cfg: dict, device: torch.device):
+    if not bool(cfg.get("use_restored_depth", False)):
+        return None
+
+    dr_root = cfg.get("dr_project_root", "")
+    if not dr_root or (not os.path.isdir(dr_root)):
+        print(f"[DR][WARN] dr_project_root not found: {dr_root}. Disable restored depth.")
+        return None
+
+    _maybe_add_sys_path(dr_root)
+
+    try:
+        from model.dv2_res_conv import (
+            DV2_Two_Branch_Unc_ConvGRU,
+            DV2_Two_Branch_Unc_Iter_ConvGRU,
+            DV2_Two_Branch_Unc_Filter_ConvGRU,
+            DV2_Two_Branch_ConvGRU,
+            DV2_Two_Branch_Unc_Norm_Iter_ConvGRU,
+        )
+    except Exception as e:
+        print(f"[DR][WARN] import dv2_res_conv failed: {repr(e)}. Disable restored depth.")
+        return None
+
+    method = str(cfg["dr_method"])
+    encoder = str(cfg["dr_encoder"])
+    iter_num = int(cfg["dr_iter_num"])
+    refine_downsample = int(cfg["dr_refine_downsample"])
+    min_depth = float(cfg["dr_min_depth"])
+    max_depth = float(cfg["dr_max_depth"])
+
+    if cfg.get("dr_ckpt_epoch", None) is not None:
+        ckpt_name = os.path.join(dr_root, "log", method, f"{encoder}_epoch_{int(cfg['dr_ckpt_epoch'])}.pth")
+    elif bool(cfg.get("dr_latest_ckpt", False)):
+        ckpt_name = os.path.join(dr_root, "log", method, f"{encoder}_latest.pth")
+    else:
+        ckpt_name = os.path.join(dr_root, "log", method, f"{encoder}_best.pth")
+
+    if not os.path.isfile(ckpt_name):
+        print(f"[DR][WARN] ckpt not found: {ckpt_name}. Disable restored depth.")
+        return None
+
+    print(f"[DR] Loading checkpoint: {ckpt_name}")
+    checkpoint = torch.load(ckpt_name, map_location="cpu")
+
+    try:
+        if "none" in method:
+            model = DV2_Two_Branch_ConvGRU(
+                encoder=encoder, output_dim=1,
+                iter_num=iter_num, refine_downsample=refine_downsample,
+                min_depth=min_depth, max_depth=max_depth
+            )
+        elif "vanilla" in method:
+            model = DV2_Two_Branch_Unc_ConvGRU(
+                encoder=encoder, output_dim=1,
+                iter_num=iter_num, refine_downsample=refine_downsample,
+                min_depth=min_depth, max_depth=max_depth
+            )
+        elif "iter" in method:
+            model = DV2_Two_Branch_Unc_Iter_ConvGRU(
+                encoder=encoder, output_dim=1,
+                iter_num=iter_num, refine_downsample=refine_downsample,
+                min_depth=min_depth, max_depth=max_depth
+            )
+            if bool(cfg.get("dr_scale_norm", False)):
+                model = DV2_Two_Branch_Unc_Norm_Iter_ConvGRU(
+                    encoder=encoder, output_dim=2,
+                    iter_num=iter_num, refine_downsample=refine_downsample,
+                    min_depth=min_depth, max_depth=max_depth,
+                    use_scale_norm=True,
+                    sn_align_mode=str(cfg.get("dr_sn_mode", "logbias")),
+                    noisy_robust_init=bool(cfg.get("dr_robust_init", False)),
+                )
+        elif "filter" in method:
+            model = DV2_Two_Branch_Unc_Filter_ConvGRU(
+                encoder=encoder, output_dim=2,
+                iter_num=iter_num, refine_downsample=refine_downsample,
+                min_depth=min_depth, max_depth=max_depth
+            )
+        else:
+            print(f"[DR][WARN] Unrecognized dr_method: {method}. Disable restored depth.")
+            return None
+    except Exception as e:
+        print(f"[DR][WARN] model build failed: {repr(e)}. Disable restored depth.")
+        return None
+
+    try:
+        sd = checkpoint["model"] if isinstance(checkpoint, dict) and ("model" in checkpoint) else checkpoint
+        sd = {k.replace("module.", ""): v for k, v in sd.items()}
+        model.load_state_dict(sd, strict=True)
+    except Exception as e:
+        print(f"[DR][WARN] load_state_dict failed: {repr(e)}. Disable restored depth.")
+        return None
+
+    model = model.to(device).eval()
+    print("[DR] Depth restorer ready.")
+    return model
+
+
 @torch.no_grad()
-def infer_best_grasp(cfg, net, device, color_bgr, depth_u16, K, factor_depth, bTe, eMc):
-    H, W = depth_u16.shape[:2]
+def run_depth_restoration(
+    cfg: dict,
+    dr_model,
+    color_bgr: np.ndarray,
+    depth_raw_u16: np.ndarray,
+    depth_scale: float,
+    factor_depth: float,
+    step_tag: str = "",
+):
+    """
+    Returns:
+      depth_used_u16 (uint16) in the SAME unit as RealSense raw.
+    """
+    if dr_model is None:
+        return depth_raw_u16
+
+    try:
+        H, W = depth_raw_u16.shape[:2]
+        depth_m = depth_raw_u16.astype(np.float32) * float(depth_scale)
+        depth_mm = depth_m * float(cfg.get("dr_depth_factor", 1000.0))
+
+        input_size = (int(cfg["dr_input_width"]), int(cfg["dr_input_height"]))
+        out = dr_model.infer_image(color_bgr, depth_mm, input_size, True)
+
+        if isinstance(out, (list, tuple)) and len(out) >= 4:
+            pred_depth = out[3]
+        else:
+            raise RuntimeError("infer_image returned unexpected format.")
+
+        if isinstance(pred_depth, torch.Tensor):
+            pred_depth = pred_depth.detach().cpu().numpy()
+        pred_depth = np.squeeze(pred_depth).astype(np.float32)  # meters (model output size)
+
+        pred_depth_m = cv2.resize(pred_depth, (W, H), interpolation=cv2.INTER_NEAREST)
+        pred_depth_m = np.clip(pred_depth_m, float(cfg["dr_min_depth"]), float(cfg["dr_max_depth"]))
+
+        depth_units = pred_depth_m * float(factor_depth)
+        depth_units = np.where(pred_depth_m > 0, depth_units, 0.0)
+        depth_used_u16 = np.clip(depth_units, 0, 65535).astype(np.uint16)
+
+        if bool(cfg.get("dr_save_debug", False)):
+            ensure_dir(cfg.get("dr_debug_dir", "debug_depth_restoration"))
+            tag = step_tag if step_tag else "frame"
+            cv2.imwrite(os.path.join(cfg["dr_debug_dir"], f"{tag}_color.png"), color_bgr)
+            cv2.imwrite(os.path.join(cfg["dr_debug_dir"], f"{tag}_raw_depth_u16.png"), depth_raw_u16)
+            cv2.imwrite(os.path.join(cfg["dr_debug_dir"], f"{tag}_restored_depth_u16.png"), depth_used_u16)
+
+        return depth_used_u16
+
+    except Exception as e:
+        print(f"[DR][WARN] restoration failed, fallback to raw depth. err={repr(e)}")
+        return depth_raw_u16
+
+
+# -------------------------
+# inference (returns more for saving)
+# -------------------------
+def _safe_gg_array(gg):
+    if gg is None:
+        return None
+    if hasattr(gg, "grasp_group_array"):
+        try:
+            return np.asarray(gg.grasp_group_array)
+        except Exception:
+            return None
+    return None
+
+
+@torch.no_grad()
+def infer_grasps_with_debug(
+    cfg,
+    net,
+    device,
+    color_bgr,
+    depth_used_u16,
+    K,
+    factor_depth,
+    bTe,
+    eMc,
+):
+    """
+    Returns dict:
+      crop_color_bgr, crop_depth_u16, crop_cloud,
+      grasps_raw (Nx17),
+      grasps_filtered (Mx17 or None if empty),
+      best_row (17,) or None,
+      cTg_raw (4x4) or None,
+      meta (score/width/depth) or None
+    """
+    H, W = depth_used_u16.shape[:2]
     cam_info = CameraInfo(
         W, H,
         float(K[0, 0]), float(K[1, 1]),
         float(K[0, 2]), float(K[1, 2]),
-        float(factor_depth)
+        float(factor_depth),
     )
-    cloud = create_point_cloud_from_depth_image(depth_u16, cam_info, organized=True)
+    cloud = create_point_cloud_from_depth_image(depth_used_u16, cam_info, organized=True)
 
     y0, y1 = int(cfg["camera_crop_y_top"]), int(cfg["camera_crop_y_bottom"])
     x0, x1 = int(cfg["camera_crop_x_left"]), int(cfg["camera_crop_x_right"])
-    crop_color = color_bgr[y0:y1, x0:x1, :]
-    crop_cloud = cloud[y0:y1, x0:x1, :]
+
+    crop_color = color_bgr[y0:y1, x0:x1, :].copy()
+    crop_depth = depth_used_u16[y0:y1, x0:x1].copy()
+    crop_cloud = cloud[y0:y1, x0:x1, :].copy()
 
     cloud_flat = crop_cloud.reshape(-1, 3)
     color_flat = crop_color.reshape(-1, 3)
@@ -500,7 +833,11 @@ def infer_best_grasp(cfg, net, device, color_bgr, depth_u16, K, factor_depth, bT
 
     coordinates_batch, features_batch = ME.utils.sparse_collate([coors_t], [feats_t], dtype=torch.float32)
     coordinates_batch, features_batch, _, quantize2original = ME.utils.sparse_quantize(
-        coordinates_batch, features_batch, return_index=True, return_inverse=True, device=device
+        coordinates_batch,
+        features_batch,
+        return_index=True,
+        return_inverse=True,
+        device=device,
     )
 
     batch = dict(
@@ -513,10 +850,10 @@ def infer_best_grasp(cfg, net, device, color_bgr, depth_u16, K, factor_depth, bT
 
     end_points = net(batch)
     grasp_preds = pred_decode(end_points)
-    preds = torch.stack(grasp_preds).reshape(-1, 17).detach().cpu().numpy()
-    gg = GraspGroup(preds)
+    preds_raw = torch.stack(grasp_preds).reshape(-1, 17).detach().cpu().numpy()  # Nx17
+    gg = GraspGroup(preds_raw)
 
-    # collision
+    # collision (full cloud)
     if float(cfg["collision_thresh"]) > 0:
         mfcd = ModelFreeCollisionDetectorTorch(
             cloud.reshape(-1, 3),
@@ -528,34 +865,60 @@ def infer_best_grasp(cfg, net, device, color_bgr, depth_u16, K, factor_depth, bT
 
     gg = gg.sort_by_score().nms()
 
-    # angle filter (camera or base)
-    gg = gg.sort_by_score().nms()
-
     if bool(cfg["rotation_filtering"]):
         gg = filter_by_approach_angle(
             gg,
             float(cfg["filter_angle_deg"]),
             bTe=bTe,
             eMc=eMc,
-            use_gravity_down=True,       # base +Z up, gravity is -Z
-            apply_grasp_alignment=True,  # 和执行用的 grasp alignment 保持一致
-            debug=True,
+            apply_grasp_alignment=True,
         )
-        if len(gg) == 0:
-            return None  # or raise / return empty per your flow
+
+    preds_filtered = _safe_gg_array(gg)
+    if preds_filtered is None:
+        # still allow saving raw predictions
+        preds_filtered = None
+
+    if len(gg) == 0:
+        return dict(
+            crop_color_bgr=crop_color,
+            crop_depth_u16=crop_depth,
+            crop_cloud=crop_cloud,
+            grasps_raw=preds_raw,
+            grasps_filtered=preds_filtered,
+            best_row=None,
+            cTg_raw=None,
+            meta=None,
+        )
 
     best = gg[0]
+    best_row = None
+    if hasattr(gg, "grasp_group_array"):
+        try:
+            best_row = np.asarray(gg.grasp_group_array)[0].copy()
+        except Exception:
+            best_row = None
+
     R = best.rotation_matrix.astype(np.float64)
     t = best.translation.astype(np.float64)
     width = float(best.width)
     depth = float(best.depth)
     score = float(best.score)
 
-    cTg = np.eye(4, dtype=np.float64)
-    cTg[:3, :3] = R
-    cTg[:3, 3] = t
+    cTg_raw = np.eye(4, dtype=np.float64)
+    cTg_raw[:3, :3] = R
+    cTg_raw[:3, 3] = t
 
-    return cTg, (score, width, depth), (crop_cloud, crop_color)
+    return dict(
+        crop_color_bgr=crop_color,
+        crop_depth_u16=crop_depth,
+        crop_cloud=crop_cloud,
+        grasps_raw=preds_raw,
+        grasps_filtered=preds_filtered,
+        best_row=best_row,
+        cTg_raw=cTg_raw,
+        meta=(score, width, depth),
+    )
 
 
 # -------------------------
@@ -563,14 +926,17 @@ def infer_best_grasp(cfg, net, device, color_bgr, depth_u16, K, factor_depth, bT
 # -------------------------
 def main():
     cfg = load_cfg("demo/config.json")
+    saver = DataSaver(cfg)
 
     aubo = AuboController(robot_ip_=cfg["robot_ip"], eef_offset=cfg["robot_eef_offset"])
     gripper = Gripper(True)
 
     pipe, align, depth_scale, K = rs_init(cfg["rs_w"], cfg["rs_h"], cfg["rs_fps"])
-    factor_depth = 1.0 / depth_scale
+    factor_depth = 1.0 / float(depth_scale)
 
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
+    # grasp net
     net = GraspNet(seed_feat_dim=int(cfg["seed_feat_dim"]), is_training=False).to(device).eval()
     ckpt = torch.load(cfg["checkpoint_path"], map_location=device)
     try:
@@ -578,46 +944,129 @@ def main():
     except Exception:
         net.load_state_dict(ckpt["model_state_dict"])
 
+    # depth restorer (optional)
+    dr_model = build_depth_restorer(cfg, device)
     eMc = np.array(cfg["handeye_tf"], dtype=np.float64)
 
     executed = 0
     attempts = 0
 
     try:
-        # always start with open gripper
         gripper.config_gripper(open=True)
 
         while attempts < int(cfg["max_attempts"]) and executed < int(cfg["max_exec"]):
             attempts += 1
             print(f"\n========== Attempt {attempts}/{cfg['max_attempts']} | Exec {executed}/{cfg['max_exec']} ==========")
 
-            # move to sensing pose (clean start)
+            # sensing pose
             aubo.moveJ(cfg["sensing_joint_pose"], speed=cfg["pick_speed"])
 
-            # current base->eef (from robot)
+            # current base->eef
             _, bTe = aubo.get_current_state()
             bTe = np.array(bTe, dtype=np.float64)
 
             # capture
-            color_bgr, depth_u16 = rs_get_frame(pipe, align)
+            color_bgr, depth_raw_u16 = rs_get_frame(pipe, align)
             if color_bgr is None:
                 print("[WARN] Realsense capture failed, skip.")
+                # save attempt (optional)
+                saver.save_attempt(attempts, dict(
+                    status="capture_fail",
+                    raw_color_bgr=None,
+                    raw_depth_u16=None,
+                    used_depth_u16=None,
+                    restored_depth_u16=None,
+                    crop_color_bgr=None,
+                    crop_depth_u16=None,
+                    grasps_raw=None,
+                    grasps_filtered=None,
+                    grasp_best_row=None,
+                    cTg_raw=None,
+                    cTg_aligned=None,
+                    bTe=bTe,
+                    eMc=eMc,
+                    K=K,
+                    meta={"reason": "capture_fail"},
+                ))
                 continue
-            
-            bTc = bTe @ eMc
-            bRc = bTc[:3, :3]
-            z_base_in_cam = bRc.T @ np.array([0.0, 0.0, 1.0])  # because bRc maps base->cam, so base vector to cam: bRc @ v_base
-            # 更直接：z_base_in_cam = bRc @ [0,0,1]
-            z_base_in_cam = bRc @ np.array([0.0, 0.0, 1.0])
-            print("[DEBUG] base +Z expressed in camera =", z_base_in_cam)
 
-            # infer
+            # optional depth restoration
+            depth_used_u16 = depth_raw_u16
+            restored_depth_u16 = None
+            if bool(cfg.get("use_restored_depth", False)):
+                depth_used_u16 = run_depth_restoration(
+                    cfg, dr_model, color_bgr, depth_raw_u16,
+                    depth_scale=depth_scale, factor_depth=factor_depth,
+                    step_tag=f"att{attempts:02d}"
+                )
+                # if restoration enabled, treat used depth as restored (even if fallback happened)
+                restored_depth_u16 = depth_used_u16
+
+            # infer grasps (with debug outputs)
             try:
-                cTg_raw, meta, crop_pack = infer_best_grasp(
-                    cfg, net, device, color_bgr, depth_u16, K, factor_depth, bTe=bTe, eMc=eMc
+                out = infer_grasps_with_debug(
+                    cfg, net, device,
+                    color_bgr, depth_used_u16,
+                    K, factor_depth,
+                    bTe=bTe, eMc=eMc
                 )
             except Exception as ex:
                 print(f"[WARN] inference failed: {repr(ex)}")
+                saver.save_attempt(attempts, dict(
+                    status="infer_fail",
+                    raw_color_bgr=color_bgr,
+                    raw_depth_u16=depth_raw_u16,
+                    used_depth_u16=depth_used_u16,
+                    restored_depth_u16=restored_depth_u16,
+                    crop_color_bgr=None,
+                    crop_depth_u16=None,
+                    grasps_raw=None,
+                    grasps_filtered=None,
+                    grasp_best_row=None,
+                    cTg_raw=None,
+                    cTg_aligned=None,
+                    bTe=bTe, eMc=eMc, K=K,
+                    meta={"reason": "infer_fail", "err": repr(ex)},
+                ))
+                continue
+
+            crop_color = out["crop_color_bgr"]
+            crop_depth = out["crop_depth_u16"]
+            crop_cloud = out["crop_cloud"]
+            preds_raw = out["grasps_raw"]
+            preds_filtered = out["grasps_filtered"]
+            best_row = out["best_row"]
+            cTg_raw = out["cTg_raw"]
+            meta = out["meta"]  # (score,width,depth) or None
+
+            # save (always attempt, unless save_only_on_success=True)
+            base_payload = dict(
+                raw_color_bgr=color_bgr,
+                raw_depth_u16=depth_raw_u16,
+                used_depth_u16=depth_used_u16,
+                restored_depth_u16=restored_depth_u16 if bool(cfg.get("use_restored_depth", False)) else None,
+                crop_color_bgr=crop_color,
+                crop_depth_u16=crop_depth,
+                grasps_raw=preds_raw,
+                grasps_filtered=preds_filtered,
+                crop_cloud=crop_cloud,
+                grasp_best_row=best_row,
+                cTg_raw=cTg_raw,
+                cTg_aligned=None,  # fill later if ok
+                bTe=bTe,
+                eMc=eMc,
+                K=K,
+                meta=dict(
+                    use_restored_depth=bool(cfg.get("use_restored_depth", False)),
+                    rotation_filtering=bool(cfg.get("rotation_filtering", False)),
+                    filter_angle_deg=float(cfg.get("filter_angle_deg", 0.0)),
+                ),
+            )
+
+            if cTg_raw is None or meta is None:
+                print("[SKIP] no grasp after filtering.")
+                base_payload["status"] = "no_grasp"
+                saver.save_attempt(attempts, base_payload)
                 continue
 
             score, width, gdepth = meta
@@ -626,24 +1075,30 @@ def main():
             # score gate
             if float(score) < float(cfg["min_grasp_score"]):
                 print(f"[SKIP] score {score:.4f} < min_grasp_score {cfg['min_grasp_score']:.4f}")
+                base_payload["status"] = "score_gate"
+                base_payload["meta"].update(dict(score=float(score), width=float(width), depth=float(gdepth)))
+                saver.save_attempt(attempts, base_payload)
                 continue
 
-            crop_cloud, crop_color = crop_pack
-
-            # visualize (optional) + align for execution
+            # align for execution (+ optional visualize)
             if bool(cfg["VIS"]):
                 cTg_aligned = visualize_camera_scene_with_frames(cfg, crop_cloud, crop_color, cTg_raw, meta, bTe, eMc)
             else:
                 cTg_aligned = align_grasp_pose(cTg_raw)
 
-            # compute base grasp pose (keep consistent with your current working execution)
+            base_payload["cTg_aligned"] = cTg_aligned
+            base_payload["meta"].update(dict(score=float(score), width=float(width), depth=float(gdepth)))
+            base_payload["status"] = "ok"
+            saver.save_attempt(attempts, base_payload)
+
+            # compute base grasp pose
             bTg = bTe @ eMc @ cTg_aligned
 
             # plan
             planner = BinPickingPlanner(eMc, cfg["planning_cfg"])
             pick_wps, retreat_wps = planner.plan_pick(bTg)
 
-            # nearest-wrist resolve (per waypoint)
+            # nearest-wrist resolve
             q_now = aubo.get_jq()
             pick_wps, q_end_pick = resolve_waypoints_nearest_gripper_pose(aubo, pick_wps, q_start=q_now, verbose=False)
             retreat_wps, _ = resolve_waypoints_nearest_gripper_pose(aubo, retreat_wps, q_start=q_end_pick, verbose=False)
@@ -658,10 +1113,8 @@ def main():
             if bool(cfg["DO_PLACE"]) and (cfg.get("place_joint_pose", None) is not None):
                 aubo.moveJ(cfg["place_joint_pose"], speed=cfg["place_speed"])
                 gripper.config_gripper(open=True)
-                # back
                 aubo.moveJ(cfg["sensing_joint_pose"], speed=cfg["place_speed"])
             else:
-                # still return
                 aubo.moveJ(cfg["sensing_joint_pose"], speed=cfg["place_speed"])
 
             executed += 1
