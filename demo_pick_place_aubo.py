@@ -75,19 +75,24 @@ DEFAULT_CFG = dict(
     seed_feat_dim=512,
     num_point=15000,
     voxel_size=0.005,
-    collision_thresh=0.01,
-    collision_voxel_size=0.005,
+    collision_thresh=0.05,
+    collision_voxel_size=0.01,
 
-    camera_crop_x_left=316,
-    camera_crop_x_right=772,
-    camera_crop_y_top=202,
-    camera_crop_y_bottom=637,
+    # camera_crop_x_left=316,
+    # camera_crop_x_right=772,
+    # camera_crop_y_top=202,
+    # camera_crop_y_bottom=637,
+
+    camera_crop_x_left=346, camera_crop_x_right=796, camera_crop_y_top=325, camera_crop_y_bottom=717,
 
     # --------- filtering / execution control ---------
     rotation_filtering=True,
-    filter_angle_deg=30.0,
+    filter_angle_deg=40.0,
 
-    min_grasp_score=0.3,
+    # --------- width gate ---------
+    min_grasp_width_m=0.06,   # 5cm: filter out grasps with width < this
+    
+    min_grasp_score=0.2,
     max_attempts=20,
     max_exec=20,
 
@@ -125,13 +130,19 @@ DEFAULT_CFG = dict(
     dr_save_debug=False,
     dr_debug_dir="debug_depth_restoration",
 
+    enable_conf_reweight=True,     # <<< 主开关：用 DR 的 unc_map 重权重 grasp score（NMS 前）
+    conf_reweight_debug=False,     # 打印一些调试信息
+    conf_reweight_use_mean_fallback=True,  # 投影出界/无效Z用均值回填
+    
     # =======================
-    # Data saving (NEW)
+    # Data saving
     # =======================
     save_data=True,                 # <<< 主开关
     save_root="demo_saved_data",     # run dir root
     save_only_on_success=True,      # False: 每次 attempt 都存（即使没 grasp 或 score gate 失败）
-
+    save_unc_pmin = 1.0,
+    save_unc_pmax = 99.0,
+    
     # --------- NEW: save grasp visualization pointcloud ---------
     save_grasp_vis_pcd=True,           # <<< 是否额外输出 pcd_with_grasps.ply
     save_grasp_vis_voxel=0.005,
@@ -175,6 +186,30 @@ def _jsonable_cfg(cfg: dict):
     return out
 
 
+def _normalize_to_uint8(x: np.ndarray, pmin=1.0, pmax=99.0, eps=1e-6):
+    """
+    Robust normalize by percentiles -> uint8 [0,255].
+    """
+    x = np.asarray(x)
+    x = np.squeeze(x)
+
+    # handle invalid
+    m = np.isfinite(x)
+    if not np.any(m):
+        return np.zeros_like(x, dtype=np.uint8)
+
+    vals = x[m].astype(np.float32)
+    lo = float(np.percentile(vals, pmin))
+    hi = float(np.percentile(vals, pmax))
+    if hi <= lo:
+        hi = lo + eps
+
+    y = (x.astype(np.float32) - lo) / (hi - lo)
+    y = np.clip(y, 0.0, 1.0)
+    y_u8 = (y * 255.0 + 0.5).astype(np.uint8)
+    return y_u8
+
+
 class DataSaver:
     def __init__(self, cfg: dict):
         self.cfg = cfg
@@ -207,6 +242,53 @@ class DataSaver:
             return
         np.save(path, np.asarray(arr))
 
+    # =========================
+    # NEW: uncertainty saving
+    # =========================
+    def _normalize_to_uint8(self, x: np.ndarray, pmin=1.0, pmax=99.0, eps=1e-6):
+        """
+        Robust normalize (percentile) -> uint8 [0,255]
+        NOTE: uncertainty larger => less reliable, we keep monotonic mapping:
+              larger uncertainty => larger intensity => more "yellow" in viridis.
+        """
+        x = np.asarray(x)
+        x = np.squeeze(x).astype(np.float32)
+
+        m = np.isfinite(x)
+        if not np.any(m):
+            return np.zeros_like(x, dtype=np.uint8)
+
+        vals = x[m]
+        lo = float(np.percentile(vals, pmin))
+        hi = float(np.percentile(vals, pmax))
+        if hi <= lo:
+            hi = lo + eps
+
+        y = (x - lo) / (hi - lo)
+        y = np.clip(y, 0.0, 1.0)
+        y_u8 = (y * 255.0 + 0.5).astype(np.uint8)
+        return y_u8
+
+    def _write_uncertainty(self, base_path_no_ext: str, unc_map: np.ndarray):
+        """
+        Save:
+          - {base}.npy (float32 raw)
+          - {base}_viridis.png (normalized viridis)
+        """
+        if unc_map is None:
+            return
+
+        unc = np.asarray(unc_map).astype(np.float32)
+        np.save(base_path_no_ext + ".npy", unc)
+
+        u8 = self._normalize_to_uint8(
+            unc,
+            pmin=float(self.cfg.get("save_unc_pmin", 1.0)),
+            pmax=float(self.cfg.get("save_unc_pmax", 99.0)),
+        )
+        vis = cv2.applyColorMap(u8, cv2.COLORMAP_VIRIDIS)
+        cv2.imwrite(base_path_no_ext + "_viridis.png", vis)
+
     def _build_o3d_scene_from_crop(self, crop_cloud, crop_color_bgr):
         """
         crop_cloud: (H,W,3) float (camera frame)
@@ -219,7 +301,6 @@ class DataSaver:
         if pts.size == 0:
             return None
 
-        # 过滤无效点：z<=0 或 非有限
         m = np.isfinite(pts).all(axis=1) & (pts[:, 2] > 1e-6)
         pts = pts[m]
         if pts.shape[0] < 10:
@@ -231,8 +312,7 @@ class DataSaver:
         if crop_color_bgr is not None:
             col = np.asarray(crop_color_bgr).reshape(-1, 3).astype(np.float64) / 255.0
             col = col[m]
-            # open3d color is RGB
-            col = col[:, ::-1].copy()
+            col = col[:, ::-1].copy()  # BGR -> RGB
             scene.colors = o3d.utility.Vector3dVector(col)
 
         return scene
@@ -265,11 +345,9 @@ class DataSaver:
 
             pcd_vis = o3d.geometry.PointCloud(downsampled_scene)
             for g in gg_vis_geo:
-                # g 通常是 TriangleMesh
                 try:
                     pcd_vis += g.sample_points_uniformly(number_of_points=npts)
                 except Exception:
-                    # 容错：如果返回不是 mesh
                     if isinstance(g, o3d.geometry.PointCloud):
                         pcd_vis += g
 
@@ -311,7 +389,20 @@ class DataSaver:
 
         self._write_u16_png(os.path.join(ddir, f"{attempt_idx:03d}_crop_depth_u16.png"), payload.get("crop_depth_u16", None))
         self._write_npy(os.path.join(ddir, f"{attempt_idx:03d}_crop_depth_u16.npy"), payload.get("crop_depth_u16", None))
-        
+
+        # =========================
+        # NEW: uncertainty map save
+        # =========================
+        # full-res uncertainty
+        if payload.get("uncertainty_map", None) is not None:
+            base = os.path.join(ddir, f"{attempt_idx:03d}_uncertainty")
+            self._write_uncertainty(base, payload["uncertainty_map"])
+
+        # optional crop-res uncertainty (if you provide it)
+        if payload.get("uncertainty_map_crop", None) is not None:
+            base = os.path.join(ddir, f"{attempt_idx:03d}_uncertainty_crop")
+            self._write_uncertainty(base, payload["uncertainty_map_crop"])
+
         # -------- grasps --------
         self._write_npy(os.path.join(ddir, f"{attempt_idx:03d}_grasps_raw.npy"), payload.get("grasps_raw", None))
         self._write_npy(os.path.join(ddir, f"{attempt_idx:03d}_grasps_filtered.npy"), payload.get("grasps_filtered", None))
@@ -322,9 +413,9 @@ class DataSaver:
         self._write_npy(os.path.join(ddir, f"{attempt_idx:03d}_eMc.npy"), payload.get("eMc", None))
         self._write_npy(os.path.join(ddir, f"{attempt_idx:03d}_K.npy"), payload.get("K", None))
 
-        # -------- NEW: pointcloud + grasps visualization --------
+        # -------- pointcloud + grasps visualization --------
         if bool(self.cfg.get("save_grasp_vis_pcd", False)):
-            crop_cloud = payload.get("crop_cloud", None)  # (H,W,3)
+            crop_cloud = payload.get("crop_cloud", None)
             crop_color = payload.get("crop_color_bgr", None)
 
             scene = self._build_o3d_scene_from_crop(crop_cloud, crop_color)
@@ -334,10 +425,11 @@ class DataSaver:
             vis_path = os.path.join(ddir, f"{attempt_idx:03d}_pcd_with_grasps.ply")
             ok = self._save_grasp_vis_pcd(vis_path, scene, grasps_arr)
             if ok:
-                # 可选：再写一个更轻的纯 scene
                 try:
-                    o3d.io.write_point_cloud(os.path.join(ddir, f"{attempt_idx:03d}_pcd_scene_downsampled.ply"),
-                                             scene.voxel_down_sample(voxel_size=float(self.cfg.get("save_grasp_vis_voxel", 0.005))))
+                    o3d.io.write_point_cloud(
+                        os.path.join(ddir, f"{attempt_idx:03d}_pcd_scene_downsampled.ply"),
+                        scene.voxel_down_sample(voxel_size=float(self.cfg.get("save_grasp_vis_voxel", 0.005)))
+                    )
                 except Exception:
                     pass
 
@@ -353,7 +445,7 @@ class DataSaver:
             json.dump(meta_out, f, indent=2, ensure_ascii=False)
 
         print(f"[SAVE] attempt {attempt_idx:03d} -> {ddir} (status={status})")
-
+        
 # -------------------------
 # Realsense
 # -------------------------
@@ -460,6 +552,93 @@ def filter_by_approach_angle(
     keep = np.where(ang <= float(angle_deg))[0].tolist()
     return gg[keep] if len(keep) > 0 else gg[[]]
 
+
+def filter_by_min_width(gg: GraspGroup, min_width_m: float, debug: bool = False):
+    """
+    Keep grasps whose predicted width >= min_width_m.
+    Assumes gg.widths is in meters (typical in GraspNetAPI / GSNet decode).
+    """
+    if len(gg) == 0:
+        return gg
+
+    w = np.asarray(gg.widths, dtype=np.float64)  # (N,)
+    keep = np.where(w >= float(min_width_m))[0].tolist()
+
+    if debug:
+        print(f"[WIDTH] min_width={float(min_width_m):.3f} m | kept {len(keep)}/{len(gg)} | "
+              f"w(min/mean/max)=({w.min():.3f}/{w.mean():.3f}/{w.max():.3f})")
+
+    return gg[keep] if len(keep) > 0 else gg[[]]
+
+
+def reweight_grasps_by_uncertainty(
+    gg: GraspGroup,
+    conf_map: np.ndarray,          # (H, W) float32, unc map (bigger = more uncertain)
+    camera_info: CameraInfo,       # has fx, fy, cx, cy
+    debug: bool = False,
+):
+    if gg is None or len(gg) == 0:
+        return gg
+    if conf_map is None:
+        return gg
+
+    conf_map = np.asarray(conf_map)
+    conf_map = np.squeeze(conf_map)
+    if conf_map.ndim != 2:
+        if debug:
+            print(f"[REWEIGHT][WARN] conf_map shape invalid: {conf_map.shape}, skip.")
+        return gg
+
+    gg_arr = gg.grasp_group_array.copy()  # (M, 17)
+    scores = gg_arr[:, 0].astype(np.float32)
+    centers = gg_arr[:, 13:16].astype(np.float32)  # (M,3) in camera frame
+
+    fx = float(camera_info.fx)
+    fy = float(camera_info.fy)
+    cx = float(camera_info.cx)
+    cy = float(camera_info.cy)
+
+    H, W = conf_map.shape
+    conf_mean = float(np.mean(conf_map))
+
+    X = centers[:, 0]
+    Y = centers[:, 1]
+    Z = centers[:, 2]
+
+    eps = 1e-6
+    valid_z = Z > eps
+
+    u = fx * X / np.maximum(Z, eps) + cx
+    v = fy * Y / np.maximum(Z, eps) + cy
+    u_int = np.rint(u).astype(np.int32)
+    v_int = np.rint(v).astype(np.int32)
+
+    in_bounds = (
+        (u_int >= 0) & (u_int < W) &
+        (v_int >= 0) & (v_int < H) &
+        valid_z
+    )
+
+    grasp_unc = np.full((len(centers),), conf_mean, dtype=np.float32)
+    if np.any(in_bounds):
+        grasp_unc[in_bounds] = conf_map[v_int[in_bounds], u_int[in_bounds]].astype(np.float32)
+
+    u_min = float(np.min(grasp_unc))
+    u_max = float(np.max(grasp_unc))
+    denom = (u_max - u_min) + 1e-6
+    u_norm = (grasp_unc - u_min) / denom     # [0,1]
+    w = 1.0 - u_norm                         # 越不确定 -> 权重越小
+
+    new_scores = scores * w
+    gg_arr[:, 0] = new_scores
+
+    if debug:
+        print("[REWEIGHT] conf stats:",
+              f"unc[min,max,mean]=[{u_min:.4f},{u_max:.4f},{float(grasp_unc.mean()):.4f}]",
+              f"w[min,max,mean]=[{float(w.min()):.4f},{float(w.max()):.4f},{float(w.mean()):.4f}]",
+              f"score[old_mean,new_mean]=[{float(scores.mean()):.4f},{float(new_scores.mean()):.4f}]")
+
+    return GraspGroup(gg_arr)
 
 # -------------------------
 # visualization (camera frame)
@@ -714,47 +893,63 @@ def run_depth_restoration(
 ):
     """
     Returns:
-      depth_used_u16 (uint16) in the SAME unit as RealSense raw.
+      depth_used_u16: uint16 (same unit as RealSense raw)
+      conf_full: (H,W) float32 uncertainty/conf map in the SAME pixel grid as input color/depth
+                (if model doesn't provide conf -> None)
     """
     if dr_model is None:
-        return depth_raw_u16
+        return depth_raw_u16, None
 
     try:
-        H, W = depth_raw_u16.shape[:2]
+        H0, W0 = depth_raw_u16.shape[:2]
+
         depth_m = depth_raw_u16.astype(np.float32) * float(depth_scale)
         depth_mm = depth_m * float(cfg.get("dr_depth_factor", 1000.0))
 
         input_size = (int(cfg["dr_input_width"]), int(cfg["dr_input_height"]))
+
         out = dr_model.infer_image(color_bgr, depth_mm, input_size, True)
 
-        if isinstance(out, (list, tuple)) and len(out) >= 4:
-            pred_depth = out[3]
-        else:
+        if not (isinstance(out, (list, tuple)) and len(out) >= 4):
             raise RuntimeError("infer_image returned unexpected format.")
+
+        pred_depth = out[3]
+        conf = out[4] if len(out) >= 5 else None  # 你脚本里叫 conf，但你这里当 unc map 用
 
         if isinstance(pred_depth, torch.Tensor):
             pred_depth = pred_depth.detach().cpu().numpy()
-        pred_depth = np.squeeze(pred_depth).astype(np.float32)  # meters (model output size)
+        pred_depth = np.squeeze(pred_depth).astype(np.float32)  # meters, at model output size
 
-        pred_depth_m = cv2.resize(pred_depth, (W, H), interpolation=cv2.INTER_NEAREST)
+        # resize pred depth back
+        pred_depth_m = cv2.resize(pred_depth, (W0, H0), interpolation=cv2.INTER_NEAREST)
         pred_depth_m = np.clip(pred_depth_m, float(cfg["dr_min_depth"]), float(cfg["dr_max_depth"]))
 
-        depth_units = pred_depth_m * float(factor_depth)
+        depth_units = pred_depth_m * float(factor_depth)  # meters -> raw units
         depth_units = np.where(pred_depth_m > 0, depth_units, 0.0)
         depth_used_u16 = np.clip(depth_units, 0, 65535).astype(np.uint16)
 
+        conf_full = None
+        if conf is not None:
+            if isinstance(conf, torch.Tensor):
+                conf = conf.detach().cpu().numpy()
+            conf = np.squeeze(conf).astype(np.float32)
+            # resize to full-res (match color/depth pixel grid)
+            conf_full = cv2.resize(conf, (W0, H0), interpolation=cv2.INTER_NEAREST).astype(np.float32)
+
         if bool(cfg.get("dr_save_debug", False)):
-            ensure_dir(cfg.get("dr_debug_dir", "debug_depth_restoration"))
+            os.makedirs(cfg.get("dr_debug_dir", "debug_depth_restoration"), exist_ok=True)
             tag = step_tag if step_tag else "frame"
             cv2.imwrite(os.path.join(cfg["dr_debug_dir"], f"{tag}_color.png"), color_bgr)
-            cv2.imwrite(os.path.join(cfg["dr_debug_dir"], f"{tag}_raw_depth_u16.png"), depth_raw_u16)
-            cv2.imwrite(os.path.join(cfg["dr_debug_dir"], f"{tag}_restored_depth_u16.png"), depth_used_u16)
+            cv2.imwrite(os.path.join(cfg["dr_debug_dir"], f"{tag}_depth_raw_u16.png"), depth_raw_u16)
+            cv2.imwrite(os.path.join(cfg["dr_debug_dir"], f"{tag}_depth_used_u16.png"), depth_used_u16)
+            if conf_full is not None:
+                np.save(os.path.join(cfg["dr_debug_dir"], f"{tag}_unc_map.npy"), conf_full)
 
-        return depth_used_u16
+        return depth_used_u16, conf_full
 
     except Exception as e:
         print(f"[DR][WARN] restoration failed, fallback to raw depth. err={repr(e)}")
-        return depth_raw_u16
+        return depth_raw_u16, None
 
 
 # -------------------------
@@ -772,7 +967,7 @@ def _safe_gg_array(gg):
 
 
 @torch.no_grad()
-def infer_grasps_with_debug(
+def infer_grasps(
     cfg,
     net,
     device,
@@ -782,7 +977,7 @@ def infer_grasps_with_debug(
     factor_depth,
     bTe,
     eMc,
-):
+    conf_map_full=None):
     """
     Returns dict:
       crop_color_bgr, crop_depth_u16, crop_cloud,
@@ -863,7 +1058,22 @@ def infer_grasps_with_debug(
         cmask = cmask.detach().cpu().numpy()
         gg = gg[~cmask]
 
+    # ======== NEW: conf/unc reweight BEFORE NMS ========
+    if bool(cfg.get("enable_conf_reweight", False)) and (conf_map_full is not None) and (len(gg) > 0):
+        gg = reweight_grasps_by_uncertainty(
+            gg,
+            conf_map=conf_map_full,
+            camera_info=cam_info,
+            debug=bool(cfg.get("conf_reweight_debug", False)),
+        )
+    
     gg = gg.sort_by_score().nms()
+
+    min_w = float(cfg.get("min_grasp_width_m", 0.0))
+    if min_w > 0:
+        gg = filter_by_min_width(gg, min_w, debug=True)
+        if len(gg) == 0:
+            return None
 
     if bool(cfg["rotation_filtering"]):
         gg = filter_by_approach_angle(
@@ -992,23 +1202,23 @@ def main():
 
             # optional depth restoration
             depth_used_u16 = depth_raw_u16
-            restored_depth_u16 = None
+            conf_map_full = None
             if bool(cfg.get("use_restored_depth", False)):
-                depth_used_u16 = run_depth_restoration(
+                depth_used_u16, conf_map_full = run_depth_restoration(
                     cfg, dr_model, color_bgr, depth_raw_u16,
                     depth_scale=depth_scale, factor_depth=factor_depth,
                     step_tag=f"att{attempts:02d}"
                 )
                 # if restoration enabled, treat used depth as restored (even if fallback happened)
                 restored_depth_u16 = depth_used_u16
-
+                
             # infer grasps (with debug outputs)
             try:
-                out = infer_grasps_with_debug(
+                out = infer_grasps(
                     cfg, net, device,
                     color_bgr, depth_used_u16,
                     K, factor_depth,
-                    bTe=bTe, eMc=eMc
+                    bTe=bTe, eMc=eMc, conf_map_full=conf_map_full
                 )
             except Exception as ex:
                 print(f"[WARN] inference failed: {repr(ex)}")
@@ -1045,6 +1255,7 @@ def main():
                 raw_depth_u16=depth_raw_u16,
                 used_depth_u16=depth_used_u16,
                 restored_depth_u16=restored_depth_u16 if bool(cfg.get("use_restored_depth", False)) else None,
+                uncertainty_map=conf_map_full,
                 crop_color_bgr=crop_color,
                 crop_depth_u16=crop_depth,
                 grasps_raw=preds_raw,
@@ -1060,6 +1271,7 @@ def main():
                     use_restored_depth=bool(cfg.get("use_restored_depth", False)),
                     rotation_filtering=bool(cfg.get("rotation_filtering", False)),
                     filter_angle_deg=float(cfg.get("filter_angle_deg", 0.0)),
+                    min_grasp_width_m=float(cfg.get("min_grasp_width_m", 0.0)),
                 ),
             )
 
