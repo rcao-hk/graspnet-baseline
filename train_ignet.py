@@ -163,8 +163,7 @@ print(len(TRAIN_DATALOADER), len(TEST_DATALOADER))
 # net.to(device)
 
 # v0.8
-net = IGNet(m_point=cfgs.m_point, num_view=cfgs.num_view, seed_feat_dim=cfgs.seed_feat_dim, img_feat_dim=cfgs.img_feat_dim, 
-            is_training=True, multi_scale_grouping=cfgs.multi_scale_grouping, fuse_type=cfgs.fuse_type)
+net = IGNet(m_point=cfgs.m_point, num_view=cfgs.num_view, seed_feat_dim=cfgs.seed_feat_dim, img_feat_dim=cfgs.img_feat_dim, is_training=True, multi_scale_grouping=cfgs.multi_scale_grouping, fuse_type=cfgs.fuse_type)
 net.to(device)
 
 # for param in net.img_backbone.dino.parameters():
