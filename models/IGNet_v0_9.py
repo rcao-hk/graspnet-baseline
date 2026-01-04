@@ -828,6 +828,195 @@ class ObjectnessNet(nn.Module):
         return end_points
 
 
+class MinkUNet14D_InterFuse(MinkUNet14D):
+    def __init__(self, in_channels_3d, out_channels, img_dim, D=3):
+        super().__init__(in_channels=in_channels_3d, out_channels=out_channels, D=D)
+
+        # 逐层 concat 后用 1x1 sparse conv 压回原通道
+        self.fuse_p1  = ME.MinkowskiConvolution(self.INIT_DIM + img_dim, self.INIT_DIM, kernel_size=1, dimension=D)
+        self.fuse_p2  = ME.MinkowskiConvolution(self.INIT_DIM + img_dim, self.INIT_DIM, kernel_size=1, dimension=D)
+        self.fuse_p4  = ME.MinkowskiConvolution(self.INIT_DIM + img_dim, self.INIT_DIM, kernel_size=1, dimension=D)
+        self.fuse_p8  = ME.MinkowskiConvolution(self.PLANES[1] + img_dim, self.PLANES[1], kernel_size=1, dimension=D)  # 64
+        self.fuse_p16 = ME.MinkowskiConvolution(self.PLANES[2] + img_dim, self.PLANES[2], kernel_size=1, dimension=D)  # 128
+
+    @staticmethod
+    def _scatter_mean(feats: torch.Tensor, idx: torch.Tensor, M: int) -> torch.Tensor:
+        # feats: (K,C), idx: (K,) -> (M,C)
+        C = feats.shape[1]
+        out = feats.new_zeros((M, C))
+        cnt = feats.new_zeros((M, 1))
+        out.index_add_(0, idx, feats)
+        cnt.index_add_(0, idx, torch.ones((feats.shape[0], 1), device=feats.device, dtype=feats.dtype))
+        return out / cnt.clamp_min_(1.0)
+
+    @staticmethod
+    def _make_bn_coords_from_coors(coors_list, stride: int, device) -> torch.Tensor:
+        """
+        coors_list: list(B) of (N,3) base-grid voxel coords (no batch col)
+        return: (B*N,4) coords in base-grid, but snapped to stride grid
+        """
+        coords4 = []
+        for b, c in enumerate(coors_list):
+            if not torch.is_tensor(c):
+                c = torch.as_tensor(c, device=device)
+
+            # ensure integer coords in base-grid
+            if c.dtype.is_floating_point:
+                c = torch.floor(c).long()
+            else:
+                c = c.long()
+
+            if stride > 1:
+                # SNAP to stride grid (still in base coordinate system)
+                # floor_div * stride works for negative coords too
+                c = torch.div(c, stride, rounding_mode='floor') * stride
+
+            bcol = torch.full((c.shape[0], 1), b, device=device, dtype=torch.long)
+            coords4.append(torch.cat([bcol, c], dim=1))
+
+        return torch.cat(coords4, dim=0)
+
+
+    @staticmethod
+    def _pack_keys(coords4: torch.Tensor, shift_xyz: torch.Tensor, mx: int, my: int, mz: int) -> torch.Tensor:
+        b = coords4[:, 0]
+        xyz = coords4[:, 1:] + shift_xyz.view(1, 3)
+        x, y, z = xyz[:, 0], xyz[:, 1], xyz[:, 2]
+        return (((b * mx + x) * my + y) * mz + z)
+
+    def _build_img_sparse_like(self, target: ME.SparseTensor, pfeat_BNC: torch.Tensor, coors_list, stride: int) -> ME.SparseTensor:
+        """
+        target: 当前 3D feature（决定坐标图）
+        pfeat_BNC: (B,N,C) 对应尺度的 per-point 2D 语义
+        stride: 1/2/4/8/16
+        输出：与 target 完全相同 coord map key 的 img_sparse
+        """
+        device = target.F.device
+        B, N, C = pfeat_BNC.shape
+        BN = B * N
+        feats_bnC = pfeat_BNC.reshape(BN, C)
+
+        tgt_coords = target.C.to(device).long()      # (M,4) 可能原本在 CPU
+        M = tgt_coords.shape[0]
+
+        # 目标层 coords 是否落在 stride 网格上？
+        if stride > 1:
+            mod = torch.remainder(tgt_coords[:, 1:], stride)
+            # 正常情况下应该全 0（或至少绝大多数为 0）
+            if (mod != 0).any():
+                print(f"[InterFuse][WARN] target coords not aligned to stride={stride} grid. ratio={(mod!=0).float().mean().item():.4f}")
+
+        pts_coords = self._make_bn_coords_from_coors(coors_list, stride=stride, device=device)  # (BN,4)
+
+        # shift to non-negative for packing
+        xyz_all = torch.cat([pts_coords[:, 1:], tgt_coords[:, 1:]], dim=0)
+        min_xyz = xyz_all.min(dim=0).values
+        shift = (-min_xyz).clamp_min(0).long()
+
+        pts_xyz = pts_coords[:, 1:] + shift.view(1, 3)
+        tgt_xyz = tgt_coords[:, 1:] + shift.view(1, 3)
+        max_xyz = torch.max(pts_xyz.max(dim=0).values, tgt_xyz.max(dim=0).values).long()
+
+        mx = int(max_xyz[0].item()) + 1
+        my = int(max_xyz[1].item()) + 1
+        mz = int(max_xyz[2].item()) + 1
+        if mx * my * mz > 2**62:
+            raise RuntimeError(f"[InterFuse] key packing overflow risk: mx*my*mz={mx*my*mz}")
+
+        pts_key = self._pack_keys(pts_coords, shift, mx, my, mz)  # (BN,)
+        tgt_key = self._pack_keys(tgt_coords, shift, mx, my, mz)  # (M,)
+
+        # map each point -> target index
+        tgt_key_sorted, order = torch.sort(tgt_key)
+        pos = torch.searchsorted(tgt_key_sorted, pts_key)
+        valid = (pos < M) & (tgt_key_sorted[pos] == pts_key)
+        if not torch.all(valid):
+            bad = int((~valid).sum().item())
+            raise RuntimeError(f"[InterFuse] {bad} points cannot map to target coords at stride={stride}. Check coors quantization/stride.")
+
+        tgt_idx = order[pos]  # (BN,)
+        img_feat_u = self._scatter_mean(feats_bnC, tgt_idx, M)  # (M,C)
+
+        return ME.SparseTensor(
+            features=img_feat_u,
+            coordinate_map_key=target.coordinate_map_key,
+            coordinate_manager=target.coordinate_manager
+        )
+
+    def forward(self, x_sparse: ME.SparseTensor, pfeat: dict, coors_list):
+        # stride=1
+        out = self.conv0p1s1(x_sparse)
+        out = self.bn0(out)
+        out = self.relu(out)
+
+        img1 = self._build_img_sparse_like(out, pfeat['p1'], coors_list, stride=1)
+        out = self.fuse_p1(ME.cat(out, img1))
+        out_p1 = out
+
+        # stride=2
+        out = self.conv1p1s2(out_p1)
+        out = self.bn1(out)
+        out = self.relu(out)
+
+        img2 = self._build_img_sparse_like(out, pfeat['p2'], coors_list, stride=2)
+        out = self.fuse_p2(ME.cat(out, img2))
+        out_b1p2 = self.block1(out)
+
+        # stride=4
+        out = self.conv2p2s2(out_b1p2)
+        out = self.bn2(out)
+        out = self.relu(out)
+
+        img4 = self._build_img_sparse_like(out, pfeat['p4'], coors_list, stride=4)
+        out = self.fuse_p4(ME.cat(out, img4))
+        out_b2p4 = self.block2(out)
+
+        # stride=8
+        out = self.conv3p4s2(out_b2p4)
+        out = self.bn3(out)
+        out = self.relu(out)
+
+        img8 = self._build_img_sparse_like(out, pfeat['p8'], coors_list, stride=8)
+        out = self.fuse_p8(ME.cat(out, img8))
+        out_b3p8 = self.block3(out)
+
+        # stride=16
+        out = self.conv4p8s2(out_b3p8)
+        out = self.bn4(out)
+        out = self.relu(out)
+
+        img16 = self._build_img_sparse_like(out, pfeat['p16'], coors_list, stride=16)
+        out = self.fuse_p16(ME.cat(out, img16))
+        out = self.block4(out)
+
+        # decoder unchanged
+        out = self.convtr4p16s2(out)
+        out = self.bntr4(out)
+        out = self.relu(out)
+        out = ME.cat(out, out_b3p8)
+        out = self.block5(out)
+
+        out = self.convtr5p8s2(out)
+        out = self.bntr5(out)
+        out = self.relu(out)
+        out = ME.cat(out, out_b2p4)
+        out = self.block6(out)
+
+        out = self.convtr6p4s2(out)
+        out = self.bntr6(out)
+        out = self.relu(out)
+        out = ME.cat(out, out_b1p2)
+        out = self.block7(out)
+
+        out = self.convtr7p2s2(out)
+        out = self.bntr7(out)
+        out = self.relu(out)
+        out = ME.cat(out, out_p1)
+        out = self.block8(out)
+
+        return self.final(out)
+    
+    
 class IGNet(nn.Module):
     def __init__(self,  m_point=1024, num_view=300, num_angle=12, num_depth=4, seed_feat_dim=256, img_feat_dim=64, 
                  is_training=True, multi_scale_grouping=False, fuse_type='early'):
@@ -843,9 +1032,7 @@ class IGNet(nn.Module):
         assert self.num_view == NUM_VIEW and self.num_angle == NUM_ANGLE and self.num_depth == NUM_DEPTH
         self.fuse_type = fuse_type
         # self.img_backbone = psp_models['resnet34'.lower()]()
-        if self.fuse_type != 'none':
-            self.img_backbone = PSPNet(sizes=(1, 2, 3, 6), psp_size=512, 
-                                    deep_features_size=img_feat_dim, backend='resnet34')
+
         # self.img_backbone = dino_extractor(feat_ext='dino')
         # self.img_backbone = smp.Unet(encoder_name="resnext50_32x4d", encoder_weights="imagenet", in_channels=3, classes=64)
         # for param in self.img_backbone.encoder.parameters():
@@ -858,23 +1045,53 @@ class IGNet(nn.Module):
             self.point_backbone = MinkUNet14D(in_channels=3, out_channels=self.seed_feature_dim, D=3)
             print('no fusion')
         elif self.fuse_type == 'early':
+            self.img_backbone = PSPNet(sizes=(1, 2, 3, 6), psp_size=512, 
+                                    deep_features_size=img_feat_dim, backend='resnet34')
             self.img_feature_dim = 0
             self.point_backbone = MinkUNet14D(in_channels=img_feat_dim, out_channels=self.seed_feature_dim, D=3)
             print('early fusion')
         elif self.fuse_type == 'concat':
+            self.img_backbone = PSPNet(sizes=(1, 2, 3, 6), psp_size=512, 
+                                    deep_features_size=img_feat_dim, backend='resnet34')
             self.img_feature_dim = img_feat_dim
             self.point_backbone = MinkUNet14D(in_channels=3, out_channels=self.seed_feature_dim, D=3)
             print('late fusion (concatentation)')
         elif self.fuse_type == 'gate':
+            self.img_backbone = PSPNet(sizes=(1, 2, 3, 6), psp_size=512, 
+                                    deep_features_size=img_feat_dim, backend='resnet34')
             self.img_feature_dim = 0
             self.point_backbone = MinkUNet14D(in_channels=3, out_channels=self.seed_feature_dim, D=3)
             self.fusion_module = GatedFusion(point_dim=self.seed_feature_dim, img_dim=img_feat_dim)
             print('late fusion (Gated fusion)')
         elif self.fuse_type == 'add':
+            self.img_backbone = PSPNet(sizes=(1, 2, 3, 6), psp_size=512, 
+                                    deep_features_size=img_feat_dim, backend='resnet34')
             self.img_feature_dim = 0
             self.point_backbone = MinkUNet14D(in_channels=3, out_channels=self.seed_feature_dim, D=3)
             self.fusion_module = AddFusion(point_dim=self.seed_feature_dim, img_dim=img_feat_dim)
             print('late fusion (Add fusion)')
+        elif self.fuse_type == 'direct':
+            self.img_backbone = PSPNet(sizes=(1, 2, 3, 6), psp_size=512, 
+                                    deep_features_size=img_feat_dim, backend='resnet34')
+            self.img_feature_dim = 0
+            self.point_backbone = MinkUNet14D(in_channels=3, out_channels=self.seed_feature_dim, D=3)
+            print('direct fusion (RGB as sparse feats)')
+        elif self.fuse_type == 'intermediate':
+            self.img_feature_dim = 0
+            self.img_backbone = PSPNet(sizes=(1, 2, 3, 6), psp_size=512, 
+                backend='resnet34',
+                deep_features_size=img_feat_dim,      # 你现在 p1/p2 是 64
+                out_dim=img_feat_dim,       # 统一维度（=img_dim）
+                return_pyramid=True,
+                pretrained=True
+            )
+
+            self.point_backbone = MinkUNet14D_InterFuse(
+                in_channels_3d=3,           # 你 3D feats 的通道
+                out_channels=self.seed_feature_dim,
+                img_dim=img_feat_dim
+            )
+            print('intermediate fusion (DeepViewAgg style)')
         elif self.fuse_type == 'learnable_align':
             raise NotImplementedError
 
@@ -990,19 +1207,57 @@ class IGNet(nn.Module):
 
         return torch.stack(inds_batch, dim=0).contiguous()  # (B,M)
 
-                  
+    def _gather_2d_to_points(self, feat2d: torch.Tensor, img_idxs: torch.Tensor, base_hw=(448, 448)):
+        """
+        feat2d: (B,C,Hf,Wf)
+        img_idxs: (B,N)  flatten idx in base_hw (Hb*Wb), base_hw 默认为 (448,448)
+        return: (B,N,C)
+        """
+        Hb, Wb = base_hw
+        B, C, Hf, Wf = feat2d.shape
+
+        ys = torch.div(img_idxs, Wb, rounding_mode='floor')   # (B,N)
+        xs = img_idxs - ys * Wb                               # (B,N)
+
+        # map base pixel (ys,xs) -> feature pixel (yf,xf)
+        # 用 float 缩放再 floor，和你 dataset 的 resize 思路一致
+        yf = torch.clamp((ys.float() * (Hf / Hb)).long(), 0, Hf - 1)
+        xf = torch.clamp((xs.float() * (Wf / Wb)).long(), 0, Wf - 1)
+
+        flat_f = (yf * Wf + xf)                               # (B,N)
+
+        feat_flat = feat2d.view(B, C, -1)                     # (B,C,Hf*Wf)
+        gather_idx = flat_f.unsqueeze(1).expand(-1, C, -1)     # (B,C,N)
+        out = torch.gather(feat_flat, 2, gather_idx)          # (B,C,N)
+        return out.transpose(1, 2).contiguous()               # (B,N,C)
+     
     def forward(self, end_points):
         # use all sampled point cloud, B*Ns*3
         xyz_full = end_points['point_clouds']
         B, N, _ = xyz_full.shape
         device = xyz_full.device
         
-        if self.fuse_type != 'none':
+        if self.fuse_type == 'intermediate':
+            img = end_points['img']              # (B,3,448,448)
+            img_idxs = end_points['img_idxs']    # (B,N) flat idx on 448*448
+            H0, W0 = img.shape[-2], img.shape[-1]
+
+            # 2D pyramid from PSPNet (you need to implement return_pyramid=True)
+            pyr = self.img_backbone(img, return_pyramid=True)  # dict: p1/p2/p4/p8/p16
+
+            # per-point 2D feats at each scale: (B,N,C)
+            pfeat = {k: self._gather_2d_to_points(pyr[k], img_idxs, base_hw=(H0,W0))
+                    for k in ['p1', 'p2', 'p4', 'p8', 'p16']}  # each -> (B,N,Cimg)
+
+            # 3D backbone 的输入特征（保持你原逻辑：ones 或 direct 都行，这里用 feats）
+            input_feats = end_points['feats']
+
+        elif self.fuse_type in ['early', 'concat', 'gate', 'add']:
             img = end_points['img']
             img_idxs = end_points['img_idxs']
             img_feat = self.img_backbone(img)
             _, Cimg, _, _ = img_feat.shape
-            
+
             img_feat = img_feat.view(B, Cimg, -1)
             img_idxs = img_idxs.unsqueeze(1).repeat(1, Cimg, 1)
             image_features = torch.gather(img_feat, 2, img_idxs).transpose(1, 2).contiguous()
@@ -1011,15 +1266,26 @@ class IGNet(nn.Module):
             else:
                 input_feats = end_points['feats']
         else:
-            input_feats = end_points['feats']
-            
+            image_features = None
+            if self.fuse_type == 'direct':
+                input_feats = [c * 2.0 - 1.0 for c in end_points['cloud_colors']]
+            else:
+                input_feats = end_points['feats']
+
         coordinates_batch, features_batch = ME.utils.sparse_collate(coords=[c for c in end_points['coors']], 
                                                                     feats=[f for f in input_feats], 
                                                                     dtype=torch.float32)
         coordinates_batch, features_batch, _, quantize2original = ME.utils.sparse_quantize(
             coordinates_batch, features_batch, return_index=True, return_inverse=True, device=device)
         mink_input = ME.SparseTensor(coordinates=coordinates_batch, features=features_batch)
-        point_features = self.point_backbone(mink_input).F
+
+        if self.fuse_type == 'intermediate':
+            # 后面构建 mink_input 不变
+            out_sparse = self.point_backbone(mink_input, pfeat, end_points['coors'])
+        else:
+            out_sparse = self.point_backbone(mink_input)
+
+        point_features = out_sparse.F
         point_features = point_features[quantize2original].view(B, N, -1).transpose(1, 2).contiguous()
 
         if self.fuse_type in ['concat']:
@@ -1028,28 +1294,6 @@ class IGNet(nn.Module):
             feat_full = self.fusion_module(point_features, image_features.transpose(1, 2))
         else:
             feat_full = point_features
-        # late fusion (concatentation)
-        # coordinates_batch, features_batch = ME.utils.sparse_collate(coords=[c for c in end_points['coors']], 
-        #                                                             feats=[f for f in end_points['feats']], 
-        #                                                             dtype=torch.float32)
-        # coordinates_batch, features_batch, _, quantize2original = ME.utils.sparse_quantize(
-        #     coordinates_batch, features_batch, return_index=True, return_inverse=True, device=device)
-        # mink_input = ME.SparseTensor(features_batch, coordinates=coordinates_batch)
-        # point_features = self.point_backbone(mink_input).F
-        # point_features = point_features[quantize2original].view(B, point_num, -1).transpose(1, 2)
-        # seed_features = torch.concat([point_features, image_features], dim=1)
-    
-        # late fusion (cross attention concatentation, gated fusion, add fusion)
-        # coordinates_batch, features_batch = ME.utils.sparse_collate(coords=[c for c in end_points['coors']], 
-        #                                                             feats=[f for f in end_points['feats']], 
-        #                                                             dtype=torch.float32)
-        # coordinates_batch, features_batch, _, quantize2original = ME.utils.sparse_quantize(
-        #     coordinates_batch, features_batch, return_index=True, return_inverse=True, device=seed_xyz.device)
-        # mink_input = ME.SparseTensor(features_batch, coordinates=coordinates_batch)
-        # point_features = self.point_backbone(mink_input).F
-        # point_features = point_features[quantize2original].view(B, point_num, -1)
-        # image_features = image_features.transpose(1, 2)
-        # seed_features = self.fusion_module(point_features, image_features)
         
         # ----- graspable head on full scene -----
         end_points = self.objectness(feat_full, end_points)
