@@ -6,9 +6,15 @@ import sys
 
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(ROOT_DIR, "pointnet2"))
-sys.path.append(os.path.join(ROOT_DIR, "utils"))
-sys.path.append(os.path.join(ROOT_DIR, "models"))
-sys.path.append(os.path.join(ROOT_DIR, "dataset"))
+# sys.path.append(os.path.join(ROOT_DIR, "utils"))
+# sys.path.append(os.path.join(ROOT_DIR, "models"))
+# sys.path.append(os.path.join(ROOT_DIR, "dataset"))
+# if ROOT_DIR not in sys.path:
+#     sys.path.insert(0, ROOT_DIR)
+
+# PT2_DIR = os.path.join(ROOT_DIR, "pointnet2")
+# if PT2_DIR not in sys.path:
+#     sys.path.insert(0, PT2_DIR)
 
 import json
 import time
@@ -69,8 +75,8 @@ DEFAULT_CFG = dict(
 
     rs_w=1280,
     rs_h=720,
-    rs_fps=30,
-
+    rs_fps=15,
+    
     checkpoint_path="log/gsnet_base/checkpoint.tar",
     seed_feat_dim=512,
     num_point=15000,
@@ -87,8 +93,14 @@ DEFAULT_CFG = dict(
 
     # --------- filtering / execution control ---------
     rotation_filtering=True,
-    filter_angle_deg=40.0,
+    filter_angle_deg=30.0,
 
+    boundary_filtering=True,
+    boundary_scene_ply="demo/scene.ply",   # empty scene pointcloud
+    boundary_inflate_m=0.01,               # 1cm dilation
+    boundary_min_z=1e-6,                   # ignore invalid points
+    boundary_debug=False,
+    
     # --------- width gate ---------
     min_grasp_width_m=0.06,   # 5cm: filter out grasps with width < this
     
@@ -96,7 +108,7 @@ DEFAULT_CFG = dict(
     max_attempts=20,
     max_exec=20,
 
-    VIS=False,
+    VIS=True,
     DO_PLACE=True,
 
     planning_cfg=dict(
@@ -108,7 +120,8 @@ DEFAULT_CFG = dict(
     # =======================
     # Depth restoration config
     # =======================
-    use_restored_depth=True,
+    # use_restored_depth=True,
+    depth_restorer = 'd3roma', # "none" | "ours" | "d3roma"
     dr_project_root="/home/hkclr-user/projects/object_depth_percetion",
     dr_method="dreds_clearpose_hiss_50k_dav2_complete_obs_iter_unc_cali_convgru_l1_only_scale_norm_robust_init_wo_soft_fuse_l1+grad_sigma_conf_518x518",
     dr_encoder="vitl",
@@ -132,7 +145,25 @@ DEFAULT_CFG = dict(
 
     enable_conf_reweight=True,     # <<< 主开关：用 DR 的 unc_map 重权重 grasp score（NMS 前）
     conf_reweight_debug=False,     # 打印一些调试信息
-    conf_reweight_use_mean_fallback=True,  # 投影出界/无效Z用均值回填
+    conf_reweight_use_mean_fallback=False,  # 投影出界/无效Z用均值回填
+
+    # ---- D3RoMa config ----
+    d3roma_root="/home/hkclr-user/projects/d3roma",
+    d3roma_variant="left+right+raw",      # 你要求用 RGB+raw+IR pair，就用这个
+    d3roma_camera="graspnet_d435",        # 按你贴的脚本
+    d3roma_min_depth=0.001,
+    d3roma_max_depth=2.0,
+
+    d3roma_overrides_left_right_raw=[
+        "task=eval_ldm_mixed",
+        "task.resume_pretrained=/home/hkclr-user/projects/d3roma/experiments/ldm_sf-mixed.dep4.lr3e-05.v_prediction.nossi.scaled_linear.randn.nossi.my_ddpm1000.SceneFlow_Dreds_HssdIsaacStd.180x320.cond7-raw+left+right.w0.0/epoch_0199",
+        "task.eval_num_batch=1",
+        "task.image_size=[360,640]",
+        "task.eval_batch_size=1",
+        "task.num_inference_rounds=1",
+        "task.num_inference_timesteps=10", "task.num_intermediate_images=5",
+        "task.write_pcd=true",
+    ],
     
     # =======================
     # Data saving
@@ -237,6 +268,17 @@ class DataSaver:
             depth_u16 = depth_u16.astype(np.uint16)
         cv2.imwrite(path, depth_u16)
 
+    def _write_u8_png(self, path, img_u8):
+        if img_u8 is None:
+            return
+        img_u8 = np.asarray(img_u8)
+        if img_u8.dtype != np.uint8:
+            img_u8 = np.clip(img_u8, 0, 255).astype(np.uint8)
+        # 支持 (H,W) 或 (H,W,1)
+        if img_u8.ndim == 3 and img_u8.shape[-1] == 1:
+            img_u8 = img_u8[..., 0]
+        cv2.imwrite(path, img_u8)
+    
     def _write_npy(self, path, arr):
         if arr is None:
             return
@@ -373,6 +415,14 @@ class DataSaver:
             cv2.imwrite(os.path.join(ddir, f"{attempt_idx:03d}_raw_color.png"), payload["raw_color_bgr"])
             self._write_npy(os.path.join(ddir, f"{attempt_idx:03d}_raw_color.npy"), payload["raw_color_bgr"])
 
+        if payload.get("ir_l", None) is not None:
+            self._write_u8_png(os.path.join(ddir, f"{attempt_idx:03d}_ir_l.png"), payload["ir_l"])
+            self._write_npy(os.path.join(ddir, f"{attempt_idx:03d}_ir_l.npy"), payload["ir_l"])
+
+        if payload.get("ir_r", None) is not None:
+            self._write_u8_png(os.path.join(ddir, f"{attempt_idx:03d}_ir_r.png"), payload["ir_r"])
+            self._write_npy(os.path.join(ddir, f"{attempt_idx:03d}_ir_r.npy"), payload["ir_r"])
+            
         self._write_u16_png(os.path.join(ddir, f"{attempt_idx:03d}_raw_depth_u16.png"), payload.get("raw_depth_u16", None))
         self._write_npy(os.path.join(ddir, f"{attempt_idx:03d}_raw_depth_u16.npy"), payload.get("raw_depth_u16", None))
         self._write_u16_png(os.path.join(ddir, f"{attempt_idx:03d}_used_depth_u16.png"), payload.get("used_depth_u16", None))
@@ -449,15 +499,22 @@ class DataSaver:
 # -------------------------
 # Realsense
 # -------------------------
-def rs_init(w, h, fps):
+def rs_init(w, h, fps, enable_ir: bool = False):
     pipe = rs.pipeline()
     cfg = rs.config()
+
     cfg.enable_stream(rs.stream.depth, w, h, rs.format.z16, fps)
     cfg.enable_stream(rs.stream.color, w, h, rs.format.bgr8, fps)
+
+    if enable_ir:
+        # D4xx 常见：infrared(1)=left, infrared(2)=right
+        cfg.enable_stream(rs.stream.infrared, 1, w, h, rs.format.y8, fps)
+        cfg.enable_stream(rs.stream.infrared, 2, w, h, rs.format.y8, fps)
 
     profile = pipe.start(cfg)
     depth_sensor = profile.get_device().first_depth_sensor()
     depth_scale = float(depth_sensor.get_depth_scale())
+
     align = rs.align(rs.stream.color)
 
     color_stream = profile.get_stream(rs.stream.color)
@@ -472,17 +529,36 @@ def rs_init(w, h, fps):
     return pipe, align, depth_scale, K
 
 
-def rs_get_frame(pipe, align):
+def rs_get_frame(pipe, align, enable_ir: bool = False):
     frames = pipe.wait_for_frames()
+
+    ir_l = None
+    ir_r = None
+    if enable_ir:
+        # 注意：IR 从原始 frameset 取更稳（align 后 frameset 可能不带 IR）
+        try:
+            f1 = frames.get_infrared_frame(1)
+            ir_l = np.asanyarray(f1.get_data()) if f1 else None
+        except Exception:
+            ir_l = None
+        try:
+            f2 = frames.get_infrared_frame(2)
+            ir_r = np.asanyarray(f2.get_data()) if f2 else None
+        except Exception:
+            ir_r = None
+
     aligned = align.process(frames)
     depth_frame = aligned.get_depth_frame()
     color_frame = aligned.get_color_frame()
     if not depth_frame or not color_frame:
-        return None, None
-    depth = np.asanyarray(depth_frame.get_data())   # uint16
-    color = np.asanyarray(color_frame.get_data())   # BGR uint8
-    return color, depth
+        return (None, None, None, None) if enable_ir else (None, None)
 
+    depth = np.asanyarray(depth_frame.get_data())  # uint16
+    color = np.asanyarray(color_frame.get_data())  # BGR uint8
+
+    if enable_ir:
+        return color, depth, ir_l, ir_r
+    return color, depth
 
 # -------------------------
 # grasp alignment: +90 around +Y then -90 around +Z (local)
@@ -689,6 +765,112 @@ def visualize_camera_scene_with_frames(cfg, crop_cloud, crop_color, cTg, grasp_m
     return cTg_aligned
 
 
+class SceneBoundaryFilter:
+    """
+    Filter grasps whose center is too close to an empty-scene pointcloud.
+
+    Assumption:
+      - scene.ply points are in CAMERA frame, meters
+      - gg grasp centers are also in CAMERA frame, meters
+    """
+    def __init__(self, ply_path: str, inflate_m: float = 0.01, min_z: float = 1e-6, debug: bool = False):
+        self.ply_path = ply_path
+        self.inflate_m = float(inflate_m)
+        self.min_z = float(min_z)
+        self.debug = bool(debug)
+
+        self._pts = None
+        self._kdtree = None
+        self._use_scipy = False
+
+        self._load()
+
+    def _load(self):
+        if (self.ply_path is None) or (not os.path.isfile(self.ply_path)):
+            print(f"[BOUNDARY][WARN] scene ply not found: {self.ply_path}. Boundary filter disabled.")
+            return
+
+        pcd = o3d.io.read_point_cloud(self.ply_path)
+        pts = np.asarray(pcd.points, dtype=np.float64)
+        if pts.size == 0:
+            print(f"[BOUNDARY][WARN] scene ply empty: {self.ply_path}. Boundary filter disabled.")
+            return
+
+        m = np.isfinite(pts).all(axis=1) & (pts[:, 2] > self.min_z)
+        pts = pts[m]
+        if pts.shape[0] < 50:
+            print(f"[BOUNDARY][WARN] too few valid points in scene ply: {pts.shape[0]}. Boundary filter disabled.")
+            return
+
+        self._pts = pts
+
+        # Prefer scipy cKDTree if available (fast batch query)
+        try:
+            from scipy.spatial import cKDTree  # type: ignore
+            self._kdtree = cKDTree(self._pts)
+            self._use_scipy = True
+            if self.debug:
+                print(f"[BOUNDARY] using scipy.cKDTree, npts={len(self._pts)}")
+            return
+        except Exception:
+            pass
+
+        # Fallback: open3d KDTreeFlann (slower per-point queries)
+        try:
+            pcd2 = o3d.geometry.PointCloud()
+            pcd2.points = o3d.utility.Vector3dVector(self._pts)
+            self._kdtree = o3d.geometry.KDTreeFlann(pcd2)
+            self._use_scipy = False
+            if self.debug:
+                print(f"[BOUNDARY] using open3d.KDTreeFlann, npts={len(self._pts)}")
+        except Exception as e:
+            print(f"[BOUNDARY][WARN] KDTree build failed: {repr(e)}. Boundary filter disabled.")
+            self._kdtree = None
+            self._pts = None
+
+    def enabled(self) -> bool:
+        return (self._kdtree is not None) and (self._pts is not None)
+
+    def query_min_dist(self, centers_xyz: np.ndarray) -> np.ndarray:
+        centers_xyz = np.asarray(centers_xyz, dtype=np.float64).reshape(-1, 3)
+        if (not self.enabled()) or centers_xyz.shape[0] == 0:
+            return np.full((centers_xyz.shape[0],), np.inf, dtype=np.float64)
+
+        if self._use_scipy:
+            d, _ = self._kdtree.query(centers_xyz, k=1, workers=-1)  # type: ignore
+            return d.astype(np.float64)
+
+        # open3d fallback
+        dists = np.empty((centers_xyz.shape[0],), dtype=np.float64)
+        for i, p in enumerate(centers_xyz):
+            # returns squared distances
+            _, _, dist2 = self._kdtree.search_knn_vector_3d(p, 1)  # type: ignore
+            if len(dist2) == 0:
+                dists[i] = np.inf
+            else:
+                dists[i] = float(np.sqrt(dist2[0]))
+        return dists
+
+    def filter_grasps(self, gg: GraspGroup) -> GraspGroup:
+        if (gg is None) or (len(gg) == 0) or (not self.enabled()):
+            return gg
+
+        arr = np.asarray(gg.grasp_group_array, dtype=np.float64)
+        centers = arr[:, 13:16]  # (N,3) X,Y,Z in camera
+
+        d = self.query_min_dist(centers)
+        keep_mask = d > self.inflate_m
+        keep_idx = np.where(keep_mask)[0].tolist()
+
+        if self.debug:
+            removed = int((~keep_mask).sum())
+            print(f"[BOUNDARY] inflate={self.inflate_m:.4f}m, kept={len(keep_idx)}/{len(gg)}, removed={removed}")
+            if len(d) > 0:
+                print(f"[BOUNDARY] dist stats: min={d.min():.4f}, p10={np.percentile(d,10):.4f}, "
+                      f"median={np.median(d):.4f}, mean={d.mean():.4f}")
+
+        return gg[keep_idx] if len(keep_idx) > 0 else gg[[]]
+
 # -------------------------
 # Planner
 # -------------------------
@@ -783,9 +965,114 @@ def _maybe_add_sys_path(p: str):
         sys.path.insert(0, p)
 
 
-def build_depth_restorer(cfg: dict, device: torch.device):
-    if not bool(cfg.get("use_restored_depth", False)):
+def build_d3roma_restorer(cfg: dict):
+    """
+    Returns: droma_model or None
+    """
+    root = str(cfg.get("d3roma_root", ""))
+    if (not root) or (not os.path.isdir(root)):
+        print(f"[D3RoMa][WARN] d3roma_root not found: {root}")
         return None
+
+    # _maybe_add_sys_path(root)
+
+    try:
+        from d3roma.utils.camera import Realsense as D3Realsense
+        from d3roma.inference import D3RoMa
+    except Exception as e:
+        print(f"[D3RoMa][WARN] import failed: {repr(e)}")
+        return None
+
+    try:
+        import importlib
+        _core = importlib.import_module("d3roma.core")
+        sys.modules.setdefault("core", _core)
+    except Exception as e:
+        print("[D3RoMa][WARN] cannot alias core -> d3roma.core:", repr(e))
+        
+    variant = str(cfg.get("d3roma_variant", "left+right+raw"))
+    camera_name = str(cfg.get("d3roma_camera", "graspnet_d435"))
+    camera = D3Realsense.default_real(camera_name)
+
+    if variant == "rgb+raw":
+        overrides = cfg.get("d3roma_overrides_rgb_raw", None)
+    else:
+        overrides = cfg.get("d3roma_overrides_left_right_raw", None)
+
+    if not overrides or (not isinstance(overrides, list)):
+        print("[D3RoMa][WARN] overrides missing/invalid, please set d3roma_overrides_* in cfg.")
+        return None
+
+    print(f"[D3RoMa] init variant={variant}, camera={camera_name}")
+    droma = D3RoMa(overrides, camera, variant=variant)
+    print("[D3RoMa] ready.")
+    return droma
+
+
+@torch.no_grad()
+def run_d3roma_depth(
+    cfg: dict,
+    droma,
+    color_bgr: np.ndarray,
+    depth_raw_u16: np.ndarray,
+    ir_l: np.ndarray,
+    ir_r: np.ndarray,
+    depth_scale: float,
+    factor_depth: float,
+):
+    """
+    Return: depth_used_u16 (uint16) in RealSense depth units (same unit as depth_raw_u16)
+    """
+    if droma is None:
+        return depth_raw_u16
+
+    try:
+        H, W = depth_raw_u16.shape[:2]
+
+        # raw depth (meters)
+        raw_m = depth_raw_u16.astype(np.float32) * float(depth_scale)
+
+        # RGB for D3RoMa (uint8 RGB)
+        rgb = color_bgr[:, :, ::-1].copy()
+
+        variant = str(cfg.get("d3roma_variant", "left+right+raw"))
+
+        if variant == "rgb+raw":
+            pred_depth_m = droma.infer_with_rgb_raw(rgb, raw_m)
+        else:
+            # left+right+raw needs IR pair
+            if ir_l is None or ir_r is None:
+                raise RuntimeError("IR frames missing (ir_l/ir_r is None) but d3roma_variant requires them.")
+            left = np.asarray(ir_l)
+            right = np.asarray(ir_r)
+            pred_depth_m = droma.infer(left, right, raw_m, rgb)
+
+        if isinstance(pred_depth_m, torch.Tensor):
+            pred_depth_m = pred_depth_m.detach().cpu().numpy()
+        pred_depth_m = np.squeeze(np.asarray(pred_depth_m)).astype(np.float32)
+
+        # resize back to (H,W) if needed
+        if pred_depth_m.shape[:2] != (H, W):
+            pred_depth_m = cv2.resize(pred_depth_m, (W, H), interpolation=cv2.INTER_NEAREST)
+
+        # clamp to configured range
+        pred_depth_m = np.clip(
+            pred_depth_m,
+            float(cfg.get("d3roma_min_depth", 0.001)),
+            float(cfg.get("d3roma_max_depth", 2.0)),
+        )
+
+        # meters -> realsense unit (uint16)
+        depth_units = pred_depth_m * float(factor_depth)
+        depth_used_u16 = np.clip(depth_units, 0, 65535).astype(np.uint16)
+        return depth_used_u16
+
+    except Exception as e:
+        print(f"[D3RoMa][WARN] inference failed, fallback to raw depth. err={repr(e)}")
+        return depth_raw_u16
+
+
+def build_depth_restorer(cfg: dict, device: torch.device):
 
     dr_root = cfg.get("dr_project_root", "")
     if not dr_root or (not os.path.isdir(dr_root)):
@@ -977,7 +1264,8 @@ def infer_grasps(
     factor_depth,
     bTe,
     eMc,
-    conf_map_full=None):
+    conf_map_full=None,
+    boundary_filter=None):
     """
     Returns dict:
       crop_color_bgr, crop_depth_u16, crop_cloud,
@@ -1044,8 +1332,8 @@ def infer_grasps(
     )
 
     end_points = net(batch)
-    grasp_preds = pred_decode(end_points)
-    preds_raw = torch.stack(grasp_preds).reshape(-1, 17).detach().cpu().numpy()  # Nx17
+    preds_raw = pred_decode(end_points)
+    preds_raw = np.stack(preds_raw, axis=0).reshape(-1, 17)  # (N,17)
     gg = GraspGroup(preds_raw)
 
     # collision (full cloud)
@@ -1058,6 +1346,22 @@ def infer_grasps(
         cmask = cmask.detach().cpu().numpy()
         gg = gg[~cmask]
 
+    # ---------- NEW: boundary filter (empty-scene inflated region) ----------
+    if boundary_filter is not None:
+        gg = boundary_filter.filter_grasps(gg)
+        if len(gg) == 0:
+            return dict(
+                crop_color_bgr=crop_color,
+                crop_depth_u16=crop_depth,
+                crop_cloud=crop_cloud,
+                grasps_raw=preds_raw,
+                grasps_filtered=None,
+                best_row=None,
+                cTg_raw=None,
+                meta=None,
+            )
+
+    
     # ======== NEW: conf/unc reweight BEFORE NMS ========
     if bool(cfg.get("enable_conf_reweight", False)) and (conf_map_full is not None) and (len(gg) > 0):
         gg = reweight_grasps_by_uncertainty(
@@ -1073,7 +1377,17 @@ def infer_grasps(
     if min_w > 0:
         gg = filter_by_min_width(gg, min_w, debug=True)
         if len(gg) == 0:
-            return None
+            return dict(
+                crop_color_bgr=crop_color,
+                crop_depth_u16=crop_depth,
+                crop_cloud=crop_cloud,
+                grasps_raw=preds_raw,
+                grasps_filtered=None,
+                best_row=None,
+                cTg_raw=None,
+                meta=None,
+            )
+
 
     if bool(cfg["rotation_filtering"]):
         gg = filter_by_approach_angle(
@@ -1141,7 +1455,11 @@ def main():
     aubo = AuboController(robot_ip_=cfg["robot_ip"], eef_offset=cfg["robot_eef_offset"])
     gripper = Gripper(True)
 
-    pipe, align, depth_scale, K = rs_init(cfg["rs_w"], cfg["rs_h"], cfg["rs_fps"])
+    # pipe, align, depth_scale, K = rs_init(cfg["rs_w"], cfg["rs_h"], cfg["rs_fps"])
+    restorer = str(cfg.get("depth_restorer", "none")).lower()
+    need_ir = (restorer == "d3roma") and (str(cfg.get("d3roma_variant", "left+right+raw")) != "rgb+raw")
+
+    pipe, align, depth_scale, K = rs_init(cfg["rs_w"], cfg["rs_h"], cfg["rs_fps"], enable_ir=need_ir)
     factor_depth = 1.0 / float(depth_scale)
 
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -1155,9 +1473,31 @@ def main():
         net.load_state_dict(ckpt["model_state_dict"])
 
     # depth restorer (optional)
-    dr_model = build_depth_restorer(cfg, device)
+    dr_model = None
+    d3roma = None
+    
+    if restorer == "ours":
+        dr_model = build_depth_restorer(cfg, device)          # 你已有
+    elif restorer == "d3roma":
+        d3roma = build_d3roma_restorer(cfg)
+    elif restorer == "none":
+        pass
+    else:
+        print(f"[WARN] unknown depth_restorer={restorer}, fallback to none.")
+        restorer = "none"
     eMc = np.array(cfg["handeye_tf"], dtype=np.float64)
 
+    boundary_filter = None
+    if bool(cfg.get("boundary_filtering", False)):
+        boundary_filter = SceneBoundaryFilter(
+            ply_path=str(cfg.get("boundary_scene_ply", "demo/scene.ply")),
+            inflate_m=float(cfg.get("boundary_inflate_m", 0.01)),
+            min_z=float(cfg.get("boundary_min_z", 1e-6)),
+            debug=bool(cfg.get("boundary_debug", False)),
+        )
+        if (boundary_filter is None) or (not boundary_filter.enabled()):
+            boundary_filter = None
+            
     executed = 0
     attempts = 0
 
@@ -1176,7 +1516,13 @@ def main():
             bTe = np.array(bTe, dtype=np.float64)
 
             # capture
-            color_bgr, depth_raw_u16 = rs_get_frame(pipe, align)
+            # color_bgr, depth_raw_u16 = rs_get_frame(pipe, align)
+            if need_ir:
+                color_bgr, depth_raw_u16, ir_l, ir_r = rs_get_frame(pipe, align, enable_ir=True)
+            else:
+                color_bgr, depth_raw_u16 = rs_get_frame(pipe, align, enable_ir=False)
+                ir_l, ir_r = None, None
+
             if color_bgr is None:
                 print("[WARN] Realsense capture failed, skip.")
                 # save attempt (optional)
@@ -1202,24 +1548,29 @@ def main():
 
             # optional depth restoration
             depth_used_u16 = depth_raw_u16
+            restored_depth_u16 = None
             conf_map_full = None
-            if bool(cfg.get("use_restored_depth", False)):
+            if restorer == "ours":
                 depth_used_u16, conf_map_full = run_depth_restoration(
                     cfg, dr_model, color_bgr, depth_raw_u16,
                     depth_scale=depth_scale, factor_depth=factor_depth,
                     step_tag=f"att{attempts:02d}"
                 )
-                # if restoration enabled, treat used depth as restored (even if fallback happened)
                 restored_depth_u16 = depth_used_u16
-                
+            elif restorer == "d3roma":
+                depth_used_u16 = run_d3roma_depth(
+                    cfg, d3roma, color_bgr, depth_raw_u16, ir_l, ir_r,
+                    depth_scale=depth_scale, factor_depth=factor_depth
+                )
+                restored_depth_u16 = depth_used_u16
             # infer grasps (with debug outputs)
             try:
                 out = infer_grasps(
                     cfg, net, device,
                     color_bgr, depth_used_u16,
                     K, factor_depth,
-                    bTe=bTe, eMc=eMc, conf_map_full=conf_map_full
-                )
+                    bTe=bTe, eMc=eMc, conf_map_full=conf_map_full,
+                    boundary_filter=boundary_filter)
             except Exception as ex:
                 print(f"[WARN] inference failed: {repr(ex)}")
                 saver.save_attempt(attempts, dict(
@@ -1254,7 +1605,7 @@ def main():
                 raw_color_bgr=color_bgr,
                 raw_depth_u16=depth_raw_u16,
                 used_depth_u16=depth_used_u16,
-                restored_depth_u16=restored_depth_u16 if bool(cfg.get("use_restored_depth", False)) else None,
+                restored_depth_u16=restored_depth_u16 if cfg.get("depth_restorer", 'none') != 'none' else None,
                 uncertainty_map=conf_map_full,
                 crop_color_bgr=crop_color,
                 crop_depth_u16=crop_depth,
@@ -1267,8 +1618,10 @@ def main():
                 bTe=bTe,
                 eMc=eMc,
                 K=K,
+                ir_l=ir_l,
+                ir_r=ir_r,
                 meta=dict(
-                    use_restored_depth=bool(cfg.get("use_restored_depth", False)),
+                    depth_restorer=cfg.get("depth_restorer", 'none'),
                     rotation_filtering=bool(cfg.get("rotation_filtering", False)),
                     filter_angle_deg=float(cfg.get("filter_angle_deg", 0.0)),
                     min_grasp_width_m=float(cfg.get("min_grasp_width_m", 0.0)),
