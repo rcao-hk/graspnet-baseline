@@ -683,80 +683,80 @@ class GatedFusion(nn.Module):
 #         fused_feat = fused_feat.permute((0, 2, 1))  # (B, output_dim, num_pc)
 #         return fused_feat
 
-from flash_attn.modules.mha import CrossAttention
-from einops import rearrange
-class LearnableAlign(nn.Module):
-    def __init__(self, point_dim, img_dim, dropout, normalize=False, in_proj_bias=True):
-        super(LearnableAlign, self).__init__()
-        self.feat_dim = self.point_dim = point_dim
-        self.img_dim = img_dim
-        self.normalize = normalize
-        self.dropout = dropout
+# from flash_attn.modules.mha import CrossAttention
+# from einops import rearrange
+# class LearnableAlign(nn.Module):
+#     def __init__(self, point_dim, img_dim, dropout, normalize=False, in_proj_bias=True):
+#         super(LearnableAlign, self).__init__()
+#         self.feat_dim = self.point_dim = point_dim
+#         self.img_dim = img_dim
+#         self.normalize = normalize
+#         self.dropout = dropout
         
-        if self.normalize:
-            self.point_norm = nn.LayerNorm(self.point_dim)
-            self.img_norm = nn.LayerNorm(self.img_dim)
+#         if self.normalize:
+#             self.point_norm = nn.LayerNorm(self.point_dim)
+#             self.img_norm = nn.LayerNorm(self.img_dim)
 
-        self.img_mlp = nn.Sequential(
-            nn.Linear(img_dim, 128),
-            nn.LayerNorm(128), 
-            nn.ReLU(inplace=True),
-            nn.Linear(128, self.feat_dim),
-            nn.LayerNorm(self.feat_dim), 
-            nn.ReLU(inplace=True),
-        )
-        # self.point_kv_proj = nn.Linear(self.feat_dim, 2 * self.feat_dim, bias=in_proj_bias)
-        # self.img_q_proj = nn.Linear(self.feat_dim, self.feat_dim, bias=in_proj_bias)
+#         self.img_mlp = nn.Sequential(
+#             nn.Linear(img_dim, 128),
+#             nn.LayerNorm(128), 
+#             nn.ReLU(inplace=True),
+#             nn.Linear(128, self.feat_dim),
+#             nn.LayerNorm(self.feat_dim), 
+#             nn.ReLU(inplace=True),
+#         )
+#         # self.point_kv_proj = nn.Linear(self.feat_dim, 2 * self.feat_dim, bias=in_proj_bias)
+#         # self.img_q_proj = nn.Linear(self.feat_dim, self.feat_dim, bias=in_proj_bias)
         
-        self.img_kv_proj = nn.Linear(self.feat_dim, 2 * self.feat_dim, bias=in_proj_bias)
-        self.point_q_proj = nn.Linear(self.feat_dim, self.feat_dim, bias=in_proj_bias)
+#         self.img_kv_proj = nn.Linear(self.feat_dim, 2 * self.feat_dim, bias=in_proj_bias)
+#         self.point_q_proj = nn.Linear(self.feat_dim, self.feat_dim, bias=in_proj_bias)
         
-        # self.point_cross_attn = FlashCrossAttention(attention_dropout=dropout)
-        # self.image_cross_attn = FlashCrossAttention(attention_dropout=dropout)
+#         # self.point_cross_attn = FlashCrossAttention(attention_dropout=dropout)
+#         # self.image_cross_attn = FlashCrossAttention(attention_dropout=dropout)
         
-        # self.point_cross_attn = CrossAttention(attention_dropout=dropout)
-        self.image_cross_attn = CrossAttention(attention_dropout=dropout)
-        self.img_feat_out = nn.Linear(self.feat_dim, self.feat_dim)
+#         # self.point_cross_attn = CrossAttention(attention_dropout=dropout)
+#         self.image_cross_attn = CrossAttention(attention_dropout=dropout)
+#         self.img_feat_out = nn.Linear(self.feat_dim, self.feat_dim)
                                                         
-    def forward(self, point_feat, img_feat):
+#     def forward(self, point_feat, img_feat):
 
-        Bs, N, _ = point_feat.shape
+#         Bs, N, _ = point_feat.shape
         
-        point_feat = point_feat.transpose(1, 2)  # (B, point_dim, num_pc)
-        img_feat = img_feat.transpose(1, 2)  # (B, img_dim, num_pc)
+#         point_feat = point_feat.transpose(1, 2)  # (B, point_dim, num_pc)
+#         img_feat = img_feat.transpose(1, 2)  # (B, img_dim, num_pc)
         
-        if self.normalize:
-            point_feat = self.point_norm(point_feat)
-            img_feat = self.img_norm(img_feat)
+#         if self.normalize:
+#             point_feat = self.point_norm(point_feat)
+#             img_feat = self.img_norm(img_feat)
 
-        img_feat = self.img_mlp(img_feat)
-        # img_q = self.img_q_proj(img_feat)
-        img_kv = self.img_kv_proj(img_feat)
-        point_q = self.point_q_proj(point_feat)
-        # point_kv = self.point_kv_proj(point_feat)
+#         img_feat = self.img_mlp(img_feat)
+#         # img_q = self.img_q_proj(img_feat)
+#         img_kv = self.img_kv_proj(img_feat)
+#         point_q = self.point_q_proj(point_feat)
+#         # point_kv = self.point_kv_proj(point_feat)
         
-        # img_q = self.img_q_proj(img_feat).half()
-        # img_kv = self.img_kv_proj(img_feat).half()
-        # point_q = self.point_q_proj(point_feat).half()
-        # point_kv = self.point_kv_proj(point_feat).half()
+#         # img_q = self.img_q_proj(img_feat).half()
+#         # img_kv = self.img_kv_proj(img_feat).half()
+#         # point_q = self.point_q_proj(point_feat).half()
+#         # point_kv = self.point_kv_proj(point_feat).half()
         
-        # img_q = rearrange(img_q.transpose(1, 2), "... (h d) -> ... h d", d=self.feat_dim)
-        # point_kv = rearrange(point_kv.transpose(1, 2), "... (two hkv d) -> ... two hkv d", two=2, d=self.feat_dim)
-        # point_fuse = self.point_cross_attn(img_q, point_kv)
-        # # point_fuse = point_feat + point_fuse.view(Bs, N, -1)
-        # # point_fuse = torch.concat([point_feat, point_fuse.view(Bs, N, -1)], dim=-1)
+#         # img_q = rearrange(img_q.transpose(1, 2), "... (h d) -> ... h d", d=self.feat_dim)
+#         # point_kv = rearrange(point_kv.transpose(1, 2), "... (two hkv d) -> ... two hkv d", two=2, d=self.feat_dim)
+#         # point_fuse = self.point_cross_attn(img_q, point_kv)
+#         # # point_fuse = point_feat + point_fuse.view(Bs, N, -1)
+#         # # point_fuse = torch.concat([point_feat, point_fuse.view(Bs, N, -1)], dim=-1)
 
-        # fused_feat = torch.concat([point_feat.transpose(1, 2), point_fuse.view(Bs, N, -1)], dim=-1)
+#         # fused_feat = torch.concat([point_feat.transpose(1, 2), point_fuse.view(Bs, N, -1)], dim=-1)
         
-        point_q = rearrange(point_q, "... (h d) -> ... h d", d=self.feat_dim)
-        img_kv = rearrange(img_kv, "... (two hkv d) -> ... two hkv d", two=2, d=self.feat_dim)
-        image_fuse = self.image_cross_attn(point_q, img_kv)
-        img_feat = self.img_feat_out(image_fuse)
-        # image_fuse = img_feat + image_fuse.view(Bs, N, -1)
-        # image_fuse = torch.concat([img_feat, image_fuse.view(Bs, N, -1)], dim=-1)
-        fused_feat = torch.concat([point_feat, image_fuse.view(Bs, N, -1)], dim=-1)
-        fused_feat = fused_feat.transpose(1, 2)  # (B, output_dim, num_pc)
-        return fused_feat
+#         point_q = rearrange(point_q, "... (h d) -> ... h d", d=self.feat_dim)
+#         img_kv = rearrange(img_kv, "... (two hkv d) -> ... two hkv d", two=2, d=self.feat_dim)
+#         image_fuse = self.image_cross_attn(point_q, img_kv)
+#         img_feat = self.img_feat_out(image_fuse)
+#         # image_fuse = img_feat + image_fuse.view(Bs, N, -1)
+#         # image_fuse = torch.concat([img_feat, image_fuse.view(Bs, N, -1)], dim=-1)
+#         fused_feat = torch.concat([point_feat, image_fuse.view(Bs, N, -1)], dim=-1)
+#         fused_feat = fused_feat.transpose(1, 2)  # (B, output_dim, num_pc)
+#         return fused_feat
 
 
 from models.pspnet import PSPUpsample
