@@ -33,7 +33,7 @@ import MinkowskiEngine as ME
 from graspnetAPI import GraspGroup
 
 from utils.collision_detector import ModelFreeCollisionDetector, ModelFreeCollisionDetectorTorch
-from utils.data_utils import CameraInfo, create_point_cloud_from_depth_image, get_workspace_mask, sample_points, points_denoise
+from utils.data_utils import CameraInfo, create_point_cloud_from_depth_image, get_workspace_mask, sample_points, points_denoise, add_gaussian_noise_depth_map, apply_smoothing, random_point_dropout, find_large_missing_regions, apply_dropout_to_regions
 from torchvision import transforms
 
 import cv2
@@ -70,6 +70,15 @@ parser.add_argument('--fuse_type',type=str, default='early')
 parser.add_argument('--voxel_size', type=float, default=0.002, help='Voxel Size to quantize point cloud [default: 0.005]')
 parser.add_argument('--collision_voxel_size', type=float, default=0.01, help='Voxel Size to process point clouds before collision detection [default: 0.01]')
 parser.add_argument('--collision_thresh', type=float, default=0.01, help='Collision Threshold in collision detection [default: 0.01]')
+parser.add_argument('--data_type', type=str, default='real', choices=['real', 'syn', 'noise'], help='Type of input data: real|syn|noise')
+parser.add_argument('--smooth_size', type=int, default=1,
+                    help='Box smoothing kernel size on depth (<=1 means off)')
+parser.add_argument('--gaussian_noise_level', type=float, default=0.0,
+                    help='Gaussian noise std in meters (0 means off)')
+parser.add_argument('--dropout_rate', type=float, default=0.0,
+                    help='Depth-guided dropout: fraction of missing regions to DROP (0 means off)')
+parser.add_argument('--dropout_min_size', type=int, default=200,
+                    help='Min connected component size for missing regions (on FG mask)')
 parser.add_argument('--rgb_noise', type=str, default='none',
                     help='RGB corruption type: none|cutout|blur|brightness|saturation|contrast')
 parser.add_argument('--rgb_severity', type=int, default=0,
@@ -336,7 +345,7 @@ def visualize_rgb_corruptions(
     print(f'[VIS] saved to {out_path}')
 
 
-data_type = 'real' # syn
+data_type = cfgs.data_type # syn
 restored_depth = cfgs.restored_depth
 restored_depth_root = cfgs.depth_root
 inst_denoise = cfgs.inst_denoise
@@ -386,6 +395,15 @@ eps = 1e-8
 start = torch.cuda.Event(enable_timing=True)
 end = torch.cuda.Event(enable_timing=True)
 
+def _disable_corruptions(cfgs):
+    cfgs.smooth_size = 1
+    cfgs.gaussian_noise_level = 0.0
+    cfgs.dropout_rate = 0.0
+    cfgs.dropout_min_size = 0
+    cfgs.rgb_noise = 'none'
+    cfgs.rgb_severity = 0
+    
+    
 def inference(scene_idx):
     # elapsed_time_list = []
     for anno_idx in range(256):
@@ -393,24 +411,32 @@ def inference(scene_idx):
             rgb_path = os.path.join(dataset_root,
                                     'scenes/scene_{:04d}/{}/rgb/{:04d}.png'.format(scene_idx, camera, anno_idx))
             if restored_depth:
-                depth_path = os.path.join(restored_depth_root, '{}/scene_{:04d}/{:04d}.png'.format(camera, scene_idx, anno_idx))
+                depth_path = os.path.join(
+                    restored_depth_root, '{}/scene_{:04d}/{:04d}.png'.format(camera, scene_idx, anno_idx))
             else:
-                depth_path = os.path.join(dataset_root,
-                                          'scenes/scene_{:04d}/{}/depth/{:04d}.png'.format(scene_idx, camera, anno_idx))   
+                depth_path = os.path.join(dataset_root, 'scenes/scene_{:04d}/{}/depth/{:04d}.png'.format(scene_idx, camera, anno_idx))
+                
             mask_path = os.path.join(dataset_root,
                                     'scenes/scene_{:04d}/{}/label/{:04d}.png'.format(scene_idx, camera, anno_idx))
         elif data_type == 'syn':
             rgb_path = os.path.join(dataset_root, 'virtual_scenes/scene_{:04d}/{}/{:04d}_rgb.png'.format(scene_idx, camera, anno_idx))
             depth_path = os.path.join(dataset_root, 'virtual_scenes/scene_{:04d}/{}/{:04d}_depth.png'.format(scene_idx, camera, anno_idx))
             mask_path = os.path.join(dataset_root, 'virtual_scenes/scene_{:04d}/{}/{:04d}_label.png'.format(scene_idx, camera, anno_idx))
-            
+        
+        elif data_type == 'noise':
+            rgb_path = os.path.join(dataset_root,
+                                    'scenes/scene_{:04d}/{}/rgb/{:04d}.png'.format(scene_idx, camera, anno_idx))
+            depth_path = os.path.join(dataset_root, 'virtual_scenes/scene_{:04d}/{}/{:04d}_depth.png'.format(scene_idx, camera, anno_idx))
+            depth_raw_path = os.path.join(dataset_root, 'scenes/scene_{:04d}/{}/depth/{:04d}.png'.format(scene_idx, camera, anno_idx))
+            mask_path = os.path.join(dataset_root, 'virtual_scenes/scene_{:04d}/{}/{:04d}_label.png'.format(scene_idx, camera, anno_idx))
         meta_path = os.path.join(dataset_root,
                                 'scenes/scene_{:04d}/{}/meta/{:04d}.mat'.format(scene_idx, camera, anno_idx))
 
-        # depth = cv2.imread(depth_path, cv2.IMREAD_UNCHAdNGED).astype(np.float32) / 1000.0
-
         color = np.array(Image.open(rgb_path), dtype=np.float32) / 255.0
-        color = apply_rgb_corruption(color, cfgs.rgb_noise, cfgs.rgb_severity)
+        if data_type == 'noise':
+            color = apply_rgb_corruption(color, cfgs.rgb_noise, cfgs.rgb_severity)
+        else:
+            _disable_corruptions(cfgs)
         # visualize_rgb_corruptions(rgb_path, out_path=os.path.join('vis', '{}_rgb_corruption.png'.format(scene_idx)))
 
         depth = np.array(Image.open(depth_path))
@@ -421,6 +447,7 @@ def inference(scene_idx):
         intrinsics = meta['intrinsic_matrix']
         factor_depth = meta['factor_depth']
         camera_info = CameraInfo(img_length, img_width, intrinsics[0][0], intrinsics[1][1], intrinsics[0][2], intrinsics[1][2], factor_depth)
+
         cloud = create_point_cloud_from_depth_image(depth, camera_info, organized=True)
 
         depth_mask = (depth > 0)
@@ -432,19 +459,52 @@ def inference(scene_idx):
         workspace_mask = get_workspace_mask(cloud, seg, trans=trans, organized=True, outlier=0.02)
         mask = (depth_mask & workspace_mask)
 
-        # cv2.imwrite('test_seg_{}_{}.png'.format(scene_idx, anno_idx), (net_seg.astype(np.float32)/net_seg.max()*255.0).astype(np.uint8))
+        # ---------------- Apply point corruptions in depth domain ----------------
+        depth_used = depth.copy()   # uint16 / or float later
+        dropout_mask = None
+        noisy_cloud = None
+        # (A) smoothing (box blur)
+        if cfgs.smooth_size is not None and int(cfgs.smooth_size) > 1:
+            depth_used = apply_smoothing(depth_used, size=int(cfgs.smooth_size))
+            noisy_cloud = create_point_cloud_from_depth_image(depth_used, camera_info, organized=True)
 
-        cloud_masked = cloud[mask]
+        # (B) gaussian noise (in meters, then back to uint16)
+        if cfgs.gaussian_noise_level is not None and float(cfgs.gaussian_noise_level) > 0:
+            depth_noisy = add_gaussian_noise_depth_map(
+                depth_used.astype(np.float32),
+                scale=factor_depth,
+                level=float(cfgs.gaussian_noise_level),
+                valid_min_depth=0.1
+            )
+            depth_used = np.clip(depth_noisy, 0, np.iinfo(np.uint16).max).astype(np.uint16)
+            noisy_cloud = create_point_cloud_from_depth_image(depth_used, camera_info, organized=True)
+            
+        # (C) depth-guided dropout (find missing regions on RAW depth by default)
+        if cfgs.dropout_rate is not None and float(cfgs.dropout_rate) > 0:
+            foreground_mask = (seg > 0)
+
+            real_depth = np.array(Image.open(depth_raw_path))
+
+            large_missing_regions, labeled, filtered_labels = find_large_missing_regions(
+                real_depth, foreground_mask, min_size=int(cfgs.dropout_min_size)
+            )
+            dropout_regions = apply_dropout_to_regions(
+                large_missing_regions, labeled, filtered_labels, float(cfgs.dropout_rate)
+            )
+            dropout_mask = (dropout_regions > 0)
+            
+        # cv2.imwrite('test_seg_{}_{}.png'.format(scene_idx, anno_idx), (net_seg.astype(np.float32)/net_seg.max()*255.0).astype(np.uint8))
+        if dropout_mask is not None:
+            mask = mask & (~dropout_mask)
+
+        if noisy_cloud is not None:
+            cloud_masked = noisy_cloud[mask]
+        else:
+            cloud_masked = cloud[mask]
         color_masked = color[mask]
         # normal_masked = normal
 
-        if len(cloud_masked) >= cfgs.num_point:
-            idxs = np.random.choice(len(cloud_masked), cfgs.num_point, replace=False)
-        else:
-            idxs1 = np.arange(len(cloud_masked))
-            idxs2 = np.random.choice(len(cloud_masked), cfgs.num_point-len(cloud_masked), replace=True)
-            idxs = np.concatenate([idxs1, idxs2], axis=0)
-            
+        idxs = sample_points(len(cloud_masked), cfgs.num_point)
         cloud_sampled = cloud_masked[idxs]
         color_sampled = color_masked[idxs]
 
@@ -488,11 +548,7 @@ def inference(scene_idx):
         # 记录时间并执行前向传播
         # start.record()
         
-        if cfgs.collision_thresh > 0:
-            # cloud, _ = TEST_DATASET.get_data(data_idx, return_raw_cloud=True)
-            # mfcdetector = ModelFreeCollisionDetector(cloud.reshape(-1, 3), voxel_size=cfgs.collision_voxel_size)
-            # collision_mask = mfcdetector.detect(gg, approach_dist=0.05, collision_thresh=cfgs.collision_thresh)
-            
+        if cfgs.collision_thresh > 0:            
             mfcdetector = ModelFreeCollisionDetectorTorch(cloud.reshape(-1, 3), voxel_size=cfgs.collision_voxel_size)
             collision_mask = mfcdetector.detect(gg, approach_dist=0.05, collision_thresh=cfgs.collision_thresh)
             collision_mask = collision_mask.detach().cpu().numpy()
