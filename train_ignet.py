@@ -66,7 +66,8 @@ setup_seed(0)
 
 # from models.IGNet_v0_8 import IGNet
 # from models.IGNet_loss_v0_8 import get_loss
-from models.IGNet_v0_9 import IGNet
+# from models.IGNet_v0_9 import IGNet
+from models.IGNet_v0_10 import IGNet
 from models.IGNet_loss_v0_9 import get_loss
 from dataset.ignet_multi_dataset import GraspNetDataset, GraspNetMultiDataset, minkowski_collate_fn, collate_fn, load_grasp_labels
 
@@ -225,7 +226,7 @@ def train_one_epoch():
                 if key not in stat_dict: stat_dict[key] = 0
                 stat_dict[key] += end_points[key].item()
 
-        overall_loss += stat_dict['loss/overall_loss']
+        overall_loss += stat_dict['loss/grasp_loss']
         # overall_loss += (stat_dict['loss/score_loss'] + stat_dict['loss/width_loss'] + stat_dict['loss/rot_graspness_loss'])
         batch_interval = 10
         if (batch_idx+1) % batch_interval == 0:
@@ -268,7 +269,7 @@ def evaluate_one_epoch():
                 if key not in stat_dict: stat_dict[key] = 0
                 stat_dict[key] += end_points[key].item()
     
-        overall_loss += stat_dict['loss/overall_loss']
+        overall_loss += stat_dict['loss/grasp_loss']
         # overall_loss += (stat_dict['loss/score_loss'] + stat_dict['loss/width_loss'] + stat_dict['loss/rot_graspness_loss'])
     for key in sorted(stat_dict.keys()):
         log_writer.add_scalar('test_' + key, stat_dict[key]/float(batch_idx+1), (EPOCH_CNT+1)*len(TRAIN_DATALOADER)*cfgs.batch_size)
