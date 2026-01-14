@@ -9,12 +9,6 @@ sys.path.append(os.path.join(ROOT_DIR, "pointnet2"))
 # sys.path.append(os.path.join(ROOT_DIR, "utils"))
 # sys.path.append(os.path.join(ROOT_DIR, "models"))
 # sys.path.append(os.path.join(ROOT_DIR, "dataset"))
-# if ROOT_DIR not in sys.path:
-#     sys.path.insert(0, ROOT_DIR)
-
-# PT2_DIR = os.path.join(ROOT_DIR, "pointnet2")
-# if PT2_DIR not in sys.path:
-#     sys.path.insert(0, PT2_DIR)
 
 import json
 import time
@@ -89,7 +83,9 @@ DEFAULT_CFG = dict(
     # camera_crop_y_top=202,
     # camera_crop_y_bottom=637,
 
-    camera_crop_x_left=346, camera_crop_x_right=796, camera_crop_y_top=325, camera_crop_y_bottom=717,
+    # camera_crop_x_left=346, camera_crop_x_right=796, camera_crop_y_top=325, camera_crop_y_bottom=717,
+    camera_crop_x_left=363, camera_crop_x_right=803, 
+    camera_crop_y_top=344, camera_crop_y_bottom=713,
 
     # --------- filtering / execution control ---------
     rotation_filtering=True,
@@ -97,22 +93,22 @@ DEFAULT_CFG = dict(
 
     boundary_filtering=True,
     boundary_scene_ply="demo/scene.ply",   # empty scene pointcloud
-    boundary_inflate_m=0.01,               # 1cm dilation
+    boundary_inflate_m=0.03,               # 1cm dilation
     boundary_min_z=1e-6,                   # ignore invalid points
     boundary_debug=False,
     
     # --------- width gate ---------
     min_grasp_width_m=0.06,   # 5cm: filter out grasps with width < this
     
-    min_grasp_score=0.2,
+    min_grasp_score=0.1,
     max_attempts=20,
     max_exec=20,
 
-    VIS=True,
+    VIS=False,
     DO_PLACE=True,
 
     planning_cfg=dict(
-        eef_offset=[0.0, 0.0, 0.06],
+        eef_offset=[0.0, 0.0, 0.06],  # 0.06
         pre_pick_offset=[0.0, 0.0, -0.05],
         free_move_height=0.25,
     ),
@@ -121,7 +117,7 @@ DEFAULT_CFG = dict(
     # Depth restoration config
     # =======================
     # use_restored_depth=True,
-    depth_restorer = 'd3roma', # "none" | "ours" | "d3roma"
+    depth_restorer = 'ours', # "none" | "ours" | "d3roma"
     dr_project_root="/home/hkclr-user/projects/object_depth_percetion",
     dr_method="dreds_clearpose_hiss_50k_dav2_complete_obs_iter_unc_cali_convgru_l1_only_scale_norm_robust_init_wo_soft_fuse_l1+grad_sigma_conf_518x518",
     dr_encoder="vitl",
