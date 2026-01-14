@@ -10,13 +10,15 @@ def get_loss(end_points, device):
     width_loss, end_points = compute_width_loss(end_points, device)
     # rotation_loss, end_points = compute_rotation_loss(end_points)
 
-    loss = objectness_loss + 5 * graspness_loss + 5 * score_loss + width_loss  # vanilla
+    grasp_loss = 5 * graspness_loss + 5 * score_loss + width_loss  # vanilla
+    loss = objectness_loss + grasp_loss  # vanilla
     # score only
     # loss = 5 * graspness_loss + score_loss
     # loss = graspness_loss / (eps + graspness_loss.detach()) + \
     #        score_loss / (eps + score_loss.detach()) + \
     #        width_loss / (eps + width_loss.detach())
     end_points['loss/overall_loss'] = loss
+    end_points['loss/grasp_loss'] = grasp_loss
     return loss, end_points
 
 
