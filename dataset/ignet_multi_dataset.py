@@ -747,6 +747,8 @@ class GraspNetDataset(Dataset):
         # get valid points
         depth_mask = (depth > 0)
         if self.remove_outlier:
+            camera_info = CameraInfo(1280.0, 720.0, intrinsic[0][0], intrinsic[1][1], intrinsic[0][2], intrinsic[1][2], factor_depth)
+            cloud = create_point_cloud_from_depth_image(depth, camera_info, organized=True)
             camera_poses = np.load(os.path.join(self.root, 'scenes', scene, self.camera, 'camera_poses.npy'))
             align_mat = np.load(os.path.join(self.root, 'scenes', scene, self.camera, 'cam0_wrt_table.npy'))
             trans = np.dot(align_mat, camera_poses[self.frameid[index]])
@@ -1151,7 +1153,9 @@ class GraspNetMultiDataset(Dataset):
 
         # Rotation along up-axis/Z-axis
         # rot_angle = (np.random.random()*np.pi/3) - np.pi/6 # -30 ~ +30 degree
-        rot_angle = (np.random.random()*np.pi/2) - np.pi/4  # -45 ~ +45 degree
+        # rot_angle = (np.random.random()*np.pi/2) - np.pi/4  # -45 ~ +45 degree
+
+        rot_angle = (np.random.random() * 2 * np.deg2rad(15.0)) - np.deg2rad(15.0)   # [-15°, +15°]
         c, s = np.cos(rot_angle), np.sin(rot_angle)
         rot_mat = np.eye(4, dtype=np.float32)
         rot_mat[:3, :3] = np.array([[c, -s, 0],
@@ -1179,6 +1183,28 @@ class GraspNetMultiDataset(Dataset):
         new_x = np.clip((xs * scale_x).astype(np.int64), 0, self.resize_shape[1] - 1)
         return (new_y * self.resize_shape[1] + new_x).astype(np.int64)
 
+    def point_augment(self, point_clouds, object_poses_list):
+        # Flipping along the YZ plane
+        if np.random.random() > 0.5:
+            flip_mat = np.array([[-1, 0, 0],
+                                [ 0, 1, 0],
+                                [ 0, 0, 1]])
+            point_clouds = transform_point_cloud(point_clouds, flip_mat, '3x3')
+            for i in range(len(object_poses_list)):
+                object_poses_list[i] = np.dot(flip_mat, object_poses_list[i]).astype(np.float32)
+
+        # Rotation along up-axis/Z-axis
+        rot_angle = (np.random.random()*np.pi/3) - np.pi/6 # -30 ~ +30 degree
+        c, s = np.cos(rot_angle), np.sin(rot_angle)
+        rot_mat = np.array([[c, -s, 0],
+                            [s, c, 0],
+                            [0, 0, 1]])
+        point_clouds = transform_point_cloud(point_clouds, rot_mat, '3x3')
+        for i in range(len(object_poses_list)):
+            object_poses_list[i] = np.dot(rot_mat, object_poses_list[i]).astype(np.float32)
+
+        return point_clouds, object_poses_list
+    
     def _build_mask(self, depth, seg, cloud, scene, frameid, aug_T_cam=None):
         depth_mask = (depth > 0)
         if self.remove_outlier:
@@ -1247,8 +1273,8 @@ class GraspNetMultiDataset(Dataset):
         meta  = scio.loadmat(self.metapath[index])
         scene = self.scenename[index]
 
-        graspness = np.load(self.graspnesspath[index])
-        graspness = graspness.squeeze()  # expect (mask_sum,)
+        # graspness = np.load(self.graspnesspath[index])
+        # graspness = graspness.squeeze()  # expect (mask_sum,)
 
         obj_idxs = meta['cls_indexes'].flatten().astype(np.int32)
         poses = meta['poses']
@@ -1256,11 +1282,11 @@ class GraspNetMultiDataset(Dataset):
         factor_depth = meta['factor_depth']
 
         aug_T_cam = None
-        if self.augment:
-            poses_list = [poses[:, :, i].astype(np.float32) for i in range(poses.shape[2])]
-            (color, depth, seg), poses_list, aug_T_cam = self.scene_pose_augment(
-                (color, depth, seg), poses_list, intrinsic, obj_idxs
-            )
+        # if self.augment:
+        #     poses_list = [poses[:, :, i].astype(np.float32) for i in range(poses.shape[2])]
+        #     (color, depth, seg), poses_list, aug_T_cam = self.scene_pose_augment(
+        #         (color, depth, seg), poses_list, intrinsic, obj_idxs
+        #     )
         
         camera = CameraInfo(1280.0, 720.0, intrinsic[0][0], intrinsic[1][1], intrinsic[0][2], intrinsic[1][2], factor_depth)
         cloud = create_point_cloud_from_depth_image(depth, camera, organized=True)
@@ -1313,6 +1339,9 @@ class GraspNetMultiDataset(Dataset):
             grasp_offsets_list.append(offsets)
             grasp_scores_list.append(scores)
 
+        if self.augment:
+            cloud_sampled, object_poses_list = self.point_augment(cloud_sampled, object_poses_list)
+            
         return {
             'point_clouds': cloud_sampled.astype(np.float32),
             'cloud_colors': color_sampled.astype(np.float32),
@@ -1429,42 +1458,496 @@ def pt_collate_fn(list_data):
 
     return res
 
+import os
+import numpy as np
+from PIL import Image
+import open3d as o3d
+
+def _ensure_dir(d):
+    os.makedirs(d, exist_ok=True)
+
+def _to_T4(pose_3x4: np.ndarray) -> np.ndarray:
+    """3x4 -> 4x4"""
+    T = np.eye(4, dtype=np.float32)
+    T[:3, :] = pose_3x4.astype(np.float32)
+    return T
+
+def _nn_stats_open3d(src_xyz: np.ndarray, tgt_xyz: np.ndarray, max_samples=20000):
+    """
+    计算 src->tgt 的 1-NN 距离统计（均值、95分位、最大值）
+    """
+    if len(src_xyz) == 0 or len(tgt_xyz) == 0:
+        return None
+
+    # subsample
+    if len(src_xyz) > max_samples:
+        sel = np.random.choice(len(src_xyz), max_samples, replace=False)
+        src_xyz = src_xyz[sel]
+    if len(tgt_xyz) > max_samples:
+        sel = np.random.choice(len(tgt_xyz), max_samples, replace=False)
+        tgt_xyz = tgt_xyz[sel]
+
+    pcd_tgt = o3d.geometry.PointCloud()
+    pcd_tgt.points = o3d.utility.Vector3dVector(tgt_xyz.astype(np.float64))
+    kdtree = o3d.geometry.KDTreeFlann(pcd_tgt)
+
+    dists = np.empty((len(src_xyz),), dtype=np.float32)
+    for i, p in enumerate(src_xyz):
+        k, idx, dist2 = kdtree.search_knn_vector_3d(p.astype(np.float64), 1)
+        if k <= 0:
+            dists[i] = np.nan
+        else:
+            dists[i] = np.sqrt(dist2[0]).astype(np.float32)
+
+    dists = dists[np.isfinite(dists)]
+    if len(dists) == 0:
+        return None
+    return {
+        "mean": float(np.mean(dists)),
+        "p95":  float(np.percentile(dists, 95)),
+        "max":  float(np.max(dists)),
+        "n":    int(len(dists)),
+    }
+
+def _save_rgb(path, rgb_float01):
+    rgb_u8 = (np.clip(rgb_float01, 0, 1) * 255.0).astype(np.uint8)
+    Image.fromarray(rgb_u8).save(path)
+
+def _save_mask(path, mask):
+    # mask/seg 可能是 int32
+    m = mask.astype(np.uint16)
+    Image.fromarray(m).save(path)
+
+def _build_colored_pcd_from_organized(cloud_hw3, color_hw3, mask_hw, max_points=200000, seed=0):
+    """
+    cloud_hw3: (H,W,3) float
+    color_hw3: (H,W,3) float in [0,1]
+    mask_hw:   (H,W) bool
+    """
+    pts = cloud_hw3[mask_hw].reshape(-1, 3).astype(np.float32)
+    cols = color_hw3[mask_hw].reshape(-1, 3).astype(np.float32)
+
+    if pts.shape[0] == 0:
+        return None
+
+    # 下采样，避免 ply 过大
+    if pts.shape[0] > max_points:
+        rng = np.random.default_rng(seed)
+        sel = rng.choice(pts.shape[0], max_points, replace=False)
+        pts = pts[sel]
+        cols = cols[sel]
+
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(pts.astype(np.float64))
+    pcd.colors = o3d.utility.Vector3dVector(np.clip(cols, 0, 1).astype(np.float64))
+    return pcd
+
+def _apply_T(pts_xyz: np.ndarray, T4: np.ndarray) -> np.ndarray:
+    """pts_xyz: (N,3), T4: (4,4)"""
+    R = T4[:3, :3].astype(np.float32)
+    t = T4[:3, 3].astype(np.float32)
+    return (pts_xyz @ R.T) + t[None, :]
+
+def save_aug_color_pointcloud_overlay(
+    out_dir: str,
+    cloud0_hw3, color0_hw3, seg0_hw, depth0_hw,
+    cloud1_hw3, color1_hw3, seg1_hw, depth1_hw,
+    aug_T_cam: np.ndarray,
+    obj_label_threshold: int = 1,        # GraspNet: >1 才是 object
+    max_points: int = 200000,
+    seed: int = 0,
+    also_save_tinted: bool = True,
+):
+    """
+    保存增强前/后彩色点云叠加：
+    - pc_before_warp_color.ply : (before) 点云经 aug_T_cam 变换后，保留 before 的 RGB 颜色
+    - pc_after_color.ply       : (after) 直接由增强后的 (depth_aug,color_aug) 生成
+    - pc_overlay_color.ply     : 两者叠加
+
+    另外可选保存 “染色版” 便于区分两堆点（不影响你对 correspondence 的判断，纯辅助看几何对齐）
+    """
+    _ensure_dir(out_dir)
+
+    # 只取 object 区域 + depth 有效
+    m0 = (depth0_hw > 0) & (seg0_hw > obj_label_threshold)
+    m1 = (depth1_hw > 0) & (seg1_hw > obj_label_threshold)
+
+    pcd0 = _build_colored_pcd_from_organized(cloud0_hw3, color0_hw3, m0, max_points=max_points, seed=seed)
+    pcd1 = _build_colored_pcd_from_organized(cloud1_hw3, color1_hw3, m1, max_points=max_points, seed=seed)
+
+    if pcd0 is None or pcd1 is None:
+        print(f"[save_aug_color_pointcloud_overlay] empty point cloud: pcd0={pcd0 is None}, pcd1={pcd1 is None}")
+        return
+
+    # 把增强前点云变换到增强后相机系
+    pts0 = np.asarray(pcd0.points).astype(np.float32)
+    pts0_w = _apply_T(pts0, aug_T_cam) + np.array([0., 0., 0.03])
+    pcd0.points = o3d.utility.Vector3dVector(pts0_w.astype(np.float64))
+
+    # 保存真实颜色版本
+    o3d.io.write_point_cloud(os.path.join(out_dir, "pc_before_warp_color.ply"), pcd0)
+    o3d.io.write_point_cloud(os.path.join(out_dir, "pc_after_color.ply"), pcd1)
+    o3d.io.write_point_cloud(os.path.join(out_dir, "pc_overlay_color.ply"), pcd0 + pcd1)
+
+    # 可选：再保存一份“染色版”便于区分两堆点（看几何对齐更直观）
+    if also_save_tinted:
+        pcd0_t = o3d.geometry.PointCloud(pcd0)
+        pcd1_t = o3d.geometry.PointCloud(pcd1)
+        pcd0_t.paint_uniform_color([0.0, 1.0, 0.0])  # green
+        pcd1_t.paint_uniform_color([1.0, 0.0, 0.0])  # red
+        o3d.io.write_point_cloud(os.path.join(out_dir, "pc_overlay_tinted.ply"), pcd0_t + pcd1_t)
+
+    print(f"[save_aug_color_pointcloud_overlay] saved to: {out_dir}")
+
+
+def _apply_pose3x4(pts_xyz: np.ndarray, pose3x4: np.ndarray) -> np.ndarray:
+    R = pose3x4[:3, :3].astype(np.float32)
+    t = pose3x4[:3, 3].astype(np.float32)
+    return (pts_xyz @ R.T) + t[None, :]
+
+def _build_colored_pcd_from_organized(cloud_hw3, color_hw3, mask_hw, max_points=200000, seed=0):
+    pts = cloud_hw3[mask_hw].reshape(-1, 3).astype(np.float32)
+    cols = color_hw3[mask_hw].reshape(-1, 3).astype(np.float32)
+    if pts.shape[0] == 0:
+        return None
+    if pts.shape[0] > max_points:
+        rng = np.random.default_rng(seed)
+        sel = rng.choice(pts.shape[0], max_points, replace=False)
+        pts, cols = pts[sel], cols[sel]
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(pts.astype(np.float64))
+    pcd.colors = o3d.utility.Vector3dVector(np.clip(cols, 0, 1).astype(np.float64))
+    return pcd
+
+def _pcd_from_points_uniform_color(pts_xyz: np.ndarray, rgb: np.ndarray):
+    """pts_xyz: (N,3), rgb: (3,) float [0,1]"""
+    if pts_xyz is None or len(pts_xyz) == 0:
+        return None
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(pts_xyz.astype(np.float64))
+    col = np.clip(rgb.reshape(1, 3), 0, 1).astype(np.float64)
+    pcd.colors = o3d.utility.Vector3dVector(np.repeat(col, len(pts_xyz), axis=0))
+    return pcd
+
+def _apply_T4(pts_xyz: np.ndarray, T4: np.ndarray) -> np.ndarray:
+    R = T4[:3, :3].astype(np.float32)
+    t = T4[:3, 3].astype(np.float32)
+    return (pts_xyz @ R.T) + t[None, :]
+
+def save_aug_color_pointcloud_overlay_with_grasp_anchors(
+    out_dir: str,
+    cloud0_hw3, color0_hw3, seg0_hw, depth0_hw,
+    cloud1_hw3, color1_hw3, seg1_hw, depth1_hw,
+    aug_T_cam: np.ndarray,
+    obj_idxs: np.ndarray,
+    poses_before_list,     # list of (3,4), length K
+    poses_after_list,      # list of (3,4), length K
+    grasp_labels: dict,    # obj_idx -> (points, offsets, scores)
+    valid_obj_idxs=None,   # optional set/list for filtering
+    obj_label_threshold: int = 1,
+    max_scene_points: int = 200000,
+    max_anchor_per_obj: int = 2000,
+    seed: int = 0,
+    also_save_tinted: bool = True,
+):
+    """
+    输出（都在 aug 相机系）：
+      - pc_before_warp_color_with_anchors.ply
+      - pc_after_color_with_anchors.ply
+      - pc_overlay_color_with_anchors.ply
+    """
+    _ensure_dir(out_dir)
+    rng = np.random.default_rng(seed)
+
+    # --- 1) 生成增强前/后彩色点云（只取 object 区域）
+    m0 = (depth0_hw > 0) & (seg0_hw > obj_label_threshold)
+    m1 = (depth1_hw > 0) & (seg1_hw > obj_label_threshold)
+
+    pcd0 = _build_colored_pcd_from_organized(
+        cloud0_hw3, color0_hw3, m0, max_points=max_scene_points, seed=seed
+    )
+    pcd1 = _build_colored_pcd_from_organized(
+        cloud1_hw3, color1_hw3, m1, max_points=max_scene_points, seed=seed + 1
+    )
+    if pcd0 is None or pcd1 is None:
+        print(f"[overlay+anchors] empty scene pcd: pcd0={pcd0 is None}, pcd1={pcd1 is None}")
+        return
+
+    # 把增强前点云 warp 到 aug 相机系
+    pts0 = np.asarray(pcd0.points).astype(np.float32)
+    pts0_w = _apply_T4(pts0, aug_T_cam)
+    pcd0.points = o3d.utility.Vector3dVector(pts0_w.astype(np.float64))
+
+    # --- 2) 生成 grasp anchor 点云（每个 instance 随机一种颜色）
+    anchors0_pcds = []  # in aug camera (warp 后)
+    anchors1_pcds = []  # in aug camera (after)
+
+    K = len(poses_before_list)
+    assert len(poses_after_list) == K
+    assert len(obj_idxs) == K
+
+    # 固定每个 instance 的颜色（before/after 共用）
+    inst_colors = rng.uniform(0.15, 0.95, size=(K, 3)).astype(np.float32)
+
+    num_used = 0
+    for i in range(K):
+        oid = int(obj_idxs[i])
+        if valid_obj_idxs is not None and oid not in valid_obj_idxs:
+            continue
+        if oid not in grasp_labels:
+            continue
+
+        points_obj = grasp_labels[oid][0]  # (Np,3) in object frame
+        if points_obj is None or len(points_obj) == 0:
+            continue
+
+        n = min(max_anchor_per_obj, len(points_obj))
+        sel = rng.choice(len(points_obj), n, replace=False)
+        pts_obj = points_obj[sel].astype(np.float32)
+
+        pose_b = poses_before_list[i].astype(np.float32)  # (3,4)
+        pose_a = poses_after_list[i].astype(np.float32)   # (3,4)
+
+        # before：obj->cam(before) 然后再 cam(before)->cam(aug)
+        pts_cam_before = _apply_pose3x4(pts_obj, pose_b)
+        pts_cam_aug_from_before = _apply_T4(pts_cam_before, aug_T_cam)
+
+        # after：obj->cam(after)（应该与上面非常接近）
+        pts_cam_after = _apply_pose3x4(pts_obj, pose_a)
+
+        col = inst_colors[i]
+        p0 = _pcd_from_points_uniform_color(pts_cam_aug_from_before, col)
+        p1 = _pcd_from_points_uniform_color(pts_cam_after, col)
+        if p0 is not None:
+            anchors0_pcds.append(p0)
+        if p1 is not None:
+            anchors1_pcds.append(p1)
+
+        num_used += 1
+
+    # 合并 anchors
+    anchors0 = None
+    for p in anchors0_pcds:
+        anchors0 = p if anchors0 is None else (anchors0 + p)
+
+    anchors1 = None
+    for p in anchors1_pcds:
+        anchors1 = p if anchors1 is None else (anchors1 + p)
+
+    # --- 3) 保存：把 anchors 加到 cloud0 / cloud1 / overlay
+    pcd0_with = pcd0 + anchors0 if anchors0 is not None else pcd0
+    pcd1_with = pcd1 + anchors1 if anchors1 is not None else pcd1
+
+    o3d.io.write_point_cloud(os.path.join(out_dir, "pc_before_warp_color_with_anchors.ply"), pcd0_with)
+    o3d.io.write_point_cloud(os.path.join(out_dir, "pc_after_color_with_anchors.ply"), pcd1_with)
+    o3d.io.write_point_cloud(os.path.join(out_dir, "pc_overlay_color_with_anchors.ply"), pcd0_with + pcd1_with)
+
+    # 可选：再存一份“场景染色版”方便区分 before/after 的几何（anchors 仍保持 instance 颜色）
+    if also_save_tinted:
+        p0t = o3d.geometry.PointCloud(pcd0)
+        p1t = o3d.geometry.PointCloud(pcd1)
+        p0t.paint_uniform_color([0.0, 1.0, 0.0])
+        p1t.paint_uniform_color([1.0, 0.0, 0.0])
+        if anchors0 is not None:
+            p0t = p0t + anchors0
+        if anchors1 is not None:
+            p1t = p1t + anchors1
+        o3d.io.write_point_cloud(os.path.join(out_dir, "pc_overlay_tinted_with_anchors.ply"), p0t + p1t)
+
+    print(f"[overlay+anchors] instances used for anchors: {num_used}/{K}")
+    print(f"[overlay+anchors] saved to: {out_dir}")
+    
+    
+def test_scene_pose_augment(
+    dataset,
+    index: int,
+    out_root: str = "debug_scene_pose_augment",
+    obj_label_threshold: int = 0,     # GraspNet: 0 background, 1 table, >1 objects（你代码里也用了 >1）
+    max_nn_samples: int = 20000,
+    atol_pose: float = 1e-6,
+):
+    """
+    对 dataset.scene_pose_augment 做一致性测试：
+    1) pose 变换是否严格满足 T' = aug_T @ T
+    2) 物体间相对位姿 inv(Ti)@Tj 是否保持不变
+    3) 深度点云增强前后是否与 aug_T 对齐（近邻距离统计 + ply 可视化）
+    """
+    _ensure_dir(out_root)
+    out_dir = os.path.join(out_root, f"idx_{index:06d}")
+    _ensure_dir(out_dir)
+
+    # --- 读取一帧原始数据（走你 dataloader 的路径）
+    color = np.array(Image.open(dataset.colorpath[index]), dtype=np.float32) / 255.0
+    depth = np.array(Image.open(dataset.depthpath[index]))     # uint16
+    seg   = np.array(Image.open(dataset.labelpath[index]))     # uint16/int
+    meta  = __import__("scipy.io").io.loadmat(dataset.metapath[index])
+    scene = dataset.scenename[index]
+    frameid = dataset.frameid[index]
+
+    intrinsic = meta["intrinsic_matrix"].astype(np.float32)
+    factor_depth = meta["factor_depth"].astype(np.float32).squeeze()
+    obj_idxs = meta["cls_indexes"].flatten().astype(np.int32)
+    poses = meta["poses"].astype(np.float32)  # (3,4,K)
+
+    poses_list = [poses[:, :, i].copy() for i in range(poses.shape[2])]
+
+    # --- 调用 augmentation（注意：scene_pose_augment 会 in-place 改 poses_list）
+    (color_aug, depth_aug, seg_aug), poses_list_aug, aug_T_cam = dataset.scene_pose_augment(
+        (color.copy(), depth.copy(), seg.copy()),
+        [p.copy() for p in poses_list],
+        intrinsic.copy(),
+        obj_idxs.copy(),
+    )
+
+    # --- 1) pose 硬验证：T' == aug_T @ T
+    aug_T_cam = aug_T_cam.astype(np.float32)
+    assert aug_T_cam.shape == (4, 4), f"aug_T_cam shape wrong: {aug_T_cam.shape}"
+
+    max_err = 0.0
+    for i in range(len(poses_list)):
+        T = _to_T4(poses_list[i])
+        T_expected = (aug_T_cam @ T)[:3, :]
+        T_got = poses_list_aug[i]
+        err = np.max(np.abs(T_expected - T_got))
+        max_err = max(max_err, float(err))
+        if err > atol_pose:
+            raise AssertionError(
+                f"[Pose check failed] obj#{i}: max|T_expected - T_got|={err} > {atol_pose}"
+            )
+
+    # --- 2) 相对位姿硬验证：inv(Ti)@Tj 不变
+    # 选最多 20 对随机 pair（避免 O(K^2) 太大）
+    K = len(poses_list)
+    if K >= 2:
+        pairs = []
+        all_pairs = [(i, j) for i in range(K) for j in range(i + 1, K)]
+        if len(all_pairs) > 20:
+            sel = np.random.choice(len(all_pairs), 20, replace=False)
+            pairs = [all_pairs[k] for k in sel]
+        else:
+            pairs = all_pairs
+
+        for (i, j) in pairs:
+            Ti = _to_T4(poses_list[i])
+            Tj = _to_T4(poses_list[j])
+            Ti2 = _to_T4(poses_list_aug[i])
+            Tj2 = _to_T4(poses_list_aug[j])
+
+            Rel_before = np.linalg.inv(Ti) @ Tj
+            Rel_after  = np.linalg.inv(Ti2) @ Tj2
+            rel_err = np.max(np.abs(Rel_before - Rel_after))
+            if rel_err > 1e-5:  # 相对位姿这里给稍微宽一点点容忍（float32）
+                raise AssertionError(
+                    f"[Relative pose check failed] pair ({i},{j}): max|Rel_before-Rel_after|={rel_err}"
+                )
+
+    # --- 3) 点云软验证：原始点云经 aug_T_cam 后 ~ 增强点云
+    # 构建点云（用你的 create_point_cloud_from_depth_image + CameraInfo）
+    fx, fy, cx, cy = intrinsic[0, 0], intrinsic[1, 1], intrinsic[0, 2], intrinsic[1, 2]
+    camera = CameraInfo(1280.0, 720.0, fx, fy, cx, cy, factor_depth)
+
+    cloud0 = create_point_cloud_from_depth_image(depth, camera, organized=True)       # (H,W,3)
+    cloud1 = create_point_cloud_from_depth_image(depth_aug, camera, organized=True)   # (H,W,3)
+
+    save_aug_color_pointcloud_overlay_with_grasp_anchors(
+        out_dir=out_dir,
+        cloud0_hw3=cloud0, color0_hw3=color,    seg0_hw=seg,    depth0_hw=depth,
+        cloud1_hw3=cloud1, color1_hw3=color_aug, seg1_hw=seg_aug, depth1_hw=depth_aug,
+        aug_T_cam=aug_T_cam,
+        obj_idxs=obj_idxs,
+        poses_before_list=poses_list,
+        poses_after_list=poses_list_aug,
+        grasp_labels=dataset.grasp_labels,
+        valid_obj_idxs=getattr(dataset, "valid_obj_idxs", None),
+        max_anchor_per_obj=2000,
+        seed=0,
+        also_save_tinted=True,
+    )
+    
+    # 只用物体区域（>1），并且 depth>0
+    m0 = (depth > 0) & (seg > obj_label_threshold)
+    m1 = (depth_aug > 0) & (seg_aug > obj_label_threshold)
+
+    pts0 = cloud0[m0].reshape(-1, 3).astype(np.float32)
+    pts1 = cloud1[m1].reshape(-1, 3).astype(np.float32)
+
+    # 把 pts0 变换到增强后的相机系
+    R = aug_T_cam[:3, :3]
+    t = aug_T_cam[:3, 3]
+    pts0_warp = (pts0 @ R.T) + t[None, :]
+
+    nn01 = _nn_stats_open3d(pts0_warp, pts1, max_samples=max_nn_samples)
+    nn10 = _nn_stats_open3d(pts1, pts0_warp, max_samples=max_nn_samples)
+
+    # --- 保存可视化（ply + png）
+    _save_rgb(os.path.join(out_dir, "color.png"), color)
+    _save_rgb(os.path.join(out_dir, "color_aug.png"), color_aug)
+    _save_mask(os.path.join(out_dir, "seg.png"), seg)
+    _save_mask(os.path.join(out_dir, "seg_aug.png"), seg_aug)
+
+    np.save(os.path.join(out_dir, "aug_T_cam.npy"), aug_T_cam)
+    np.save(os.path.join(out_dir, "poses_before.npy"), np.stack(poses_list, axis=0))
+    np.save(os.path.join(out_dir, "poses_after.npy"),  np.stack(poses_list_aug, axis=0))
+
+    # ply：增强点云(红) + 原始点云变换后(绿)
+    pcd_aug = o3d.geometry.PointCloud()
+    pcd_aug.points = o3d.utility.Vector3dVector(pts1.astype(np.float64))
+    pcd_aug.paint_uniform_color([1.0, 0.0, 0.0])
+
+    pcd_warp = o3d.geometry.PointCloud()
+    pcd_warp.points = o3d.utility.Vector3dVector(pts0_warp.astype(np.float64))
+    pcd_warp.paint_uniform_color([0.0, 1.0, 0.0])
+
+    o3d.io.write_point_cloud(os.path.join(out_dir, "pc_aug_red.ply"), pcd_aug)
+    o3d.io.write_point_cloud(os.path.join(out_dir, "pc_orig_warp_green.ply"), pcd_warp)
+    o3d.io.write_point_cloud(os.path.join(out_dir, "pc_overlay.ply"), pcd_aug + pcd_warp)
+
+    # --- 打印总结
+    detR = float(np.linalg.det(aug_T_cam[:3, :3]))
+    print("=" * 80)
+    print(f"[scene_pose_augment test] index={index} scene={scene} frame={frameid}")
+    print(f"aug_T_cam det(R) = {detR:.4f}  (若发生 flip，一般 det<0)")
+    print(f"pose check max_abs_err = {max_err:.3e} (atol={atol_pose})")
+
+    if nn01 is not None and nn10 is not None:
+        print(f"NN dist (orig_warp -> aug): mean={nn01['mean']:.6f}, p95={nn01['p95']:.6f}, max={nn01['max']:.6f}, n={nn01['n']}")
+        print(f"NN dist (aug -> orig_warp): mean={nn10['mean']:.6f}, p95={nn10['p95']:.6f}, max={nn10['max']:.6f}, n={nn10['n']}")
+    else:
+        print("NN dist stats not available (empty point sets).")
+
+    print(f"Saved debug to: {out_dir}")
+    print("=" * 80)
+
 
 if __name__ == "__main__":
-
-    import random
+    import torch, random
     def setup_seed(seed):
-         torch.manual_seed(seed)
-         torch.cuda.manual_seed_all(seed)
-         np.random.seed(seed)
-         random.seed(seed)
-         torch.backends.cudnn.deterministic = True
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+        np.random.seed(seed)
+        random.seed(seed)
+        torch.backends.cudnn.deterministic = True
+
     setup_seed(0)
-    
-    root = '/media/gpuadmin/rcao/dataset/graspnet'
+
+    root = "/data/robotarm/dataset/graspnet"
     valid_obj_idxs, grasp_labels = load_grasp_labels(root)
-    train_dataset = GraspNetDataset(root, valid_obj_idxs, grasp_labels, num_points=1024, camera='realsense', split='train', multi_modal_pose_augment=True, point_augment=False, real_data=True, syn_data=False, visib_threshold=0.5, denoise=False, voxel_size=0.002)
-    # print(len(train_dataset))
 
-    scene_list = list(range(len(train_dataset)))
-    # np.random.shuffle(scene_list)
-    for scene_id in scene_list:
-        end_points = train_dataset[scene_id]
+    # 这里用你的 GraspNetMultiDataset（包含 scene_pose_augment）
+    ds = GraspNetMultiDataset(
+        root=root,
+        valid_obj_idxs=valid_obj_idxs,
+        grasp_labels=grasp_labels,
+        camera="realsense",
+        split="train",
+        num_points=20000,
+        remove_outlier=True,
+        voxel_size=0.005,
+        remove_invisible=True,
+        augment=True,          # get_data_label 会用；但我们下面直接 call scene_pose_augment
+        load_label=True
+    )
 
-        cloud = end_points['point_clouds']
-        color = end_points['cloud_colors']
-        pose = end_points['object_pose']
-        grasp_point = end_points['grasp_points']
-        grasp_point = transform_point_cloud(grasp_point, pose, '3x4')
-        
-        pc = o3d.geometry.PointCloud()
-        pc.points = o3d.utility.Vector3dVector(cloud)
-        pc.colors = o3d.utility.Vector3dVector(color)
-
-        pc_obj = o3d.geometry.PointCloud()
-        pc_obj.points = o3d.utility.Vector3dVector(grasp_point)
-        pc_obj.paint_uniform_color([1, 0, 0])
-        pc_save = pc_obj + pc
-        o3d.io.write_point_cloud('{}_combine.ply'.format(scene_id), pc_save)
-        
-        # o3d.visualization.draw_geometries([pc, pc_obj])
+    # 测 3 个 index（你也可以改成随机）
+    for idx in [0, 1000, 3000]:
+        test_scene_pose_augment(ds, idx, out_root="debug_scene_pose_augment")
