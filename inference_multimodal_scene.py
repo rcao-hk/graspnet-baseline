@@ -70,7 +70,7 @@ parser.add_argument('--fuse_type',type=str, default='early')
 parser.add_argument('--voxel_size', type=float, default=0.002, help='Voxel Size to quantize point cloud [default: 0.005]')
 parser.add_argument('--collision_voxel_size', type=float, default=0.01, help='Voxel Size to process point clouds before collision detection [default: 0.01]')
 parser.add_argument('--collision_thresh', type=float, default=0.01, help='Collision Threshold in collision detection [default: 0.01]')
-parser.add_argument('--data_type', type=str, default='real', choices=['real', 'syn', 'noise'], help='Type of input data: real|syn|noise')
+parser.add_argument('--data_type', type=str, default='real', choices=['real', 'syn', 'noise', 'rgb_noise'], help='Type of input data: real|syn|noise')
 parser.add_argument('--smooth_size', type=int, default=1,
                     help='Box smoothing kernel size on depth (<=1 means off)')
 parser.add_argument('--gaussian_noise_level', type=float, default=0.0,
@@ -80,9 +80,14 @@ parser.add_argument('--dropout_rate', type=float, default=0.0,
 parser.add_argument('--dropout_min_size', type=int, default=200,
                     help='Min connected component size for missing regions (on FG mask)')
 parser.add_argument('--rgb_noise', type=str, default='none',
-                    help='RGB corruption type: none|cutout|blur|brightness|saturation|contrast')
+                    help='RGB corruption type: none|cutout|blur|brightness|contrast')
 parser.add_argument('--rgb_severity', type=int, default=0,
                     help='RGB corruption severity in [0,5], 0 means no corruption')
+
+parser.add_argument('--pc_sparse_level', type=int, default=0,
+                    help='Point sparsity level (only for data_type==noise): 0=off, 1..4 -> [512,1024,2048,5120]')
+parser.add_argument('--sample_interval', type=int, default=1,
+                    help='Sample 1 frame every K frames in each scene (e.g., 10 means 0,10,20,...)')
 cfgs = parser.parse_args()
 
 print(cfgs)
@@ -233,7 +238,7 @@ def _from_pil_float01(img_pil):
 def apply_rgb_corruption(img_float01, corr_type='none', severity=0):
     """
     img_float01: np.ndarray float32 in [0,1], (H,W,3) RGB
-    corr_type: none|cutout|blur|brightness|saturation|contrast
+    corr_type: none|cutout|blur|brightness|contrast
     severity: int in [0,5]
     """
     if corr_type is None:
@@ -251,7 +256,8 @@ def apply_rgb_corruption(img_float01, corr_type='none', severity=0):
     img = np.asarray(img_float01, dtype=np.float32)
 
     # ---- severity design ----
-    blur_k = [5, 9, 11, 15, 17][severity - 1]
+    # blur_k = [5, 9, 11, 15, 17][severity - 1]
+    blur_k = [7, 13, 21, 33, 45][severity - 1]
 
     cutout_ratio = [0.10, 0.20, 0.30, 0.40, 0.50][severity - 1]
     patch_size = 64  # fixed patch size for interpretability
@@ -269,13 +275,20 @@ def apply_rgb_corruption(img_float01, corr_type='none', severity=0):
     
     # factor = np.random.uniform(max(0.0, 1.0 - delta), 1.0 + delta)
     # more conservative deltas (fixed magnitude per severity)
-    delta_seq = [0.1, 0.2, 0.3, 0.4, 0.5]
-    delta = delta_seq[severity - 1]
+    # delta_seq = [0.1, 0.2, 0.3, 0.4, 0.5]
+    # delta = delta_seq[severity - 1]
 
-    # random direction only: +1 or -1
-    sign = 1.0 if np.random.rand() < 0.5 else -1.0
-    factor = max(0.0, 1.0 + sign * delta)
+    # # random direction only: +1 or -1
+    # sign = 1.0 if np.random.rand() < 0.5 else -1.0
+    # factor = max(0.0, 1.0 + sign * delta)
 
+    ratio_seq = [1.25, 1.50, 1.75, 2.00, 2.50]
+    ratio = ratio_seq[severity - 1]
+    if np.random.rand() < 0.5:
+        factor = ratio
+    else:
+        factor = 1.0 / ratio
+        
     if corr_type == 'brightness':
         pil = adjust_brightness(pil, factor)
     elif corr_type == 'contrast':
@@ -292,55 +305,89 @@ def apply_rgb_corruption(img_float01, corr_type='none', severity=0):
 def visualize_rgb_corruptions(
     img_path,
     out_path='rgb_corruption_grid.png',
-    corr_types=('blur', 'cutout', 'brightness', 'saturation', 'contrast'),
-    severities=(0, 1, 2, 3, 4, 5),
     seed=0,
     dpi=150
 ):
     """
-    Visualize the same scene image under different corruptions and severities.
-    Saves a grid figure to out_path.
+    Layout:
+      Row 0: Raw RGB | blur | cutout | brightness | saturation | contrast (single example each)
+      Row 1..5: for each corruption in [blur, cutout, brightness, saturation, contrast],
+                show severity s1..s5 (5 levels)
 
-    Rows: corruption types
-    Cols: severity levels (including 0=clean)
+    Each subplot has a bottom label (bold, fontsize 24).
     """
     import matplotlib
     matplotlib.use('Agg')  # safe for headless
     import matplotlib.pyplot as plt
+    import numpy as np
+    import random
+    from PIL import Image
 
     img = np.array(Image.open(img_path), dtype=np.float32) / 255.0  # RGB float [0,1]
 
-    nrows = len(corr_types)
-    ncols = len(severities)
+    top_corrs = ['raw', 'blur', 'cutout', 'brightness', 'contrast']
+    sev_corrs = ['blur', 'cutout', 'brightness', 'contrast']
+    severities = [1, 2, 3, 4, 5]
 
-    fig, axes = plt.subplots(nrows, ncols, figsize=(3.0*ncols, 3.0*nrows))
+    nrows = 1 + len(sev_corrs)          # 1 top row + 5 corruption rows
+    ncols = len(top_corrs)              # 6 columns
 
-    # axes shape handling
+    fig, axes = plt.subplots(nrows, ncols, figsize=(3.2*ncols, 3.2*nrows))
+
+    # Ensure 2D
     if nrows == 1:
         axes = np.expand_dims(axes, 0)
     if ncols == 1:
         axes = np.expand_dims(axes, 1)
 
-    for r, ct in enumerate(corr_types):
+    def _show(ax, img_show, label):
+        ax.imshow(np.clip(img_show, 0.0, 1.0))
+        ax.axis('off')
+        # bottom label
+        ax.text(
+            0.5, -0.08, label,
+            transform=ax.transAxes,
+            ha='center', va='top',
+            fontsize=24, fontweight='bold'
+        )
+
+    # -----------------
+    # Row 0: single examples
+    # -----------------
+    for c, ct in enumerate(top_corrs):
+        ax = axes[0, c]
+        np.random.seed(seed + 1000*0 + 10*c)
+        random.seed(seed + 1000*0 + 10*c)
+
+        if ct == 'raw':
+            out = img
+            label = 'Raw RGB'
+        else:
+            # use a representative severity for the "single example" row:
+            # pick s3 for a mid-level visible effect
+            out = apply_rgb_corruption(img, ct, 3)
+            label = ct  # blur/cutout/brightness/saturation/contrast
+
+        _show(ax, out, label)
+
+    # -----------------
+    # Rows 1..: severity grids (s1..s5), left 5 columns used; last column left empty
+    # -----------------
+    for r, ct in enumerate(sev_corrs, start=1):
         for c, sv in enumerate(severities):
             ax = axes[r, c]
-            # make randomness reproducible per-cell
             np.random.seed(seed + 1000*r + 10*c + sv)
             random.seed(seed + 1000*r + 10*c + sv)
 
-            if sv == 0:
-                out = img
-                title = f'{ct} | s0(clean)'
-            else:
-                out = apply_rgb_corruption(img, ct, sv)
-                title = f'{ct} | s{sv}'
+            out = apply_rgb_corruption(img, ct, sv)
+            label = f's{sv}'
+            _show(ax, out, label)
 
-            ax.imshow(np.clip(out, 0.0, 1.0))
-            ax.set_title(title, fontsize=10)
-            ax.axis('off')
+        # last column (col 5) left empty for clean layout
+        axes[r, ncols - 1].axis('off')
 
     plt.tight_layout()
-    fig.savefig(out_path, dpi=dpi)
+    fig.savefig(out_path, dpi=dpi, bbox_inches='tight')
     plt.close(fig)
     print(f'[VIS] saved to {out_path}')
 
@@ -362,7 +409,8 @@ device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 torch.cuda.set_device(device)
 
 if network_name.startswith('mmgnet'):
-    from models.IGNet_v0_9 import IGNet, pred_decode
+    # from models.IGNet_v0_9 import IGNet, pred_decode
+    from models.IGNet_v0_10 import IGNet, pred_decode
     net = IGNet(m_point=cfgs.m_point, num_view=300, seed_feat_dim=cfgs.seed_feat_dim, img_feat_dim=cfgs.img_feat_dim, is_training=False, multi_scale_grouping=cfgs.multi_scale_grouping, fuse_type=cfgs.fuse_type)
 elif network_name.startswith('gsnet'):
     from models.GSNet import GraspNet_multimodal, pred_decode
@@ -402,12 +450,25 @@ def _disable_corruptions(cfgs):
     cfgs.dropout_min_size = 0
     cfgs.rgb_noise = 'none'
     cfgs.rgb_severity = 0
+    cfgs.pc_sparse_level = 0
+    
+PC_SPARSE_LEVELS = [5120, 2048, 1024, 512,]
+
+def sample_indices_exact(n_src, n_tgt):
+    """Return indices of length n_tgt from [0, n_src). Replace if needed."""
+    if n_src <= 0:
+        return np.array([], dtype=np.int64)
+    replace = (n_src < n_tgt)
+    return np.random.choice(n_src, n_tgt, replace=replace).astype(np.int64)
     
     
 def inference(scene_idx):
-    # elapsed_time_list = []
+    interval = int(max(1, cfgs.sample_interval))
+
     for anno_idx in range(256):
-        if data_type == 'real':
+        if (anno_idx % interval) != 0:
+            continue
+        if data_type in ['real', 'rgb_noise']:
             rgb_path = os.path.join(dataset_root,
                                     'scenes/scene_{:04d}/{}/rgb/{:04d}.png'.format(scene_idx, camera, anno_idx))
             if restored_depth:
@@ -433,11 +494,11 @@ def inference(scene_idx):
                                 'scenes/scene_{:04d}/{}/meta/{:04d}.mat'.format(scene_idx, camera, anno_idx))
 
         color = np.array(Image.open(rgb_path), dtype=np.float32) / 255.0
-        if data_type == 'noise':
+        if data_type == 'rgb_noise':
             color = apply_rgb_corruption(color, cfgs.rgb_noise, cfgs.rgb_severity)
         else:
             _disable_corruptions(cfgs)
-        # visualize_rgb_corruptions(rgb_path, out_path=os.path.join('vis', '{}_rgb_corruption.png'.format(scene_idx)))
+        # visualize_rgb_corruptions(rgb_path, out_path=os.path.join('vis', '{}_{}_rgb_corruption.png'.format(scene_idx, anno_idx)))
 
         depth = np.array(Image.open(depth_path))
         seg = np.array(Image.open(mask_path))
@@ -502,12 +563,21 @@ def inference(scene_idx):
         else:
             cloud_masked = cloud[mask]
         color_masked = color[mask]
+        
         # normal_masked = normal
+        # ---------------- sparsity control (ONLY for noise) ----------------
+        num_in = cfgs.num_point
 
-        idxs = sample_points(len(cloud_masked), cfgs.num_point)
+        if data_type == 'noise' and int(cfgs.pc_sparse_level) > 0:
+            lv = int(cfgs.pc_sparse_level)
+            assert 1 <= lv <= 4, f'pc_sparse_level must be in [0,4], got {lv}'
+            num_in = PC_SPARSE_LEVELS[lv - 1]
+
+        # 采样到 num_in 个点（如果 cloud_masked 不足，会自动重复采样）
+        idxs = sample_points(len(cloud_masked), num_in)
         cloud_sampled = cloud_masked[idxs]
         color_sampled = color_masked[idxs]
-
+        
         H, W = depth.shape
         valid_flat = np.flatnonzero(mask)               # (mask_sum,)
         pix_flat = valid_flat[idxs]                     # (num_points,)

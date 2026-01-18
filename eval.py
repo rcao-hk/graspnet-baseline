@@ -13,6 +13,8 @@ parser.add_argument('--dump_dir', default='ignet_v0.3.5.1', help='Dump dir to sa
 parser.add_argument('--camera', default='realsense', help='Camera split [realsense/kinect]')
 parser.add_argument('--split', default='test_seen', help='Test set split [test_seen/test_similar/test_novel]')
 parser.add_argument('--num_workers', type=int, default=10, help='Number of workers used in evaluation [default: 30]')
+parser.add_argument('--sample_interval', type=int, default=1,
+                    help='Sample 1 frame every K frames in each scene (e.g., 10 means 0,10,20,...)')
 parser.add_argument('--remove_dump', action='store_true', default=False,
                     help='If set, remove corresponding dump files after evaluation & saving AP npy.')
 cfgs = parser.parse_args()
@@ -57,11 +59,11 @@ def evaluate():
     ge = GraspNetEval(root=cfgs.dataset_root, camera=cfgs.camera, split=cfgs.split)
 
     if cfgs.split == 'test_seen':
-        res, ap = ge.eval_seen(os.path.join(cfgs.dump_dir), proc=cfgs.num_workers)
+        res, ap = ge.eval_seen(os.path.join(cfgs.dump_dir), anno_sample_ratio=1/float(cfgs.sample_interval), proc=cfgs.num_workers)
     elif cfgs.split == 'test_similar':
-        res, ap = ge.eval_similar(os.path.join(cfgs.dump_dir), proc=cfgs.num_workers)
+        res, ap = ge.eval_similar(os.path.join(cfgs.dump_dir), anno_sample_ratio=1/float(cfgs.sample_interval), proc=cfgs.num_workers)
     else:
-        res, ap = ge.eval_novel(os.path.join(cfgs.dump_dir), proc=cfgs.num_workers)
+        res, ap = ge.eval_novel(os.path.join(cfgs.dump_dir), anno_sample_ratio=1/float(cfgs.sample_interval), proc=cfgs.num_workers)
 
     save_path = os.path.join(cfgs.dump_dir, f'ap_{cfgs.split}_{cfgs.camera}.npy')
     np.save(save_path, res)

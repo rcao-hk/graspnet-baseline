@@ -1049,33 +1049,33 @@ class IGNet(nn.Module):
                                     deep_features_size=img_feat_dim, backend='resnet34')
             self.img_feature_dim = 0
             self.point_backbone = MinkUNet14D(in_channels=img_feat_dim, out_channels=self.seed_feature_dim, D=3)
-            print('early fusion')
+            print('sparse convolution, early fusion')
         elif self.fuse_type == 'concat':
             self.img_backbone = PSPNet(sizes=(1, 2, 3, 6), psp_size=512, 
                                     deep_features_size=img_feat_dim, backend='resnet34')
             self.img_feature_dim = img_feat_dim
             self.point_backbone = MinkUNet14D(in_channels=3, out_channels=self.seed_feature_dim, D=3)
-            print('late fusion (concatentation)')
+            print('sparse convolution, late fusion (concatentation)')
         elif self.fuse_type == 'gate':
             self.img_backbone = PSPNet(sizes=(1, 2, 3, 6), psp_size=512, 
                                     deep_features_size=img_feat_dim, backend='resnet34')
             self.img_feature_dim = 0
             self.point_backbone = MinkUNet14D(in_channels=3, out_channels=self.seed_feature_dim, D=3)
             self.fusion_module = GatedFusion(point_dim=self.seed_feature_dim, img_dim=img_feat_dim)
-            print('late fusion (Gated fusion)')
+            print('sparse convolution, late fusion (Gated fusion)')
         elif self.fuse_type == 'add':
             self.img_backbone = PSPNet(sizes=(1, 2, 3, 6), psp_size=512, 
                                     deep_features_size=img_feat_dim, backend='resnet34')
             self.img_feature_dim = 0
             self.point_backbone = MinkUNet14D(in_channels=3, out_channels=self.seed_feature_dim, D=3)
             self.fusion_module = AddFusion(point_dim=self.seed_feature_dim, img_dim=img_feat_dim)
-            print('late fusion (Add fusion)')
+            print('sparse convolution, late fusion (Add fusion)')
         elif self.fuse_type == 'direct':
             self.img_backbone = PSPNet(sizes=(1, 2, 3, 6), psp_size=512, 
                                     deep_features_size=img_feat_dim, backend='resnet34')
             self.img_feature_dim = 0
             self.point_backbone = MinkUNet14D(in_channels=3, out_channels=self.seed_feature_dim, D=3)
-            print('direct fusion (RGB as sparse feats)')
+            print('sparse convolution, direct fusion (RGB as sparse feats)')
         elif self.fuse_type == 'intermediate':
             self.img_feature_dim = 0
             self.img_backbone = PSPNet(sizes=(1, 2, 3, 6), psp_size=512, 
@@ -1091,7 +1091,7 @@ class IGNet(nn.Module):
                 out_channels=self.seed_feature_dim,
                 img_dim=img_feat_dim
             )
-            print('intermediate fusion (DeepViewAgg style)')
+            print('sparse convolution, intermediate fusion (DeepViewAgg style)')
         elif self.fuse_type == 'learnable_align':
             raise NotImplementedError
 
@@ -1236,7 +1236,7 @@ class IGNet(nn.Module):
         xyz_full = end_points['point_clouds']
         B, N, _ = xyz_full.shape
         device = xyz_full.device
-        
+
         if self.fuse_type == 'intermediate':
             img = end_points['img']              # (B,3,448,448)
             img_idxs = end_points['img_idxs']    # (B,N) flat idx on 448*448
@@ -1275,8 +1275,29 @@ class IGNet(nn.Module):
         coordinates_batch, features_batch = ME.utils.sparse_collate(coords=[c for c in end_points['coors']], 
                                                                     feats=[f for f in input_feats], 
                                                                     dtype=torch.float32)
-        coordinates_batch, features_batch, _, quantize2original = ME.utils.sparse_quantize(
+        coordinates_batch, features_batch, unique_map, quantize2original = ME.utils.sparse_quantize(
             coordinates_batch, features_batch, return_index=True, return_inverse=True, device=device)
+
+        # # collate (建议先放 CPU，最稳)
+        # coords_list = [c.detach().cpu().int() for c in end_points['coors']]   # list of (N,3)
+        # feats_list  = [f.detach().cpu().float() for f in input_feats]        # list of (N,C)
+
+        # coords_c, feats_c = ME.utils.sparse_collate(coords=coords_list, feats=feats_list, dtype=torch.float32)
+        # # orig_num = coords_c.shape[0]   # 这里才是真正的原始点数，应该是 B*N (=512)
+
+        # # quantize on CPU (不传 device)
+        # coords_q, feats_q, unique_map, quantize2original = ME.utils.sparse_quantize(
+        #     coords_c, feats_c, return_index=True, return_inverse=True
+        # )
+
+        # # # ---- sanity ----
+        # # assert quantize2original is not None and quantize2original.numel() == orig_num, \
+        # #     f"inverse_map numel {quantize2original.numel()} != orig_num {orig_num}"
+
+        # # move BOTH to GPU before SparseTensor
+        # coordinates_batch = coords_q.to(device)
+        # features_batch  = feats_q.to(device)
+
         mink_input = ME.SparseTensor(coordinates=coordinates_batch, features=features_batch)
 
         if self.fuse_type == 'intermediate':
@@ -1294,7 +1315,7 @@ class IGNet(nn.Module):
             feat_full = self.fusion_module(point_features, image_features.transpose(1, 2))
         else:
             feat_full = point_features
-        
+
         # ----- graspable head on full scene -----
         end_points = self.objectness(feat_full, end_points)
         
