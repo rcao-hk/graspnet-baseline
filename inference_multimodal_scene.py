@@ -30,6 +30,10 @@ import scipy.io as scio
 import open3d as o3d
 import MinkowskiEngine as ME
 
+import json
+from datetime import datetime
+import platform
+
 from graspnetAPI import GraspGroup
 
 from utils.collision_detector import ModelFreeCollisionDetector, ModelFreeCollisionDetectorTorch
@@ -101,7 +105,35 @@ img_transforms = transforms.Compose([
     transforms.Resize(resize_shape),
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
 ])
-        
+
+
+def save_run_config_json(cfgs, dump_dir, split, camera, extra=None):
+    """
+    Save run args/config to: {dump_dir}/{split}_{camera}.json
+    """
+    os.makedirs(dump_dir, exist_ok=True)
+    out_path = os.path.join(dump_dir, f"{split}_{camera}.json")
+
+    payload = {
+        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "argv": sys.argv,
+        "cfgs": vars(cfgs),  # argparse.Namespace -> dict
+        "env": {
+            "python": sys.version,
+            "platform": platform.platform(),
+            "torch": torch.__version__,
+            "cuda_available": bool(torch.cuda.is_available()),
+            "cuda_version": torch.version.cuda if torch.cuda.is_available() else None,
+        }
+    }
+    if extra is not None:
+        payload["extra"] = extra
+
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False, sort_keys=True)
+
+    print(f"[CFG] Saved run config to: {out_path}")
+
 
 def get_resized_idxs(idxs, orig_shape, resize_shape):
     orig_width, orig_length = orig_shape
@@ -392,6 +424,16 @@ def visualize_rgb_corruptions(
     print(f'[VIS] saved to {out_path}')
 
 
+def _disable_corruptions(cfgs):
+    cfgs.smooth_size = 1
+    cfgs.gaussian_noise_level = 0.0
+    cfgs.dropout_rate = 0.0
+    cfgs.dropout_min_size = 0
+    cfgs.rgb_noise = 'none'
+    cfgs.rgb_severity = 0
+    cfgs.pc_sparse_level = 0
+
+
 data_type = cfgs.data_type # syn
 restored_depth = cfgs.restored_depth
 restored_depth_root = cfgs.depth_root
@@ -407,10 +449,18 @@ dump_dir = os.path.join(cfgs.dump_dir)
 ckpt_epoch = cfgs.ckpt_epoch
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 torch.cuda.set_device(device)
+    
+PC_SPARSE_LEVELS = [5120, 2048, 1024, 512]
+if data_type in ['real', 'syn']:
+    _disable_corruptions(cfgs)
+elif data_type == 'noise' and int(cfgs.pc_sparse_level) > 0:
+    lv = int(cfgs.pc_sparse_level)
+    assert 1 <= lv <= 4, f'pc_sparse_level must be in [0,4], got {lv}'
+    cfgs.num_point = PC_SPARSE_LEVELS[lv - 1]
 
 if network_name.startswith('mmgnet'):
-    # from models.IGNet_v0_9 import IGNet, pred_decode
-    from models.IGNet_v0_10 import IGNet, pred_decode
+    from models.IGNet_v0_9 import IGNet, pred_decode
+    # from models.IGNet_v0_10 import IGNet, pred_decode
     net = IGNet(m_point=cfgs.m_point, num_view=300, seed_feat_dim=cfgs.seed_feat_dim, img_feat_dim=cfgs.img_feat_dim, is_training=False, multi_scale_grouping=cfgs.multi_scale_grouping, fuse_type=cfgs.fuse_type)
 elif network_name.startswith('gsnet'):
     from models.GSNet import GraspNet_multimodal, pred_decode
@@ -443,16 +493,17 @@ eps = 1e-8
 start = torch.cuda.Event(enable_timing=True)
 end = torch.cuda.Event(enable_timing=True)
 
-def _disable_corruptions(cfgs):
-    cfgs.smooth_size = 1
-    cfgs.gaussian_noise_level = 0.0
-    cfgs.dropout_rate = 0.0
-    cfgs.dropout_min_size = 0
-    cfgs.rgb_noise = 'none'
-    cfgs.rgb_severity = 0
-    cfgs.pc_sparse_level = 0
-    
-PC_SPARSE_LEVELS = [5120, 2048, 1024, 512,]
+save_run_config_json(
+    cfgs,
+    dump_dir=dump_dir,
+    split=cfgs.split,
+    camera=cfgs.camera,
+    extra={
+        "ckpt_path": ckpt_name,
+        "resolved_dump_dir": os.path.abspath(dump_dir),
+        "seed": 0,
+    }
+)
 
 def sample_indices_exact(n_src, n_tgt):
     """Return indices of length n_tgt from [0, n_src). Replace if needed."""
@@ -494,10 +545,7 @@ def inference(scene_idx):
                                 'scenes/scene_{:04d}/{}/meta/{:04d}.mat'.format(scene_idx, camera, anno_idx))
 
         color = np.array(Image.open(rgb_path), dtype=np.float32) / 255.0
-        if data_type == 'rgb_noise':
-            color = apply_rgb_corruption(color, cfgs.rgb_noise, cfgs.rgb_severity)
-        else:
-            _disable_corruptions(cfgs)
+        color = apply_rgb_corruption(color, cfgs.rgb_noise, cfgs.rgb_severity)
         # visualize_rgb_corruptions(rgb_path, out_path=os.path.join('vis', '{}_{}_rgb_corruption.png'.format(scene_idx, anno_idx)))
 
         depth = np.array(Image.open(depth_path))
@@ -565,16 +613,8 @@ def inference(scene_idx):
         color_masked = color[mask]
         
         # normal_masked = normal
-        # ---------------- sparsity control (ONLY for noise) ----------------
-        num_in = cfgs.num_point
-
-        if data_type == 'noise' and int(cfgs.pc_sparse_level) > 0:
-            lv = int(cfgs.pc_sparse_level)
-            assert 1 <= lv <= 4, f'pc_sparse_level must be in [0,4], got {lv}'
-            num_in = PC_SPARSE_LEVELS[lv - 1]
-
-        # 采样到 num_in 个点（如果 cloud_masked 不足，会自动重复采样）
-        idxs = sample_points(len(cloud_masked), num_in)
+        # 采样到 cfgs.num_point 个点（如果 cloud_masked 不足，会自动重复采样）
+        idxs = sample_points(len(cloud_masked), cfgs.num_point)
         cloud_sampled = cloud_masked[idxs]
         color_sampled = color_masked[idxs]
         
