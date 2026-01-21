@@ -356,3 +356,126 @@ def apply_dropout_to_regions(large_missing_regions, labeled, filtered_labels, dr
         dropout_regions[labeled == label] = label  # 标记选择的区域为 dropout 区域
     
     return dropout_regions
+
+
+def fractal_smooth_noise(h, w, base_res=16, octaves=4, persistence=0.5, seed=0):
+    """
+    Perlin-like fractal smooth noise in [0,1], shape (h,w).
+    base_res: 越小 -> 越大块；越大 -> 越细碎
+    """
+    rng = np.random.default_rng(seed)
+    noise = np.zeros((h, w), np.float32)
+    amp = 1.0
+    total_amp = 0.0
+
+    for o in range(octaves):
+        res = max(2, int(base_res * (2 ** o)))
+        gh = max(2, h // res)
+        gw = max(2, w // res)
+
+        grid = rng.random((gh, gw), dtype=np.float32)
+        up = cv2.resize(grid, (w, h), interpolation=cv2.INTER_CUBIC)
+
+        # 轻微平滑让边界更“随机形状”
+        k = 2 * (o + 1) + 1
+        up = cv2.GaussianBlur(up, (k, k), 0)
+
+        noise += amp * up
+        total_amp += amp
+        amp *= persistence
+
+    noise /= (total_amp + 1e-8)
+    noise = (noise - noise.min()) / (noise.max() - noise.min() + 1e-8)
+    return noise
+
+
+def depthaware_perlin_dropout_masks(
+    depth_raw, depth_clear, seg,
+    dropout_rate,
+    seed=0,
+    base_res=16, octaves=4, persistence=0.5,
+    strict_match=True,
+    min_inst_pixels=50,
+    use_bbox_local_noise=True
+):
+    """
+    Return two masks:
+      - drop_depth: pixels dropped due to depth missing (raw==0) (possibly subsampled if strict_match)
+      - drop_perlin: pixels dropped by perlin fill to reach target rate
+    Both are (H,W) bool and disjoint.
+    """
+    H, W = depth_clear.shape
+    drop_depth = np.zeros((H, W), dtype=bool)
+    drop_perlin = np.zeros((H, W), dtype=bool)
+
+    inst_ids = np.unique(seg)
+    inst_ids = inst_ids[inst_ids != 0]
+    rng = np.random.default_rng(seed)
+
+    for iid in inst_ids:
+        omega = (seg == iid) & (depth_clear > 0)
+        n_omega = int(omega.sum())
+        if n_omega < min_inst_pixels:
+            continue
+
+        target = int(np.floor(dropout_rate * n_omega))
+
+        # raw missing candidates
+        miss = omega & (depth_raw == 0)
+        miss_idx = np.flatnonzero(miss)
+
+        # ---- stage 1: depth-guided ----
+        if len(miss_idx) >= target:
+            if strict_match:
+                choose = rng.choice(miss_idx, size=target, replace=False)
+                flat = drop_depth.reshape(-1)
+                flat[choose] = True
+                drop_depth = flat.reshape(H, W)
+            else:
+                drop_depth |= miss
+            continue
+        else:
+            drop_depth |= miss
+            need = target - len(miss_idx)
+            if need <= 0:
+                continue
+
+        # ---- stage 2: perlin fill on remaining valid pixels ----
+        already = drop_depth | drop_perlin
+        remain = omega & (~already)
+        remain_idx = np.flatnonzero(remain)
+        if len(remain_idx) == 0:
+            continue
+
+        if use_bbox_local_noise:
+            ys, xs = np.where(omega)
+            y0, y1 = ys.min(), ys.max() + 1
+            x0, x1 = xs.min(), xs.max() + 1
+            hh, ww = (y1 - y0), (x1 - x0)
+            noise = fractal_smooth_noise(
+                hh, ww,
+                base_res=max(4, min(base_res, max(hh, ww)//4)),
+                octaves=octaves,
+                persistence=persistence,
+                seed=int(seed + iid * 131)
+            )
+            noise_map = np.zeros((H, W), np.float32)
+            noise_map[y0:y1, x0:x1] = noise
+        else:
+            noise_map = fractal_smooth_noise(
+                H, W, base_res=base_res, octaves=octaves,
+                persistence=persistence, seed=int(seed + iid * 131)
+            )
+
+        scores = noise_map.reshape(-1)[remain_idx]
+        need = min(need, len(remain_idx))
+        pick_local = np.argpartition(scores, -need)[-need:]
+        pick = remain_idx[pick_local]
+
+        flat = drop_perlin.reshape(-1)
+        flat[pick] = True
+        drop_perlin = flat.reshape(H, W)
+
+    # ensure disjoint
+    drop_perlin &= (~drop_depth)
+    return drop_depth, drop_perlin

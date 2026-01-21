@@ -1,4 +1,5 @@
 import os
+os.environ['CUDA_VISIBLE_DEVICES'] = '5'
 import sys
 import numpy as np
 import argparse
@@ -23,12 +24,12 @@ from models.dsn import DSN, cluster
 from dataset.scale_grasp_dataset import GraspNetDataset, collate_fn
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--split', default='test', help='Dataset split [default: test]')
-parser.add_argument('--dataset_root', required=True, help='Dataset root')
-parser.add_argument('--checkpoint_path', required=True, help='Model checkpoint path')
-parser.add_argument('--seg_checkpoint_path', required=True, help='Segmentation Model checkpoint path')
-parser.add_argument('--dump_dir', required=True, help='Dump dir to save outputs')
-parser.add_argument('--camera', required=True, help='Camera split [realsense/kinect]')
+parser.add_argument('--split', default='test_seen', help='Dataset split [default: test]')
+parser.add_argument('--dataset_root', default='/data/robotarm/dataset/graspnet', help='Dataset root')
+parser.add_argument('--checkpoint_path', default='log/scale_grasp/log_full_model/checkpoint.tar',help='Model checkpoint path')
+parser.add_argument('--seg_checkpoint_path', default='log/scale_grasp/log_insseg/checkpoint.tar', help='Segmentation Model checkpoint path')
+parser.add_argument('--dump_dir', default='experiment/scale_grasp.512', help='Dump dir to save outputs')
+parser.add_argument('--camera', default='realsense', help='Camera split [realsense/kinect]')
 parser.add_argument('--num_point', type=int, default=20000, help='Point Number [default: 20000]')
 parser.add_argument('--num_view', type=int, default=300, help='View Number [default: 300]')
 parser.add_argument('--remove_outlier', action='store_true', default=True)
@@ -41,6 +42,7 @@ parser.add_argument('--dropout_num', type=int, default=0, help='Gaussian noise l
 parser.add_argument('--dropout_rate', type=float, default=0.0, help='Dropout rate for scene points')
 parser.add_argument('--downsample_voxel_size', type=float, default=0.0, help='Voxel Size for scene points downsample')
 parser.add_argument('--depth_type', default='virtual', help='Depth type [real/virtual]')
+parser.add_argument('--obs', action='store_true', default=True, help='Whether to use observation point clouds')
 cfgs = parser.parse_args()
 print(cfgs)
 
@@ -62,7 +64,7 @@ TEST_DATALOADER = DataLoader(TEST_DATASET, batch_size=cfgs.batch_size, shuffle=F
 print(len(TEST_DATALOADER))
 # Init the model
 net = GraspNet_MSCQ(input_feature_dim=0, num_view=cfgs.num_view, num_angle=12, num_depth=4,
-                     cylinder_radius=0.08, hmin=-0.02, hmax_list=[0.01,0.02,0.03,0.04], is_training=False, obs=True)
+                     cylinder_radius=0.08, hmin=-0.02, hmax_list=[0.01,0.02,0.03,0.04], is_training=False, obs=cfgs.obs)
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 net.to(device)
 # Load checkpoint
@@ -71,12 +73,13 @@ net.load_state_dict(checkpoint['model_state_dict'])
 start_epoch = checkpoint['epoch']
 print("-> loaded checkpoint %s (epoch: %d)"%(cfgs.checkpoint_path, start_epoch))
 
-#load seg network
-seg_net = DSN(input_feature_dim=0)
-seg_net.to(device)
-# Load checkpoint
-checkpoint = torch.load(cfgs.seg_checkpoint_path, weights_only=False)
-seg_net.load_state_dict(checkpoint['model_state_dict'])
+if cfgs.obs:
+    #load seg network
+    seg_net = DSN(input_feature_dim=0)
+    seg_net.to(device)
+    # Load checkpoint
+    checkpoint = torch.load(cfgs.seg_checkpoint_path, weights_only=False)
+    seg_net.load_state_dict(checkpoint['model_state_dict'])
 
 # ------------------------------------------------------------------------- GLOBAL CONFIG END
 
@@ -97,21 +100,22 @@ def inference():
         
         # Forward pass
         with torch.no_grad():
-            end_points = seg_net(batch_data)
-            batch_xyz_img = end_points["point_clouds"]
-            B, _, N = batch_xyz_img.shape
-            batch_offsets = end_points["center_offsets"]
-            batch_fg = end_points["foreground_logits"]
-            batch_fg = F.softmax(batch_fg, dim=1)
-            batch_fg = torch.argmax(batch_fg, dim=1)
-            # end_points["instance_mask"] = batch_fg
-            clustered_imgs = []
-            for i in range(B):
-                clustered_img, uniq_cluster_centers = cluster(batch_xyz_img[i], batch_offsets[i].permute(1, 0),
-                                                              batch_fg[i])
-                clustered_img = clustered_img.unsqueeze(0)
-                clustered_imgs.append(clustered_img)
-            end_points['seed_cluster'] = torch.cat(clustered_imgs,dim=0)
+            if cfgs.obs:
+                end_points = seg_net(batch_data)
+                batch_xyz_img = end_points["point_clouds"]
+                B, _, N = batch_xyz_img.shape
+                batch_offsets = end_points["center_offsets"]
+                batch_fg = end_points["foreground_logits"]
+                batch_fg = F.softmax(batch_fg, dim=1)
+                batch_fg = torch.argmax(batch_fg, dim=1)
+                # end_points["instance_mask"] = batch_fg
+                clustered_imgs = []
+                for i in range(B):
+                    clustered_img, uniq_cluster_centers = cluster(batch_xyz_img[i], batch_offsets[i].permute(1, 0),
+                                                                batch_fg[i])
+                    clustered_img = clustered_img.unsqueeze(0)
+                    clustered_imgs.append(clustered_img)
+                end_points['seed_cluster'] = torch.cat(clustered_imgs,dim=0)
             end_points = net(batch_data)
             grasp_preds = pred_decode(end_points)
 

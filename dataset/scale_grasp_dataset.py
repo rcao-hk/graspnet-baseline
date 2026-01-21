@@ -17,7 +17,7 @@ from tqdm import tqdm
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 from utils.data_utils import CameraInfo, transform_point_cloud, create_point_cloud_from_depth_image,\
-                            get_workspace_mask, remove_invisible_grasp_points, add_gaussian_noise_point_cloud, apply_smoothing, random_point_dropout, add_gaussian_noise_depth_map, find_large_missing_regions, apply_dropout_to_regions
+                            get_workspace_mask, remove_invisible_grasp_points, add_gaussian_noise_point_cloud, apply_smoothing, random_point_dropout, add_gaussian_noise_depth_map, find_large_missing_regions, apply_dropout_to_regions, depthaware_perlin_dropout_masks
 
 class GraspNetDataset(Dataset):
     def __init__(self, root, valid_obj_idxs, grasp_labels, camera='kinect', split='train', num_points=20000,
@@ -150,13 +150,27 @@ class GraspNetDataset(Dataset):
             noisy_cloud = create_point_cloud_from_depth_image(noisy_depth, camera, organized=True)
             
         if self.dropout_rate > 0:
-            foreground_mask = (seg > 0)
-            large_missing_regions, labeled, filtered_labels = find_large_missing_regions(real_depth, foreground_mask, self.dropout_min_size)
+            # foreground_mask = (seg > 0)
+            # large_missing_regions, labeled, filtered_labels = find_large_missing_regions(real_depth, foreground_mask, self.dropout_min_size)
 
-            # 根据 dropout_rate 随机选择区域
-            dropout_regions = apply_dropout_to_regions(large_missing_regions, labeled, filtered_labels, self.dropout_rate)
-            dropout_mask = dropout_regions > 0
+            # # 根据 dropout_rate 随机选择区域
+            # dropout_regions = apply_dropout_to_regions(large_missing_regions, labeled, filtered_labels, self.dropout_rate)
+            # dropout_mask = dropout_regions > 0
             
+            drop_depth_mask, drop_perlin_mask = depthaware_perlin_dropout_masks(
+                depth_raw=real_depth,
+                depth_clear=depth,          # 分母：clear depth 的有效像素
+                seg=seg,
+                dropout_rate=self.dropout_rate,
+                seed=0,
+                strict_match=True,               # 保证 severity 可控（instance-level 精确比例）
+                base_res=16, octaves=4, persistence=0.5,
+                use_bbox_local_noise=True
+            )
+
+            # 总 dropout
+            dropout_mask = drop_depth_mask | drop_perlin_mask
+
         # generate cloud
         cloud = create_point_cloud_from_depth_image(depth, camera, organized=True)
 

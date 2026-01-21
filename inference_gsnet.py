@@ -25,8 +25,12 @@ from utils.collision_detector import ModelFreeCollisionDetectorTorch
 from utils.data_utils import (
     CameraInfo, create_point_cloud_from_depth_image, get_workspace_mask,
     sample_points, apply_smoothing, add_gaussian_noise_depth_map,
-    find_large_missing_regions, apply_dropout_to_regions
+    find_large_missing_regions, apply_dropout_to_regions, depthaware_perlin_dropout_masks
 )
+
+import json
+from datetime import datetime
+import platform
 
 import resource
 # RuntimeError: received 0 items of ancdata. Issue: pytorch/pytorch#973
@@ -74,6 +78,9 @@ parser.add_argument('--dropout_rate', type=float, default=0.0,
 parser.add_argument('--dropout_min_size', type=int, default=200,
                     help='Min connected component size for missing regions (on FG mask)')
 
+parser.add_argument('--pc_sparse_level', type=int, default=0,
+                    help='Point sparsity level (only for data_type==noise): 0=off, 1..4 -> [512,1024,2048,5120]')
+
 cfgs = parser.parse_args()
 
 
@@ -82,6 +89,35 @@ height = 720
 # voxel_size = 0.005
 # TOP_K = 300
 
+
+def save_run_config_json(cfgs, dump_dir, split, camera, extra=None):
+    """
+    Save run args/config to: {dump_dir}/{split}_{camera}.json
+    """
+    os.makedirs(dump_dir, exist_ok=True)
+    out_path = os.path.join(dump_dir, f"{split}_{camera}.json")
+
+    payload = {
+        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "argv": sys.argv,
+        "cfgs": vars(cfgs),  # argparse.Namespace -> dict
+        "env": {
+            "python": sys.version,
+            "platform": platform.platform(),
+            "torch": torch.__version__,
+            "cuda_available": bool(torch.cuda.is_available()),
+            "cuda_version": torch.version.cuda if torch.cuda.is_available() else None,
+        }
+    }
+    if extra is not None:
+        payload["extra"] = extra
+
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False, sort_keys=True)
+
+    print(f"[CFG] Saved run config to: {out_path}")
+
+
 def _disable_corruptions(cfgs):
     cfgs.smooth_size = 1
     cfgs.gaussian_noise_level = 0.0
@@ -89,7 +125,9 @@ def _disable_corruptions(cfgs):
     cfgs.dropout_min_size = 0
     cfgs.rgb_noise = 'none'
     cfgs.rgb_severity = 0
-    
+    cfgs.pc_sparse_level = 0
+
+
 data_type = cfgs.data_type
 split = cfgs.split
 camera = cfgs.camera
@@ -97,18 +135,35 @@ dataset_root = cfgs.dataset_root
 voxel_size = cfgs.voxel_size
 dump_dir = os.path.join(cfgs.dump_dir)
 
-if data_type != 'noise':
-    _disable_corruptions(cfgs)
-
-print(cfgs)
-
 device = torch.device("cuda:"+cfgs.gpu_id if torch.cuda.is_available() else "cpu")
 torch.cuda.set_device(device)
+
+PC_SPARSE_LEVELS = [5120, 2048, 1024, 512]
+if data_type in ['real', 'syn']:
+    _disable_corruptions(cfgs)
+elif data_type == 'noise' and int(cfgs.pc_sparse_level) > 0:
+    lv = int(cfgs.pc_sparse_level)
+    assert 1 <= lv <= 4, f'pc_sparse_level must be in [0,4], got {lv}'
+    cfgs.num_point = PC_SPARSE_LEVELS[lv - 1]
+
+print(cfgs)
 
 net = GraspNet(seed_feat_dim=cfgs.seed_feat_dim, is_training=False)
 net.to(device)
 net.eval()
 checkpoint = torch.load(cfgs.checkpoint_path, map_location=device)
+
+save_run_config_json(
+    cfgs,
+    dump_dir=dump_dir,
+    split=cfgs.split,
+    camera=cfgs.camera,
+    extra={
+        "ckpt_path": cfgs.checkpoint_path,
+        "resolved_dump_dir": os.path.abspath(dump_dir),
+        "seed": 0,
+    }
+)
 
 net.load_state_dict(checkpoint['model_state_dict'])
 eps = 1e-8
@@ -206,13 +261,27 @@ def inference(scene_idx):
                 # if not in noise mode, fall back to current depth map
                 real_depth = depth
 
-            large_missing_regions, labeled, filtered_labels = find_large_missing_regions(
-                real_depth, foreground_mask, min_size=int(cfgs.dropout_min_size)
+            # large_missing_regions, labeled, filtered_labels = find_large_missing_regions(
+            #     real_depth, foreground_mask, min_size=int(cfgs.dropout_min_size)
+            # )
+            # dropout_regions = apply_dropout_to_regions(
+            #     large_missing_regions, labeled, filtered_labels, float(cfgs.dropout_rate)
+            # )
+            # dropout_mask = (dropout_regions > 0)
+
+            drop_depth_mask, drop_perlin_mask = depthaware_perlin_dropout_masks(
+                depth_raw=real_depth,
+                depth_clear=depth_used,          # 分母：clear depth 的有效像素
+                seg=seg,
+                dropout_rate=cfgs.dropout_rate,
+                seed=0,
+                strict_match=True,               # 保证 severity 可控（instance-level 精确比例）
+                base_res=16, octaves=4, persistence=0.5,
+                use_bbox_local_noise=True
             )
-            dropout_regions = apply_dropout_to_regions(
-                large_missing_regions, labeled, filtered_labels, float(cfgs.dropout_rate)
-            )
-            dropout_mask = (dropout_regions > 0)
+
+            # 总 dropout
+            dropout_mask = drop_depth_mask | drop_perlin_mask
 
         if dropout_mask is not None:
             mask = mask & (~dropout_mask)

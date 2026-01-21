@@ -37,7 +37,7 @@ import platform
 from graspnetAPI import GraspGroup
 
 from utils.collision_detector import ModelFreeCollisionDetector, ModelFreeCollisionDetectorTorch
-from utils.data_utils import CameraInfo, create_point_cloud_from_depth_image, get_workspace_mask, sample_points, points_denoise, add_gaussian_noise_depth_map, apply_smoothing, random_point_dropout, find_large_missing_regions, apply_dropout_to_regions
+from utils.data_utils import CameraInfo, create_point_cloud_from_depth_image, get_workspace_mask, sample_points, points_denoise, add_gaussian_noise_depth_map, apply_smoothing, random_point_dropout, find_large_missing_regions, apply_dropout_to_regions, depthaware_perlin_dropout_masks
 from torchvision import transforms
 
 import cv2
@@ -434,6 +434,76 @@ def _disable_corruptions(cfgs):
     cfgs.pc_sparse_level = 0
 
 
+def save_5_severity_dropout_pointclouds_colorcoded(
+    out_dir: str,
+    scene_idx: int,
+    anno_idx: int,
+    depth_used: np.ndarray,          # (H,W) 用来生成点云 + 分母
+    depth_raw: np.ndarray,           # (H,W) raw depth (0 indicates missing)
+    seg: np.ndarray,                 # (H,W) instance label
+    color_float01: np.ndarray,       # (H,W,3) float [0,1]
+    workspace_mask: np.ndarray,      # (H,W) bool
+    camera_info,
+    create_point_cloud_from_depth_image,
+    severity_rates=(0.1, 0.2, 0.4, 0.6, 0.8),
+    seed=0,
+    base_res=16, octaves=4, persistence=0.5,
+    strict_match=True,
+    blue_rgb=(0.0, 0.4, 1.0),        # depth-guided dropout
+    red_rgb=(1.0, 0.0, 0.0),         # perlin dropout
+    write_ascii=False,
+    instance_only=False              # True: 只看 seg>0 区域
+):
+    """
+    Save 5 PLYs (severity 1..5):
+      kept: original RGB
+      depth-guided dropped: blue
+      perlin dropped: red
+    """
+    os.makedirs(out_dir, exist_ok=True)
+
+    cloud_org = create_point_cloud_from_depth_image(depth_used, camera_info, organized=True)  # (H,W,3)
+
+    base_mask = (depth_used > 0) & workspace_mask
+    if instance_only:
+        base_mask &= (seg > 0)
+
+    xyz_base = cloud_org[base_mask]         # (N,3)
+    rgb_base = color_float01[base_mask]     # (N,3)
+
+    saved_paths = []
+    for s, rate in enumerate(severity_rates, start=1):
+        drop_depth, drop_perlin = depthaware_perlin_dropout_masks(
+            depth_raw=depth_raw,
+            depth_clear=depth_used,
+            seg=seg,
+            dropout_rate=float(rate),
+            seed=int(seed + 17 * s),
+            base_res=base_res, octaves=octaves, persistence=persistence,
+            strict_match=strict_match,
+            use_bbox_local_noise=True
+        )
+
+        dd = drop_depth[base_mask]
+        dp = drop_perlin[base_mask]
+
+        colors = np.clip(rgb_base.copy(), 0.0, 1.0).astype(np.float64)
+        # priority: if overlap ever happens (shouldn't), mark depth-guided first
+        colors[dp] = np.array(red_rgb, dtype=np.float64)
+        colors[dd] = np.array(blue_rgb, dtype=np.float64)
+
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(xyz_base.astype(np.float64))
+        pcd.colors = o3d.utility.Vector3dVector(colors)
+
+        fn = f"scene_{scene_idx:04d}_anno_{anno_idx:04d}_sev{s}_depthBLUE_perlinRED.ply"
+        path = os.path.join(out_dir, fn)
+        o3d.io.write_point_cloud(path, pcd, write_ascii=write_ascii)
+        saved_paths.append(path)
+
+
+    return saved_paths
+
 data_type = cfgs.data_type # syn
 restored_depth = cfgs.restored_depth
 restored_depth_root = cfgs.depth_root
@@ -590,19 +660,55 @@ def inference(scene_idx):
             
         # (C) depth-guided dropout (find missing regions on RAW depth by default)
         if cfgs.dropout_rate is not None and float(cfgs.dropout_rate) > 0:
-            foreground_mask = (seg > 0)
-
+            # foreground_mask = (seg > 0)
             real_depth = np.array(Image.open(depth_raw_path))
 
-            large_missing_regions, labeled, filtered_labels = find_large_missing_regions(
-                real_depth, foreground_mask, min_size=int(cfgs.dropout_min_size)
+            # large_missing_regions, labeled, filtered_labels = find_large_missing_regions(
+            #     real_depth, foreground_mask, min_size=int(cfgs.dropout_min_size)
+            # )
+            # dropout_regions = apply_dropout_to_regions(
+            #     large_missing_regions, labeled, filtered_labels, float(cfgs.dropout_rate)
+            # )
+            # dropout_mask = (dropout_regions > 0)
+
+            # r_list = [0.1, 0.2, 0.4, 0.6]
+            # lvl = int(cfgs.dropout_rate)
+            # lvl = max(1, min(lvl, 5))
+            # dropout_rate = r_list[lvl - 1]
+
+            drop_depth_mask, drop_perlin_mask = depthaware_perlin_dropout_masks(
+                depth_raw=real_depth,
+                depth_clear=depth_used,          # 分母：clear depth 的有效像素
+                seg=seg,
+                dropout_rate=cfgs.dropout_rate,
+                seed=0,
+                strict_match=True,               # 保证 severity 可控（instance-level 精确比例）
+                base_res=16, octaves=4, persistence=0.5,
+                use_bbox_local_noise=True
             )
-            dropout_regions = apply_dropout_to_regions(
-                large_missing_regions, labeled, filtered_labels, float(cfgs.dropout_rate)
-            )
-            dropout_mask = (dropout_regions > 0)
-            
-        # cv2.imwrite('test_seg_{}_{}.png'.format(scene_idx, anno_idx), (net_seg.astype(np.float32)/net_seg.max()*255.0).astype(np.uint8))
+
+            # 总 dropout
+            dropout_mask = drop_depth_mask | drop_perlin_mask
+
+        # if data_type == 'noise' and float(cfgs.dropout_rate) > 0:
+        #     out_dir = os.path.join('vis', "dropout_vis")
+        #     paths = save_5_severity_dropout_pointclouds_colorcoded(
+        #         out_dir=out_dir,
+        #         scene_idx=scene_idx,
+        #         anno_idx=anno_idx,
+        #         depth_used=depth_used,
+        #         depth_raw=real_depth,
+        #         seg=seg,
+        #         color_float01=color,
+        #         workspace_mask=workspace_mask,
+        #         camera_info=camera_info,
+        #         create_point_cloud_from_depth_image=create_point_cloud_from_depth_image,
+        #         seed=0,
+        #         strict_match=True,
+        #         instance_only=False   # 可选：只看物体点
+        #     )
+        #     print("[VIS] saved:", paths)
+        
         if dropout_mask is not None:
             mask = mask & (~dropout_mask)
 

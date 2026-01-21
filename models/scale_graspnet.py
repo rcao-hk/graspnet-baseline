@@ -253,51 +253,178 @@ class ToleranceNet(nn.Module):
             return vp_features
 
 
+def _sample_with_replacement(idxs, k: int):
+    """idxs: (M,) indices, sample k indices from idxs with replacement if needed."""
+    M = idxs.numel()
+    if M <= 0:
+        return idxs  # empty
+    if k <= M:
+        # no replacement: random choice or FPS later
+        perm = torch.randperm(M, device=idxs.device)[:k]
+        return idxs[perm]
+    # need pad with replacement
+    pad = idxs[torch.randint(0, M, (k - M,), device=idxs.device)]
+    return torch.cat([idxs, pad], dim=0)
 
-def ObjectBalanceSampling(end_points):
-    batch_seg_res = end_points["seed_cluster"]
-    batch_points = end_points['point_clouds']
-    batch_features = end_points['up_sample_features'].permute(0, 2, 1)
+def ObjectBalanceSampling(end_points, target_n=1024, min_per_obj=1):
+    """
+    Make fp2 have exactly target_n points (default 1024).
+    If not enough points (e.g., input only has 512), pad by sampling with replacement.
+    """
+    batch_seg_res = end_points["seed_cluster"]                        # (B, N)
+    batch_points = end_points['point_clouds']                         # (B, N, 3)
+    batch_features = end_points['up_sample_features'].permute(0, 2, 1)  # (B, N, C)
+
     B, N = batch_seg_res.shape
-    new_fp2_xyz = []
-    new_fp2_features = []
-    new_fp2_inds = []
+    C = batch_features.shape[-1]
+
+    new_fp2_xyz, new_fp2_features, new_fp2_inds = [], [], []
+
     for i in range(B):
-        seg_res = batch_seg_res[i]
-        points = batch_points[i]
-        features = batch_features[i]
-        idxs = torch.unique(seg_res)
-        num_objects = len(idxs) - 1
-        points_per_object = [1024 // num_objects for t in range(num_objects)]
-        points_per_object[-1] += 1024 % num_objects
+        seg_res = batch_seg_res[i]    # (N,)
+        points = batch_points[i]      # (N,3)
+        features = batch_features[i]  # (N,C)
+
+        # object ids excluding background(0)
+        obj_ids = torch.unique(seg_res)
+        obj_ids = obj_ids[obj_ids != 0]
+        num_objects = int(obj_ids.numel())
+
+        # --------- corner case: no object at all ----------
+        if num_objects == 0:
+            # fall back: just sample from all points (with replacement if needed)
+            all_inds = torch.arange(N, device=points.device)
+            chosen = _sample_with_replacement(all_inds, target_n)
+            xyz = points[chosen]
+            feat = features[chosen]
+            new_fp2_inds.append(chosen)
+            new_fp2_xyz.append(xyz)
+            new_fp2_features.append(feat)
+            continue
+
+        # --------- allocate points per object (balanced) ----------
+        # basic even split
+        base = target_n // num_objects
+        rem = target_n % num_objects
+
+        # ensure at least min_per_obj if possible
+        # (if num_objects > target_n, some objects must get 0; we will handle by skipping those)
+        alloc = torch.full((num_objects,), base, device=points.device, dtype=torch.long)
+        alloc[:rem] += 1
+
         object_inds_scene_list = []
         object_points_scene_list = []
         object_features_scene_list = []
-        t = 0
-        for j in idxs:
-            if j == 0:
-                continue
-            else:
-                inds = torch.where(seg_res == j)[0]
-                object_points = points[seg_res == j]
-                object_sample_inds = furthest_point_sample(object_points.unsqueeze(0), points_per_object[t])[0].long()
-                t += 1
-            object_inds_scene = torch.gather(inds, 0, object_sample_inds)
-            object_inds_scene_list.append(object_inds_scene)
-            object_points_scene_list.append(torch.gather(points, 0, object_inds_scene.unsqueeze(1).expand(-1, 3)))
-            object_features_scene_list.append(torch.gather(features, 0, object_inds_scene.unsqueeze(1).expand(-1, 256)))
-        new_fp2_inds.append(torch.cat(object_inds_scene_list, 0))
-        new_fp2_xyz.append(torch.cat(object_points_scene_list, 0))
-        new_fp2_features.append(torch.cat(object_features_scene_list, 0))
 
-    fp2_inds = torch.stack(new_fp2_inds, 0)
-    fp2_xyz = torch.stack(new_fp2_xyz, 0)
-    fp2_features = torch.stack(new_fp2_features, 0).permute(0, 2, 1)
-    end_points['fp2_inds_fps'] = end_points['fp2_inds']
+        for t, oid in enumerate(obj_ids.tolist()):
+            k = int(alloc[t].item())
+            if k <= 0:
+                continue
+
+            inds = torch.where(seg_res == oid)[0]  # (M,)
+            M = int(inds.numel())
+            if M <= 0:
+                continue
+
+            # gather object points for FPS input
+            obj_pts = points[inds]  # (M,3)
+
+            if M >= k:
+                # FPS for k points
+                fps_local = furthest_point_sample(obj_pts.unsqueeze(0), k)[0].long()  # (k,)
+                chosen = inds[fps_local]  # indices in scene
+            else:
+                # not enough points: take all + pad with replacement
+                chosen = _sample_with_replacement(inds, k)  # (k,)
+
+            object_inds_scene_list.append(chosen)
+            object_points_scene_list.append(points[chosen])      # (k,3)
+            object_features_scene_list.append(features[chosen])  # (k,C)
+
+        # concat
+        if len(object_inds_scene_list) > 0:
+            fp_inds = torch.cat(object_inds_scene_list, dim=0)        # (K,)
+            fp_xyz = torch.cat(object_points_scene_list, dim=0)       # (K,3)
+            fp_feat = torch.cat(object_features_scene_list, dim=0)    # (K,C)
+        else:
+            fp_inds = torch.empty((0,), device=points.device, dtype=torch.long)
+            fp_xyz = torch.empty((0,3), device=points.device, dtype=points.dtype)
+            fp_feat = torch.empty((0,C), device=points.device, dtype=features.dtype)
+
+        # --------- ensure exactly target_n (pad or trim) ----------
+        K = int(fp_inds.numel())
+        if K < target_n:
+            # pad from all valid foreground points first; if none, from all points
+            fg_inds = torch.where(seg_res != 0)[0]
+            pool = fg_inds if fg_inds.numel() > 0 else torch.arange(N, device=points.device)
+            pad = _sample_with_replacement(pool, target_n - K)
+            fp_inds = torch.cat([fp_inds, pad], dim=0)
+            fp_xyz = torch.cat([fp_xyz, points[pad]], dim=0)
+            fp_feat = torch.cat([fp_feat, features[pad]], dim=0)
+        elif K > target_n:
+            fp_inds = fp_inds[:target_n]
+            fp_xyz = fp_xyz[:target_n]
+            fp_feat = fp_feat[:target_n]
+
+        new_fp2_inds.append(fp_inds)
+        new_fp2_xyz.append(fp_xyz)
+        new_fp2_features.append(fp_feat)
+
+    fp2_inds = torch.stack(new_fp2_inds, 0)                         # (B, target_n)
+    fp2_xyz = torch.stack(new_fp2_xyz, 0)                           # (B, target_n, 3)
+    fp2_features = torch.stack(new_fp2_features, 0).permute(0, 2, 1) # (B, C, target_n)
+
+    end_points['fp2_inds_fps'] = end_points.get('fp2_inds', None)
     end_points['fp2_inds'] = fp2_inds.int()
     end_points['fp2_xyz'] = fp2_xyz
     end_points['fp2_features'] = fp2_features
     return end_points
+
+
+# def ObjectBalanceSampling(end_points):
+#     batch_seg_res = end_points["seed_cluster"]
+#     batch_points = end_points['point_clouds']
+#     batch_features = end_points['up_sample_features'].permute(0, 2, 1)
+#     B, N = batch_seg_res.shape
+#     new_fp2_xyz = []
+#     new_fp2_features = []
+#     new_fp2_inds = []
+#     for i in range(B):
+#         seg_res = batch_seg_res[i]
+#         points = batch_points[i]
+#         features = batch_features[i]
+#         idxs = torch.unique(seg_res)
+#         num_objects = len(idxs) - 1
+#         points_per_object = [1024 // num_objects for t in range(num_objects)]
+#         points_per_object[-1] += 1024 % num_objects
+#         object_inds_scene_list = []
+#         object_points_scene_list = []
+#         object_features_scene_list = []
+#         t = 0
+#         for j in idxs:
+#             if j == 0:
+#                 continue
+#             else:
+#                 inds = torch.where(seg_res == j)[0]
+#                 object_points = points[seg_res == j]
+#                 object_sample_inds = furthest_point_sample(object_points.unsqueeze(0), points_per_object[t])[0].long()
+#                 t += 1
+#             object_inds_scene = torch.gather(inds, 0, object_sample_inds)
+#             object_inds_scene_list.append(object_inds_scene)
+#             object_points_scene_list.append(torch.gather(points, 0, object_inds_scene.unsqueeze(1).expand(-1, 3)))
+#             object_features_scene_list.append(torch.gather(features, 0, object_inds_scene.unsqueeze(1).expand(-1, 256)))
+#         new_fp2_inds.append(torch.cat(object_inds_scene_list, 0))
+#         new_fp2_xyz.append(torch.cat(object_points_scene_list, 0))
+#         new_fp2_features.append(torch.cat(object_features_scene_list, 0))
+
+#     fp2_inds = torch.stack(new_fp2_inds, 0)
+#     fp2_xyz = torch.stack(new_fp2_xyz, 0)
+#     fp2_features = torch.stack(new_fp2_features, 0).permute(0, 2, 1)
+#     end_points['fp2_inds_fps'] = end_points['fp2_inds']
+#     end_points['fp2_inds'] = fp2_inds.int()
+#     end_points['fp2_xyz'] = fp2_xyz
+#     end_points['fp2_features'] = fp2_features
+#     return end_points
 
 
 def ForegroundSampling(end_points):
