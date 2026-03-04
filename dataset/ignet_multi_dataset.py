@@ -649,17 +649,17 @@ class GraspNetDataset(Dataset):
     def scene_pose_augment(self, images, object_poses, intrinsic, obj_idxs):
         (color, depth, mask) = images
         # Flipping along the YZ plane
-        if np.random.random() > 0.5:
-            flip_mat = np.eye(4)
-            flip_mat[:3, :3] = np.array([[-1, 0, 0],
-                                         [ 0, 1, 0],
-                                         [ 0, 0, 1]])
-            # point_clouds = transform_point_cloud(point_clouds, flip_mat, '3x3')
-            color, depth, mask = flip_image(color, depth, mask, 1, intrinsic)
-            for i in range(len(object_poses)):
-                object_pose = np.eye(4)
-                object_pose[:3, :] = object_poses[i]
-                object_poses[i] = (flip_mat @ object_pose)[:3, :].astype(np.float32)
+        # if np.random.random() > 0.5:
+        #     flip_mat = np.eye(4)
+        #     flip_mat[:3, :3] = np.array([[-1, 0, 0],
+        #                                  [ 0, 1, 0],
+        #                                  [ 0, 0, 1]])
+        #     # point_clouds = transform_point_cloud(point_clouds, flip_mat, '3x3')
+        #     color, depth, mask = flip_image(color, depth, mask, 1, intrinsic)
+        #     for i in range(len(object_poses)):
+        #         object_pose = np.eye(4)
+        #         object_pose[:3, :] = object_poses[i]
+        #         object_poses[i] = (flip_mat @ object_pose)[:3, :].astype(np.float32)
 
         # Rotation along up-axis/Z-axis
         # rot_angle = (np.random.random()*np.pi/3) - np.pi/6 # -30 ~ +30 degree
@@ -1138,24 +1138,25 @@ class GraspNetMultiDataset(Dataset):
         (color, depth, mask) = images
         aug_T = np.eye(4, dtype=np.float32)
         # Flipping along the YZ plane
-        if np.random.random() > 0.5:
-            flip_mat = np.eye(4)
-            flip_mat[:3, :3] = np.array([[-1, 0, 0],
-                                         [ 0, 1, 0],
-                                         [ 0, 0, 1]])
-            aug_T = flip_mat @ aug_T
-            # point_clouds = transform_point_cloud(point_clouds, flip_mat, '3x3')
-            color, depth, mask = flip_image(color, depth, mask, 1, intrinsic)
-            for i in range(len(object_poses)):
-                object_pose = np.eye(4)
-                object_pose[:3, :] = object_poses[i]
-                object_poses[i] = (flip_mat @ object_pose)[:3, :].astype(np.float32)
+        # if np.random.random() > 0.5:
+        #     flip_mat = np.eye(4)
+        #     flip_mat[:3, :3] = np.array([[-1, 0, 0],
+        #                                  [ 0, 1, 0],
+        #                                  [ 0, 0, 1]])
+        #     aug_T = flip_mat @ aug_T
+        #     # point_clouds = transform_point_cloud(point_clouds, flip_mat, '3x3')
+        #     color, depth, mask = flip_image(color, depth, mask, 1, intrinsic)
+        #     for i in range(len(object_poses)):
+        #         object_pose = np.eye(4)
+        #         object_pose[:3, :] = object_poses[i]
+        #         object_poses[i] = (flip_mat @ object_pose)[:3, :].astype(np.float32)
 
         # Rotation along up-axis/Z-axis
         # rot_angle = (np.random.random()*np.pi/3) - np.pi/6 # -30 ~ +30 degree
         # rot_angle = (np.random.random()*np.pi/2) - np.pi/4  # -45 ~ +45 degree
 
-        rot_angle = (np.random.random() * 2 * np.deg2rad(15.0)) - np.deg2rad(15.0)   # [-15°, +15°]
+        # rot_angle = (np.random.random() * 2 * np.deg2rad(15.0)) - np.deg2rad(15.0)   # [-15°, +15°]
+        rot_angle = (np.random.random() * 2 * np.deg2rad(30.0)) - np.deg2rad(30.0)   # [-15°, +15°]
         c, s = np.cos(rot_angle), np.sin(rot_angle)
         rot_mat = np.eye(4, dtype=np.float32)
         rot_mat[:3, :3] = np.array([[c, -s, 0],
@@ -1220,6 +1221,49 @@ class GraspNetMultiDataset(Dataset):
             return (depth_mask & workspace_mask)
         return depth_mask
 
+    def _crop_box_from_mask(self, mask):
+        H, W = mask.shape
+        ys, xs = np.where(mask)
+        if ys.size == 0:
+            return 0, 0, W, H
+
+        x0, x1 = xs.min(), xs.max() + 1
+        y0, y1 = ys.min(), ys.max() + 1
+        bw, bh = (x1 - x0), (y1 - y0)
+        side = int(max(bw, bh))
+
+        cx = (x0 + x1) / 2.0
+        cy = (y0 + y1) / 2.0
+
+        x0 = int(round(cx - side / 2.0))
+        y0 = int(round(cy - side / 2.0))
+        x0 = max(0, min(x0, W - side))
+        y0 = max(0, min(y0, H - side))
+        x1 = x0 + side
+        y1 = y0 + side
+        return int(x0), int(y0), int(x1), int(y1)
+
+    def get_resized_idxs_from_flat_crop(self, pix_flat, orig_hw, crop_box, out_hw=(448,448)):
+        H, W = orig_hw
+        outH, outW = out_hw
+        x0, y0, x1, y1 = crop_box
+        cw, ch = (x1 - x0), (y1 - y0)
+
+        ys, xs = np.unravel_index(pix_flat, (H, W))
+        xs = xs.astype(np.float32) - float(x0)
+        ys = ys.astype(np.float32) - float(y0)
+
+        # clamp into crop
+        xs = np.clip(xs, 0, cw - 1e-6)
+        ys = np.clip(ys, 0, ch - 1e-6)
+
+        # scale to 448 (use floor to match your model gather)
+        xf = np.floor(xs * (outW / float(cw))).astype(np.int64)
+        yf = np.floor(ys * (outH / float(ch))).astype(np.int64)
+        xf = np.clip(xf, 0, outW - 1)
+        yf = np.clip(yf, 0, outH - 1)
+        return (yf * outW + xf).astype(np.int64)
+
     def get_data(self, index):
         color = np.array(Image.open(self.colorpath[index]), dtype=np.float32) / 255.0  # (H,W,3)
         depth = np.array(Image.open(self.depthpath[index]))                            # (H,W)
@@ -1250,9 +1294,15 @@ class GraspNetMultiDataset(Dataset):
         H, W = depth.shape
         valid_flat = np.flatnonzero(mask)               # (mask_sum,)
         pix_flat = valid_flat[idxs]                     # (num_points,)
-        resized_idxs = self.get_resized_idxs_from_flat(pix_flat, (H, W))
-        img = self.img_transforms(color)                # full image resized
+        # resized_idxs = self.get_resized_idxs_from_flat(pix_flat, (H, W))
+        # img = self.img_transforms(color)                # full image resized
 
+        crop_box = self._crop_box_from_mask(mask)
+        x0, y0, x1, y1 = crop_box
+        color_crop = color[y0:y1, x0:x1].copy()
+        img = self.img_transforms(color_crop)
+        resized_idxs = self.get_resized_idxs_from_flat_crop(pix_flat, (H, W), crop_box, out_hw=self.resize_shape)
+        
         return {
             'point_clouds': cloud_sampled.astype(np.float32),
             'cloud_colors': color_sampled.astype(np.float32),
@@ -1264,6 +1314,9 @@ class GraspNetMultiDataset(Dataset):
 
             # optional debug
             'seg': seg_sampled.astype(np.int32),
+            'scene': scene,
+            'frameid': int(self.frameid[index]),
+            'index': int(index),
         }
 
     def get_data_label(self, index):
@@ -1282,11 +1335,11 @@ class GraspNetMultiDataset(Dataset):
         factor_depth = meta['factor_depth']
 
         aug_T_cam = None
-        # if self.augment:
-        #     poses_list = [poses[:, :, i].astype(np.float32) for i in range(poses.shape[2])]
-        #     (color, depth, seg), poses_list, aug_T_cam = self.scene_pose_augment(
-        #         (color, depth, seg), poses_list, intrinsic, obj_idxs
-        #     )
+        if self.augment:
+            poses_list = [poses[:, :, i].astype(np.float32) for i in range(poses.shape[2])]
+            (color, depth, seg), poses_list, aug_T_cam = self.scene_pose_augment(
+                (color, depth, seg), poses_list, intrinsic, obj_idxs
+            )
         
         camera = CameraInfo(1280.0, 720.0, intrinsic[0][0], intrinsic[1][1], intrinsic[0][2], intrinsic[1][2], factor_depth)
         cloud = create_point_cloud_from_depth_image(depth, camera, organized=True)
@@ -1312,8 +1365,14 @@ class GraspNetMultiDataset(Dataset):
         H, W = depth.shape
         valid_flat = np.flatnonzero(mask)
         pix_flat = valid_flat[idxs]
-        resized_idxs = self.get_resized_idxs_from_flat(pix_flat, (H, W))
-        img = self.img_transforms(color)
+        # resized_idxs = self.get_resized_idxs_from_flat(pix_flat, (H, W))
+        # img = self.img_transforms(color)
+
+        crop_box = self._crop_box_from_mask(mask)
+        x0, y0, x1, y1 = crop_box
+        color_crop = color[y0:y1, x0:x1].copy()
+        img = self.img_transforms(color_crop)
+        resized_idxs = self.get_resized_idxs_from_flat_crop(pix_flat, (H, W), crop_box, out_hw=self.resize_shape)
 
         # scene-level labels (same “*_list” style)
         object_poses_list, grasp_points_list, grasp_offsets_list, grasp_scores_list = [], [], [], []
@@ -1339,8 +1398,8 @@ class GraspNetMultiDataset(Dataset):
             grasp_offsets_list.append(offsets)
             grasp_scores_list.append(scores)
 
-        if self.augment:
-            cloud_sampled, object_poses_list = self.point_augment(cloud_sampled, object_poses_list)
+        # if self.augment:
+        #     cloud_sampled, object_poses_list = self.point_augment(cloud_sampled, object_poses_list)
             
         return {
             'point_clouds': cloud_sampled.astype(np.float32),
@@ -1361,6 +1420,9 @@ class GraspNetMultiDataset(Dataset):
 
             # optional debug
             'seg': seg_sampled.astype(np.int32),
+            'scene': scene,
+            'frameid': int(self.frameid[index]),
+            'index': int(index),
         }
 
     
@@ -1392,15 +1454,29 @@ def load_grasp_labels(root):
 def collate_fn(batch):
     if isinstance(batch[0], torch.Tensor):
         return torch.stack(batch, 0)
+
+    # numpy array
     elif type(batch[0]).__module__ == 'numpy':
         return torch.stack([torch.from_numpy(b) for b in batch], 0)
-    elif isinstance(batch[0], container_abcs.Mapping):
-        return {key:collate_fn([d[key] for d in batch]) for key in batch[0]}
-    elif isinstance(batch[0], container_abcs.Sequence):
-        return [[torch.from_numpy(sample) for sample in b] for b in batch]
-    
-    raise TypeError("batch must contain tensors, dicts or lists; found {}".format(type(batch[0])))
 
+    # python scalar numbers (optional, but recommended)
+    elif isinstance(batch[0], (int, float, np.integer, np.floating)):
+        return torch.tensor(batch)
+
+    # ---- FIX: strings are Sequences, handle before Sequence branch ----
+    elif isinstance(batch[0], (str, bytes)):
+        # keep as list of strings
+        return list(batch)
+
+    elif isinstance(batch[0], container_abcs.Mapping):
+        return {key: collate_fn([d[key] for d in batch]) for key in batch[0]}
+
+    elif isinstance(batch[0], container_abcs.Sequence):
+        # your original assumption: sequence of numpy arrays
+        return [[torch.from_numpy(sample) if type(sample).__module__ == 'numpy' else sample
+                 for sample in b] for b in batch]
+
+    raise TypeError(f"batch must contain tensors, dicts or lists; found {type(batch[0])}")
 
 import MinkowskiEngine as ME
 def minkowski_collate_fn(list_data):

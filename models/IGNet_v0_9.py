@@ -1016,7 +1016,80 @@ class MinkUNet14D_InterFuse(MinkUNet14D):
 
         return self.final(out)
     
-    
+import json
+
+def _ensure_dir(p: str):
+    os.makedirs(p, exist_ok=True)
+
+def _to_numpy(x):
+    if x is None:
+        return None
+    if torch.is_tensor(x):
+        return x.detach().cpu().numpy()
+    return np.asarray(x)
+
+def _write_ply_xyz_rgb(path, xyz, rgb=None):
+    """
+    xyz: (N,3) float
+    rgb: (N,3) float in [0,1] or uint8 in [0,255]
+    """
+    xyz = np.asarray(xyz, dtype=np.float32)
+    N = xyz.shape[0]
+    if rgb is not None:
+        rgb = np.asarray(rgb)
+        if rgb.dtype != np.uint8:
+            rgb = np.clip(rgb, 0, 1)
+            rgb = (rgb * 255.0 + 0.5).astype(np.uint8)
+        assert rgb.shape[0] == N
+        with open(path, "w") as f:
+            f.write("ply\nformat ascii 1.0\n")
+            f.write(f"element vertex {N}\n")
+            f.write("property float x\nproperty float y\nproperty float z\n")
+            f.write("property uchar red\nproperty uchar green\nproperty uchar blue\n")
+            f.write("end_header\n")
+            for i in range(N):
+                x, y, z = xyz[i]
+                r, g, b = rgb[i]
+                f.write(f"{x} {y} {z} {int(r)} {int(g)} {int(b)}\n")
+    else:
+        with open(path, "w") as f:
+            f.write("ply\nformat ascii 1.0\n")
+            f.write(f"element vertex {N}\n")
+            f.write("property float x\nproperty float y\nproperty float z\n")
+            f.write("end_header\n")
+            for i in range(N):
+                x, y, z = xyz[i]
+                f.write(f"{x} {y} {z}\n")
+
+def _denorm_img(img_norm_3xHxW):
+    # img_norm: torch (3,H,W), ImageNet normalize
+    mean = torch.tensor([0.485, 0.456, 0.406], device=img_norm_3xHxW.device).view(3,1,1)
+    std  = torch.tensor([0.229, 0.224, 0.225], device=img_norm_3xHxW.device).view(3,1,1)
+    img = img_norm_3xHxW * std + mean
+    img = img.clamp(0, 1)
+    return img
+
+def _imgidx_to_xy(img_idxs_1d, W=448):
+    # img_idxs_1d: (N,)
+    ys = torch.div(img_idxs_1d, W, rounding_mode="floor")
+    xs = img_idxs_1d - ys * W
+    return xs, ys
+
+def _density_map(xs, ys, H=448, W=448):
+    den = np.zeros((H, W), dtype=np.int32)
+    np.add.at(den, (ys, xs), 1)
+    return den
+
+def _avg_map(xs, ys, vals, H=448, W=448):
+    # average vals per pixel
+    s = np.zeros((H, W), dtype=np.float32)
+    c = np.zeros((H, W), dtype=np.int32)
+    np.add.at(s, (ys, xs), vals)
+    np.add.at(c, (ys, xs), 1)
+    out = s / np.maximum(c, 1)
+    return out
+
+   
 class IGNet(nn.Module):
     def __init__(self,  m_point=1024, num_view=300, num_angle=12, num_depth=4, seed_feat_dim=256, img_feat_dim=64, 
                  is_training=True, multi_scale_grouping=False, fuse_type='early'):
@@ -1139,6 +1212,12 @@ class IGNet(nn.Module):
             self.crop_op_list = [self.crop1, self.crop2, self.crop3, self.crop4]
         else:
             self.crop = CloudCrop(nsample=32, seed_feature_dim=self.seed_feature_dim + self.img_feature_dim, out_dim=self.seed_feature_dim)
+
+        self.vis_dir = None
+        self.vis_every = 200
+        self.max_points_2d = 30000
+        self.max_points_ply = 50000
+        self._vis_iter = 0
         self._init_weights()
 
     def _init_weights(self):
@@ -1157,6 +1236,178 @@ class IGNet(nn.Module):
                 if module.bias is not None:
                     nn.init.constant_(module.bias, 0)
 
+    def enable_vis(self, vis_dir: str, vis_every: int = 200, max_points_2d: int = 30000,
+                max_points_ply: int = 50000):
+        self.vis_dir = str(vis_dir)
+        self.vis_every = int(vis_every)
+        self.max_points_2d = int(max_points_2d)
+        self.max_points_ply = int(max_points_ply)
+        self._vis_iter = 0
+        _ensure_dir(self.vis_dir)
+
+    @torch.no_grad()
+    def _maybe_save_vis(
+        self,
+        end_points: dict,
+        *,
+        xyz_full: torch.Tensor,          # (B,N,3)
+        img: torch.Tensor = None,        # (B,3,448,448)
+        img_idxs: torch.Tensor = None,   # (B,N)
+        obj_prob: torch.Tensor = None,   # (B,N)
+        inds: torch.Tensor = None,       # (B,M)
+        xyz_sel: torch.Tensor = None,    # (B,M,3)
+        stats: dict = None,
+    ):
+        if getattr(self, "vis_dir", None) is None:
+            return
+
+        do_vis = (self._vis_iter % getattr(self, "vis_every", 200) == 0)
+        do_vis = do_vis or bool(end_points.get("force_vis", False))
+        if not do_vis:
+            return
+
+        b = 0  # only save batch0
+        tag_scene = end_points.get("scene", "scene")
+        if isinstance(tag_scene, (list, tuple)):
+            tag_scene = tag_scene[0]
+        tag_scene = str(tag_scene)
+        tag_frame = end_points.get("frameid", "frame")
+        if torch.is_tensor(tag_frame):
+            tag_frame = int(tag_frame[0].item())
+        elif isinstance(tag_frame, (list, tuple)):
+            tag_frame = int(tag_frame[0])
+        tag_frame = str(tag_frame)
+        prefix = f"{tag_scene}_{tag_frame}_it{self._vis_iter:06d}"
+        out_dir = os.path.join(self.vis_dir, prefix)
+        _ensure_dir(out_dir)
+
+        # --------- prepare arrays ----------
+        xyz_full_b = xyz_full[b].detach().cpu()
+        N = xyz_full_b.shape[0]
+
+        # colors from end_points if exists (depends on your dataloader)
+        rgb_full = None
+        if "cloud_colors" in end_points:
+            cc = end_points["cloud_colors"]
+            # could be Tensor (B,N,3) or list of (N,3)
+            if torch.is_tensor(cc):
+                rgb_full = cc[b].detach().cpu()
+            elif isinstance(cc, (list, tuple)) and len(cc) > b:
+                rgb_full = torch.as_tensor(cc[b]).detach().cpu()
+
+        img_b = None
+        if img is not None:
+            img_b = _denorm_img(img[b]).detach().cpu()  # (3,448,448)
+
+        img_idxs_b = img_idxs[b].detach().cpu() if img_idxs is not None else None
+        obj_prob_b = obj_prob[b].detach().cpu() if obj_prob is not None else None
+
+        # selected points
+        xyz_sel_b = xyz_sel[b].detach().cpu() if xyz_sel is not None else None
+        img_idxs_sel = None
+        if (img_idxs_b is not None) and (inds is not None):
+            img_idxs_sel = torch.gather(img_idxs_b, 0, inds[b].detach().cpu().long())
+
+        # --------- dump debug.pt ----------
+        dump = {
+            "stats": stats or {},
+            "xyz_full": xyz_full_b.to(torch.float16),
+            "xyz_sel": (xyz_sel_b.to(torch.float16) if xyz_sel_b is not None else None),
+            "img_idxs": (img_idxs_b.to(torch.int32) if img_idxs_b is not None else None),
+            "img_idxs_sel": (img_idxs_sel.to(torch.int32) if img_idxs_sel is not None else None),
+            "obj_prob": (obj_prob_b.to(torch.float16) if obj_prob_b is not None else None),
+            "inds": (inds[b].detach().cpu().to(torch.int32) if inds is not None else None),
+        }
+        torch.save(dump, os.path.join(out_dir, "debug.pt"))
+
+        # --------- write point clouds (PLY) ----------
+        # subsample for ply
+        if N > self.max_points_ply:
+            idx = torch.linspace(0, N - 1, steps=self.max_points_ply).long()
+            xyz_ply = xyz_full_b[idx].numpy()
+            rgb_ply = (rgb_full[idx].numpy() if rgb_full is not None else None)
+        else:
+            xyz_ply = xyz_full_b.numpy()
+            rgb_ply = (rgb_full.numpy() if rgb_full is not None else None)
+        _write_ply_xyz_rgb(os.path.join(out_dir, "cloud_full.ply"), xyz_ply, rgb_ply)
+
+        if xyz_sel_b is not None:
+            _write_ply_xyz_rgb(os.path.join(out_dir, "cloud_sel.ply"), xyz_sel_b.numpy(), None)
+
+        # --------- 2D visualizations ----------
+        try:
+            import matplotlib.pyplot as plt
+        except Exception:
+            # matplotlib not available; still keep debug.pt/ply/json
+            with open(os.path.join(out_dir, "note.txt"), "w") as f:
+                f.write("matplotlib not available; skipped 2D images.\n")
+            return
+
+        if img_b is not None and img_idxs_b is not None:
+            H, W = img_b.shape[1], img_b.shape[2]
+            xs, ys = _imgidx_to_xy(img_idxs_b.long(), W=W)
+
+            # subsample for 2D scatter
+            nn = xs.numel()
+            step = max(1, nn // self.max_points_2d)
+            xs_np = xs[::step].numpy()
+            ys_np = ys[::step].numpy()
+
+            img_np = img_b.permute(1, 2, 0).numpy()
+
+            # rgb.png
+            plt.figure(figsize=(6,6))
+            plt.imshow(img_np)
+            plt.axis("off")
+            plt.savefig(os.path.join(out_dir, "rgb.png"), dpi=200, bbox_inches="tight")
+            plt.close()
+
+            # rgb_pts.png (color by obj_prob if available)
+            plt.figure(figsize=(6,6))
+            plt.imshow(img_np)
+            if obj_prob_b is None:
+                plt.scatter(xs_np, ys_np, s=2)
+            else:
+                c = obj_prob_b[::step].numpy()
+                plt.scatter(xs_np, ys_np, s=3, c=c, cmap="jet", vmin=0, vmax=1)
+                plt.colorbar(fraction=0.046)
+            plt.axis("off")
+            plt.savefig(os.path.join(out_dir, "rgb_pts.png"), dpi=200, bbox_inches="tight")
+            plt.close()
+
+            # rgb_sel.png
+            if img_idxs_sel is not None:
+                xs_s, ys_s = _imgidx_to_xy(img_idxs_sel.long(), W=W)
+                plt.figure(figsize=(6,6))
+                plt.imshow(img_np)
+                plt.scatter(xs_np, ys_np, s=2)
+                plt.scatter(xs_s.numpy(), ys_s.numpy(), s=10)  # selected
+                plt.axis("off")
+                plt.savefig(os.path.join(out_dir, "rgb_sel.png"), dpi=200, bbox_inches="tight")
+                plt.close()
+
+            # density_all.png
+            den = _density_map(xs.numpy(), ys.numpy(), H=H, W=W)
+            plt.figure(figsize=(6,6))
+            plt.imshow(np.log1p(den), cmap="magma")
+            plt.axis("off")
+            plt.savefig(os.path.join(out_dir, "density_all.png"), dpi=200, bbox_inches="tight")
+            plt.close()
+
+            # obj_prob_map.png
+            if obj_prob_b is not None:
+                prob_map = _avg_map(xs.numpy(), ys.numpy(), obj_prob_b.numpy().astype(np.float32), H=H, W=W)
+                plt.figure(figsize=(6,6))
+                plt.imshow(prob_map, cmap="jet", vmin=0, vmax=1)
+                plt.colorbar(fraction=0.046)
+                plt.axis("off")
+                plt.savefig(os.path.join(out_dir, "obj_prob_map.png"), dpi=200, bbox_inches="tight")
+                plt.close()
+
+        # stats.json
+        with open(os.path.join(out_dir, "stats.json"), "w") as f:
+            json.dump(stats or {}, f, indent=2)
+        
     @torch.no_grad()
     def _select_M_points(self, objectness_score, xyz_full):
         """
@@ -1237,6 +1488,10 @@ class IGNet(nn.Module):
         B, N, _ = xyz_full.shape
         device = xyz_full.device
 
+        xyz_full_cache = xyz_full
+        img_cache = end_points.get("img", None)
+        img_idxs_cache = end_points.get("img_idxs", None)
+        
         if self.fuse_type == 'intermediate':
             img = end_points['img']              # (B,3,448,448)
             img_idxs = end_points['img_idxs']    # (B,N) flat idx on 448*448
@@ -1318,7 +1573,11 @@ class IGNet(nn.Module):
 
         # ----- graspable head on full scene -----
         end_points = self.objectness(feat_full, end_points)
-        
+
+        obj_prob = None
+        if "objectness_score" in end_points:
+            obj_prob = torch.softmax(end_points["objectness_score"], dim=1)[:, 1]  # (B,N)
+    
         # ----- 方案A：选 M graspable points -----
         with torch.no_grad():
             inds = self._select_M_points(end_points["objectness_score"], xyz_full)
@@ -1332,6 +1591,31 @@ class IGNet(nn.Module):
         end_points["point_clouds"] = xyz_sel
         end_points["D: Graspable Points"] = _as_tensor(float(self.M_points), device)  # 避免 float.item 崩
 
+        # collect stats that help compare cameras
+        stats = {}
+        try:
+            stats["N_full"] = int(xyz_full_cache.shape[1])
+            stats["M_sel"] = int(xyz_sel.shape[1])
+            if obj_prob is not None:
+                stats["obj_prob_mean"] = float(obj_prob.mean().item())
+                stats["obj_prob_p95"]  = float(obj_prob.quantile(0.95).item())
+            span = (xyz_sel.max(dim=1).values - xyz_sel.min(dim=1).values)  # (B,3)
+            stats["sel_span_xyz"] = span[0].detach().cpu().tolist()
+        except Exception:
+            pass
+
+        self._maybe_save_vis(
+            end_points,
+            xyz_full=xyz_full_cache,
+            img=img_cache,
+            img_idxs=img_idxs_cache,
+            obj_prob=obj_prob,
+            inds=inds,
+            xyz_sel=xyz_sel,
+            stats=stats,
+        )
+        self._vis_iter += 1
+        
         # end_points['seed_features'] = seed_features  # (B, seed_feature_dim, num_seed)
         # end_points, rot_features = self.rot_head(seed_features, end_points)
         # seed_features = seed_features + rot_features

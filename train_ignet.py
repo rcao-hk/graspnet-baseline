@@ -66,8 +66,8 @@ setup_seed(0)
 
 # from models.IGNet_v0_8 import IGNet
 # from models.IGNet_loss_v0_8 import get_loss
-# from models.IGNet_v0_9 import IGNet
-from models.IGNet_v0_10 import IGNet
+from models.IGNet_v0_9 import IGNet
+# from models.IGNet_v0_10 import IGNet
 from models.IGNet_loss_v0_9 import get_loss
 from dataset.ignet_multi_dataset import GraspNetDataset, GraspNetMultiDataset, minkowski_collate_fn, collate_fn, load_grasp_labels
 
@@ -133,6 +133,17 @@ def my_worker_init_fn(worker_id):
     np.random.seed(np.random.get_state()[1][0] + worker_id)
     pass
 
+def to_device(x, device, non_blocking=False):
+    """Recursively move tensors to device. Keep non-tensors unchanged."""
+    if torch.is_tensor(x):
+        return x.to(device=device, non_blocking=non_blocking)
+    if isinstance(x, dict):
+        return {k: to_device(v, device, non_blocking) for k, v in x.items()}
+    if isinstance(x, (list, tuple)):
+        return type(x)(to_device(v, device, non_blocking) for v in x)
+    # str / int / float / None / np scalar ... keep as is
+    return x
+
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 torch.cuda.set_device(device)
 
@@ -166,6 +177,7 @@ print(len(TRAIN_DATALOADER), len(TEST_DATALOADER))
 # v0.8
 net = IGNet(m_point=cfgs.m_point, num_view=cfgs.num_view, seed_feat_dim=cfgs.seed_feat_dim, img_feat_dim=cfgs.img_feat_dim, is_training=True, multi_scale_grouping=cfgs.multi_scale_grouping, fuse_type=cfgs.fuse_type)
 net.to(device)
+# net.enable_vis(f"vis/dbg/{cfgs.method_id}/{cfgs.camera}", vis_every=200)
 
 # for param in net.img_backbone.dino.parameters():
 #     param.requires_grad = False
@@ -203,13 +215,7 @@ def train_one_epoch():
     overall_loss = 0
     
     for batch_idx, batch_data_label in enumerate(TRAIN_DATALOADER):
-        for key in batch_data_label:
-            if 'list' in key:
-                for i in range(len(batch_data_label[key])):
-                    for j in range(len(batch_data_label[key][i])):
-                        batch_data_label[key][i][j] = batch_data_label[key][i][j].cuda(non_blocking=cfgs.pin_memory)
-            else:
-                batch_data_label[key] = batch_data_label[key].cuda(non_blocking=cfgs.pin_memory)
+        batch_data_label = to_device(batch_data_label, device, non_blocking=cfgs.pin_memory)
         # Forward pass
         end_points = net(batch_data_label)
         
@@ -249,13 +255,7 @@ def evaluate_one_epoch():
     for batch_idx, batch_data_label in enumerate(TEST_DATALOADER):
         if batch_idx % 10 == 0:
             log_string('Eval batch: %d'%(batch_idx))
-        for key in batch_data_label:
-            if 'list' in key:
-                for i in range(len(batch_data_label[key])):
-                    for j in range(len(batch_data_label[key][i])):
-                        batch_data_label[key][i][j] = batch_data_label[key][i][j].cuda(non_blocking=cfgs.pin_memory)
-            else:
-                batch_data_label[key] = batch_data_label[key].cuda(non_blocking=cfgs.pin_memory)
+        batch_data_label = to_device(batch_data_label, device, non_blocking=cfgs.pin_memory)
         # Forward pass
         with torch.no_grad():
             end_points = net(batch_data_label)
