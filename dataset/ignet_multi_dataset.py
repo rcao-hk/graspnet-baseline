@@ -1134,6 +1134,12 @@ class GraspNetMultiDataset(Dataset):
     def __getitem__(self, index):
         return self.get_data_label(index) if self.load_label else self.get_data(index)
 
+    def get_index_by_scene_frame(self, scene: str, frameid: int):
+        for i, (s, f) in enumerate(zip(self.scenename, self.frameid)):
+            if s == scene and int(f) == int(frameid):
+                return i
+        raise KeyError(f"Cannot find sample: scene={scene}, frameid={frameid}")
+
     def scene_pose_augment(self, images, object_poses, intrinsic, obj_idxs):
         (color, depth, mask) = images
         aug_T = np.eye(4, dtype=np.float32)
@@ -1174,16 +1180,6 @@ class GraspNetMultiDataset(Dataset):
 
         return (color, depth, mask), object_poses, aug_T
 
-    def get_resized_idxs_from_flat(self, flat_idxs, orig_hw):
-        """flat_idxs: flatten indices in original (H*W). -> flatten indices in resized (448*448)."""
-        H, W = orig_hw
-        scale_x = self.resize_shape[1] / W
-        scale_y = self.resize_shape[0] / H
-        ys, xs = np.unravel_index(flat_idxs, (H, W))
-        new_y = np.clip((ys * scale_y).astype(np.int64), 0, self.resize_shape[0] - 1)
-        new_x = np.clip((xs * scale_x).astype(np.int64), 0, self.resize_shape[1] - 1)
-        return (new_y * self.resize_shape[1] + new_x).astype(np.int64)
-
     def point_augment(self, point_clouds, object_poses_list):
         # Flipping along the YZ plane
         if np.random.random() > 0.5:
@@ -1221,27 +1217,46 @@ class GraspNetMultiDataset(Dataset):
             return (depth_mask & workspace_mask)
         return depth_mask
 
+    # def _crop_box_from_mask(self, mask):
+    #     H, W = mask.shape
+    #     ys, xs = np.where(mask)
+    #     if ys.size == 0:
+    #         return 0, 0, W, H
+
+    #     x0, x1 = xs.min(), xs.max() + 1
+    #     y0, y1 = ys.min(), ys.max() + 1
+    #     bw, bh = (x1 - x0), (y1 - y0)
+    #     side = int(max(bw, bh))
+
+    #     cx = (x0 + x1) / 2.0
+    #     cy = (y0 + y1) / 2.0
+
+    #     x0 = int(round(cx - side / 2.0))
+    #     y0 = int(round(cy - side / 2.0))
+    #     x0 = max(0, min(x0, W - side))
+    #     y0 = max(0, min(y0, H - side))
+    #     x1 = x0 + side
+    #     y1 = y0 + side
+    #     return int(x0), int(y0), int(x1), int(y1)
+
     def _crop_box_from_mask(self, mask):
         H, W = mask.shape
         ys, xs = np.where(mask)
         if ys.size == 0:
             return 0, 0, W, H
-
         x0, x1 = xs.min(), xs.max() + 1
         y0, y1 = ys.min(), ys.max() + 1
-        bw, bh = (x1 - x0), (y1 - y0)
-        side = int(max(bw, bh))
-
-        cx = (x0 + x1) / 2.0
-        cy = (y0 + y1) / 2.0
-
-        x0 = int(round(cx - side / 2.0))
-        y0 = int(round(cy - side / 2.0))
-        x0 = max(0, min(x0, W - side))
-        y0 = max(0, min(y0, H - side))
-        x1 = x0 + side
-        y1 = y0 + side
         return int(x0), int(y0), int(x1), int(y1)
+    
+    def get_resized_idxs_from_flat(self, flat_idxs, orig_hw):
+        """flat_idxs: flatten indices in original (H*W). -> flatten indices in resized (448*448)."""
+        H, W = orig_hw
+        scale_x = self.resize_shape[1] / W
+        scale_y = self.resize_shape[0] / H
+        ys, xs = np.unravel_index(flat_idxs, (H, W))
+        new_y = np.clip((ys * scale_y).astype(np.int64), 0, self.resize_shape[0] - 1)
+        new_x = np.clip((xs * scale_x).astype(np.int64), 0, self.resize_shape[1] - 1)
+        return (new_y * self.resize_shape[1] + new_x).astype(np.int64)
 
     def get_resized_idxs_from_flat_crop(self, pix_flat, orig_hw, crop_box, out_hw=(448,448)):
         H, W = orig_hw

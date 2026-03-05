@@ -157,6 +157,38 @@ def get_resized_idxs_from_flat(flat_idxs, orig_shape, resize_shape):
     return (new_y * resize_shape[1] + new_x).astype(np.int64)
 
 
+def crop_box_from_mask(mask):
+    H, W = mask.shape
+    ys, xs = np.where(mask)
+    if ys.size == 0:
+        return 0, 0, W, H
+    x0, x1 = xs.min(), xs.max() + 1
+    y0, y1 = ys.min(), ys.max() + 1
+    return int(x0), int(y0), int(x1), int(y1)
+    
+
+def get_resized_idxs_from_flat_crop(pix_flat, orig_hw, crop_box, out_hw=(448,448)):
+    H, W = orig_hw
+    outH, outW = out_hw
+    x0, y0, x1, y1 = crop_box
+    cw, ch = (x1 - x0), (y1 - y0)
+
+    ys, xs = np.unravel_index(pix_flat, (H, W))
+    xs = xs.astype(np.float32) - float(x0)
+    ys = ys.astype(np.float32) - float(y0)
+
+    # clamp into crop
+    xs = np.clip(xs, 0, cw - 1e-6)
+    ys = np.clip(ys, 0, ch - 1e-6)
+
+    # scale to 448 (use floor to match your model gather)
+    xf = np.floor(xs * (outW / float(cw))).astype(np.int64)
+    yf = np.floor(ys * (outH / float(ch))).astype(np.int64)
+    xf = np.clip(xf, 0, outW - 1)
+    yf = np.clip(yf, 0, outH - 1)
+    return (yf * outW + xf).astype(np.int64)
+    
+    
 def defocus_blur(image, kernel_size=9):
     """
     Apply defocus blur (a type of Gaussian blur) to the image.
@@ -534,7 +566,7 @@ if network_name.startswith('mmgnet'):
     net = IGNet(m_point=cfgs.m_point, num_view=300, seed_feat_dim=cfgs.seed_feat_dim, img_feat_dim=cfgs.img_feat_dim, is_training=False, multi_scale_grouping=cfgs.multi_scale_grouping, fuse_type=cfgs.fuse_type)
 elif network_name.startswith('gsnet'):
     from models.GSNet import GraspNet_multimodal, pred_decode
-    net = GraspNet_multimodal(seed_feat_dim=cfgs.seed_feat_dim, img_feat_dim=64, is_training=False)
+    net = GraspNet_multimodal(seed_feat_dim=cfgs.seed_feat_dim, img_feat_dim=64, is_training=False, fuse_type=cfgs.fuse_type)
     
 pattern = re.compile(rf'(epoch_{ckpt_epoch}_.+\.tar|checkpoint_{ckpt_epoch}\.tar|epoch{ckpt_epoch}\.tar)$')
 ckpt_files = glob.glob(os.path.join(ckpt_root, network_name, cfgs.camera, '*.tar'))
@@ -727,8 +759,14 @@ def inference(scene_idx):
         H, W = depth.shape
         valid_flat = np.flatnonzero(mask)               # (mask_sum,)
         pix_flat = valid_flat[idxs]                     # (num_points,)
-        resized_idxs = get_resized_idxs_from_flat(pix_flat, (H, W), resize_shape)  # (num_points,)
-        img = img_transforms(color)                # full image resized
+        # resized_idxs = get_resized_idxs_from_flat(pix_flat, (H, W), resize_shape)  # (num_points,)
+        # img = img_transforms(color)                # full image resized
+
+        crop_box = crop_box_from_mask(mask)
+        x0, y0, x1, y1 = crop_box
+        color_crop = color[y0:y1, x0:x1].copy()
+        img = img_transforms(color_crop)
+        resized_idxs = get_resized_idxs_from_flat_crop(pix_flat, (H, W), crop_box, resize_shape)
         img = img.to(device)
         
         cloud_tensor = torch.tensor(cloud_sampled, dtype=torch.float32, device=device)
@@ -737,10 +775,6 @@ def inference(scene_idx):
         feats_tensor = torch.ones_like(cloud_tensor).float().to(device)
         
         resized_idxs_tensor = torch.tensor(resized_idxs, dtype=torch.int64, device=device)
-        # coordinates_batch, features_batch = ME.utils.sparse_collate([coors_tensor], [feats_tensor],
-        #                                                             dtype=torch.float32)
-        # coordinates_batch, features_batch, _, quantize2original = ME.utils.sparse_quantize(
-        #     coordinates_batch, features_batch, return_index=True, return_inverse=True, device=device)
 
         batch_data_label = {"point_clouds": cloud_tensor.unsqueeze(0),
                             "cloud_colors": color_tensor.unsqueeze(0),

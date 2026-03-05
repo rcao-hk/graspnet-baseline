@@ -21,7 +21,7 @@ import torch.profiler
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 from torch.utils.tensorboard import SummaryWriter
 from torch.optim.lr_scheduler import ExponentialLR, MultiStepLR, CosineAnnealingLR
 
@@ -164,6 +164,39 @@ TRAIN_DATALOADER = DataLoader(TRAIN_DATASET, batch_size=cfgs.batch_size, shuffle
 TEST_DATALOADER = DataLoader(TEST_DATASET, batch_size=cfgs.batch_size, shuffle=False,
     num_workers=cfgs.worker_num, worker_init_fn=my_worker_init_fn, collate_fn=collate_fn, pin_memory=cfgs.pin_memory)
 
+# debug_target = "scene_0036_98"   # or None
+# if debug_target is not None:
+#     # parse "scene_0036_98" -> scene="scene_0036", frameid=98
+#     scene_name, frame_str = debug_target.rsplit("_", 1)
+#     frame_id = int(frame_str)
+
+#     debug_idx = TRAIN_DATASET.get_index_by_scene_frame(scene_name, frame_id)
+#     print(f"[DEBUG] Restrict training to {scene_name}, frame {frame_id}, dataset idx={debug_idx}")
+
+#     TRAIN_DATASET = Subset(TRAIN_DATASET, [debug_idx])
+
+#     TRAIN_DATALOADER = DataLoader(
+#         TRAIN_DATASET,
+#         batch_size=1,
+#         shuffle=False,
+#         num_workers=0,   # debug 时建议 0，最稳
+#         collate_fn=collate_fn,
+#         pin_memory=cfgs.pin_memory
+#     )
+#     TEST_DATALOADER = DataLoader(TEST_DATASET, batch_size=1, shuffle=False,
+#     num_workers=0, collate_fn=collate_fn, pin_memory=cfgs.pin_memory)
+# else:
+#     TRAIN_DATALOADER = DataLoader(
+#         TRAIN_DATASET,
+#         batch_size=cfgs.batch_size,
+#         shuffle=True,
+#         num_workers=cfgs.worker_num,
+#         worker_init_fn=my_worker_init_fn,
+#         collate_fn=collate_fn,
+#         pin_memory=cfgs.pin_memory
+#     )
+#     TEST_DATALOADER = DataLoader(TEST_DATASET, batch_size=cfgs.batch_size, shuffle=False,
+#     num_workers=cfgs.worker_num, worker_init_fn=my_worker_init_fn, collate_fn=collate_fn, pin_memory=cfgs.pin_memory)
 print(len(TRAIN_DATALOADER), len(TEST_DATALOADER))
 
 # Init the model and optimzier
@@ -177,7 +210,7 @@ print(len(TRAIN_DATALOADER), len(TEST_DATALOADER))
 # v0.8
 net = IGNet(m_point=cfgs.m_point, num_view=cfgs.num_view, seed_feat_dim=cfgs.seed_feat_dim, img_feat_dim=cfgs.img_feat_dim, is_training=True, multi_scale_grouping=cfgs.multi_scale_grouping, fuse_type=cfgs.fuse_type)
 net.to(device)
-# net.enable_vis(f"vis/dbg/{cfgs.method_id}/{cfgs.camera}", vis_every=200)
+net.enable_vis(f"vis/dbg/{cfgs.method_id}/{cfgs.camera}", vis_every=1000)
 
 # for param in net.img_backbone.dino.parameters():
 #     param.requires_grad = False
