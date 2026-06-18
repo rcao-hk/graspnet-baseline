@@ -1158,7 +1158,13 @@ class IGNet(nn.Module):
                 return_pyramid=True,
                 pretrained=True
             )
-
+            # self.img_backbone = PSPNet(sizes=(1, 2, 3, 6), psp_size=2048, 
+            #     backend='resnext50_32x4d',
+            #     pretrained=True,
+            #     return_pyramid=True,
+            #     out_dim=img_feat_dim,
+            #     deep_features_size=img_feat_dim,
+            # )
             self.point_backbone = MinkUNet14D_InterFuse(
                 in_channels_3d=3,           # 你 3D feats 的通道
                 out_channels=self.seed_feature_dim,
@@ -1658,30 +1664,207 @@ class IGNet(nn.Module):
         return end_points
 
 
+# @torch.no_grad()
+# def process_grasp_labels_scene(end_points, GRASP_MAX_WIDTH=0.10, top_rot_inds=None):
+#     """
+#     生成 scene-level label，并把 match_grasp_view_and_label 的“top rot 切片 + log 归一化”合并进来。
+#     输出：
+#       - batch_grasp_score_full: (B,M,V,A,D)
+#       - batch_grasp_width_full: (B,M,V,A,D)
+#       - batch_grasp_rot_graspness: (B,M,V*A)
+#       - gt_top_rot_inds: (B,M)
+#       - batch_grasp_score: (B,M,D)   (top rot slice + log normalize)
+#       - batch_grasp_width: (B,M,D)
+#       - grasp_top_rot_mat_pred: (B,M,3,3)  # grasp_rot[pred_top]
+#       - grasp_top_rot_mat_gt:   (B,M,3,3)  # grasp_rot[gt_top]
+#     依赖 end_points：
+#       object_poses_list / grasp_points_list / grasp_offsets_list / grasp_labels_list
+#       point_clouds: (B,M,3)
+#     """
+#     device = end_points["point_clouds"].device
+#     seed_xyzs = end_points["point_clouds"]  # (B,M,3)
+#     B, M, _ = seed_xyzs.shape
+
+#     # 全局常量（你文件开头定义的）
+#     # grasp_rot: (V*A,3,3)  !!! 必须是 flatten 后的
+#     # NUM_VIEW, NUM_ANGLE, NUM_DEPTH
+#     assert grasp_rot.dim() == 3 and grasp_rot.shape[-2:] == (3, 3), "grasp_rot must be (V*A,3,3)"
+#     VA = NUM_VIEW * NUM_ANGLE
+#     assert grasp_rot.shape[0] == VA, f"grasp_rot first dim must be V*A={VA}"
+
+#     grasp_views = generate_grasp_views(NUM_VIEW).to(device)   # (V,3)
+#     grasp_views_ = grasp_views.unsqueeze(0)                   # (1,V,3)
+
+#     batch_scores_full = []
+#     batch_widths_full = []
+#     batch_rot_graspness = []
+#     batch_gt_top = []
+
+#     for i in range(B):
+#         seed_xyz = seed_xyzs[i]  # (M,3)
+
+#         poses_list = end_points["object_poses_list"][i]
+#         pts_list   = end_points["grasp_points_list"][i]
+#         off_list   = end_points["grasp_offsets_list"][i]   # widths: (P,V,A,D)
+#         lab_list   = end_points["grasp_labels_list"][i]    # scores: (P,V,A,D)
+
+#         if len(poses_list) == 0:
+#             scores_i = torch.zeros((M, NUM_VIEW, NUM_ANGLE, NUM_DEPTH), device=device)
+#             widths_i = torch.zeros((M, NUM_VIEW, NUM_ANGLE, NUM_DEPTH), device=device)
+#             rot_g_i  = torch.zeros((M, VA), device=device)
+#             batch_scores_full.append(scores_i)
+#             batch_widths_full.append(widths_i)
+#             batch_rot_graspness.append(rot_g_i)
+#             batch_gt_top.append(torch.zeros((M,), dtype=torch.long, device=device))
+#             continue
+
+#         all_points_trans, all_scores_aligned, all_widths_aligned = [], [], []
+
+#         for pose, gpts, gwidths, gscores in zip(poses_list, pts_list, off_list, lab_list):
+#             pose = torch.as_tensor(pose, dtype=torch.float32, device=device)
+#             if pose.shape == (4, 4):
+#                 R = pose[:3, :3]
+#                 pose3x4 = pose[:3, :]
+#             else:
+#                 R = pose[:3, :3]
+#                 pose3x4 = pose
+
+#             gpts    = torch.as_tensor(gpts, dtype=torch.float32, device=device)     # (P,3)
+#             gwidths = torch.as_tensor(gwidths, dtype=torch.float32, device=device)  # (P,V,A,D)
+#             gscores = torch.as_tensor(gscores, dtype=torch.float32, device=device)  # (P,V,A,D)
+
+#             # (1) grasp points -> scene/cam
+#             gpts_trans = transform_point_cloud(gpts, pose3x4, "3x4")  # (P,3)
+
+#             # (2) view re-index：把 “旋转后的 view” 映射回模板 view index
+#             grasp_views_trans = transform_point_cloud(grasp_views, R, "3x3")  # (V,3)
+#             _, view_inds, _ = knn_points(grasp_views_, grasp_views_trans.unsqueeze(0), K=1)
+#             view_inds = view_inds.squeeze(-1).squeeze(0)  # (V,)
+
+#             # (3) (V,A,3,3) rot set in cam, reorder by view_inds
+#             rot_cam = torch.matmul(R.unsqueeze(0), grasp_rot.to(device))      # (VA,3,3)
+#             rot_cam = rot_cam.view(NUM_VIEW, NUM_ANGLE, 3, 3)
+#             rot_cam = torch.index_select(rot_cam, 0, view_inds)               # (V,A,3,3)
+
+#             gscores = torch.index_select(gscores, 1, view_inds)               # (P,V,A,D)
+#             gwidths = torch.index_select(gwidths, 1, view_inds)               # (P,V,A,D)
+
+#             # (4) angle 对齐（你给的 align_angle_index）
+#             # 注意：这里必须传 flatten 的 grasp_rot (VA,3,3)
+#             _, gscores, gwidths = align_angle_index(grasp_rot.to(device), rot_cam, gscores, gwidths)
+
+#             all_points_trans.append(gpts_trans)
+#             all_scores_aligned.append(gscores)
+#             all_widths_aligned.append(gwidths)
+
+#         all_points_trans   = torch.cat(all_points_trans, dim=0)     # (Ptot,3)
+#         all_scores_aligned = torch.cat(all_scores_aligned, dim=0)   # (Ptot,V,A,D)
+#         all_widths_aligned = torch.cat(all_widths_aligned, dim=0)   # (Ptot,V,A,D)
+
+#         # (5) seed point -> nearest anchor
+#         _, nn_inds, _ = knn_points(seed_xyz.unsqueeze(0), all_points_trans.unsqueeze(0), K=1)
+#         nn_inds = nn_inds.squeeze(-1).squeeze(0)                    # (M,)
+
+#         scores_i = all_scores_aligned.index_select(0, nn_inds)      # (M,V,A,D)
+#         widths_i = all_widths_aligned.index_select(0, nn_inds)      # (M,V,A,D)
+
+#         # valid mask
+#         valid = (scores_i > 0) & (widths_i <= GRASP_MAX_WIDTH)
+#         scores_i = scores_i.clone()
+#         widths_i = widths_i.clone()
+#         scores_i[~valid] = 0
+
+#         # rot graspness label (M, V*A)
+#         rot_mask = (scores_i <= 0.6) & (scores_i > 0)               # (M,V,A,D)
+#         rot_g = rot_mask.float().mean(dim=-1).view(M, -1)           # (M,VA)
+#         rot_g = normalize_tensor(rot_g)
+
+#         gt_top = rot_g.argmax(dim=-1)                               # (M,)
+#         batch_gt_top.append(gt_top)
+
+#         batch_scores_full.append(scores_i)
+#         batch_widths_full.append(widths_i)
+#         batch_rot_graspness.append(rot_g)
+
+#     # stack full labels
+#     end_points["batch_grasp_score_full"] = torch.stack(batch_scores_full, dim=0)     # (B,M,V,A,D)
+#     end_points["batch_grasp_width_full"] = torch.stack(batch_widths_full, dim=0)     # (B,M,V,A,D)
+#     end_points["batch_grasp_rot_graspness"] = torch.stack(batch_rot_graspness, dim=0)  # (B,M,VA)
+#     end_points["gt_top_rot_inds"] = torch.stack(batch_gt_top, dim=0)                 # (B,M)
+
+#     # ---------- integrate match logic: slice top rot -> (B,M,D) ----------
+#     if top_rot_inds is None:
+#         # 默认用 pred 的话你传进来；否则就用 GT top
+#         top_rot_inds = end_points["gt_top_rot_inds"]
+#     end_points["top_rot_inds_for_label"] = top_rot_inds
+
+#     scores_full = end_points["batch_grasp_score_full"]   # (B,M,V,A,D)
+#     widths_full = end_points["batch_grasp_width_full"]   # (B,M,V,A,D)
+#     B, M, V, A, D = scores_full.shape
+#     scores_flat = scores_full.view(B, M, V * A, D)
+#     widths_flat = widths_full.view(B, M, V * A, D)
+
+#     idx = top_rot_inds.view(B, M, 1, 1).expand(-1, -1, 1, D)  # gather along rot dim
+#     top_scores = torch.gather(scores_flat, 2, idx).squeeze(2)  # (B,M,D)
+#     top_widths = torch.gather(widths_flat, 2, idx).squeeze(2)  # (B,M,D)
+
+#     # log normalize (按你原 match 的写法)
+#     u_max = top_scores.max()
+#     po_mask = top_scores > 0
+#     if po_mask.any() and float(u_max.item()) > 0:
+#         u_min = top_scores[po_mask].min()
+#         denom = torch.log(u_max / u_min + 1e-8) + 1e-8
+#         top_scores = top_scores.clone()
+#         top_scores[po_mask] = torch.log(u_max / top_scores[po_mask]) / denom
+
+#     end_points["batch_grasp_score"] = top_scores  # (B,M,D)
+#     end_points["batch_grasp_width"] = top_widths  # (B,M,D)
+
+#     # ---------- provide rot mats for crop without batch_grasp_rot ----------
+#     end_points["grasp_top_rot_mat_pred"] = grasp_rot.to(device)[end_points["grasp_top_rot_inds"]] \
+#         if "grasp_top_rot_inds" in end_points else None
+#     end_points["grasp_top_rot_mat_gt"] = grasp_rot.to(device)[end_points["gt_top_rot_inds"]]  # (B,M,3,3)
+
+#     return end_points
+
+
 @torch.no_grad()
 def process_grasp_labels_scene(end_points, GRASP_MAX_WIDTH=0.10, top_rot_inds=None):
     """
     生成 scene-level label，并把 match_grasp_view_and_label 的“top rot 切片 + log 归一化”合并进来。
+
     输出：
-      - batch_grasp_score_full: (B,M,V,A,D)
-      - batch_grasp_width_full: (B,M,V,A,D)
-      - batch_grasp_rot_graspness: (B,M,V*A)
-      - gt_top_rot_inds: (B,M)
-      - batch_grasp_score: (B,M,D)   (top rot slice + log normalize)
-      - batch_grasp_width: (B,M,D)
-      - grasp_top_rot_mat_pred: (B,M,3,3)  # grasp_rot[pred_top]
-      - grasp_top_rot_mat_gt:   (B,M,3,3)  # grasp_rot[gt_top]
+      - batch_grasp_score_full:      (B,M,V,A,D)   原始 dense score（invalid 已置 0）
+      - batch_grasp_width_full:      (B,M,V,A,D)
+      - batch_grasp_valid_mask_full: (B,M,V,A,D)   Exp1 需要的 full-target 有效 mask
+      - batch_grasp_rot_graspness:   (B,M,V*A)
+      - gt_top_rot_inds:             (B,M)
+
+      - exp1_full_score:             (B,M,V,A,D)   = batch_grasp_score_full
+      - exp1_full_mask:              (B,M,V,A,D)   = batch_grasp_valid_mask_full
+
+      - batch_grasp_score:           (B,M,D)       top rot slice + log normalize
+      - batch_grasp_width:           (B,M,D)
+
+      - grasp_top_rot_mat_pred:      (B,M,3,3)
+      - grasp_top_rot_mat_gt:        (B,M,3,3)
+
     依赖 end_points：
       object_poses_list / grasp_points_list / grasp_offsets_list / grasp_labels_list
       point_clouds: (B,M,3)
+
+    说明（和 Exp1 相关）：
+      - full dense target 使用的是原始 grasp score 语义（通常是 friction / cost，越小越好）
+      - 因为 invalid 会被置 0，所以 Exp1 一定要同时读取 exp1_full_mask
+      - 因此 Exp1 中应使用:
+            --full_score_key exp1_full_score
+            --full_mask_key  exp1_full_mask
+            --score_mode     graspnet_friction
     """
     device = end_points["point_clouds"].device
     seed_xyzs = end_points["point_clouds"]  # (B,M,3)
     B, M, _ = seed_xyzs.shape
 
-    # 全局常量（你文件开头定义的）
-    # grasp_rot: (V*A,3,3)  !!! 必须是 flatten 后的
-    # NUM_VIEW, NUM_ANGLE, NUM_DEPTH
     assert grasp_rot.dim() == 3 and grasp_rot.shape[-2:] == (3, 3), "grasp_rot must be (V*A,3,3)"
     VA = NUM_VIEW * NUM_ANGLE
     assert grasp_rot.shape[0] == VA, f"grasp_rot first dim must be V*A={VA}"
@@ -1691,6 +1874,7 @@ def process_grasp_labels_scene(end_points, GRASP_MAX_WIDTH=0.10, top_rot_inds=No
 
     batch_scores_full = []
     batch_widths_full = []
+    batch_valid_full = []          # NEW
     batch_rot_graspness = []
     batch_gt_top = []
 
@@ -1705,9 +1889,12 @@ def process_grasp_labels_scene(end_points, GRASP_MAX_WIDTH=0.10, top_rot_inds=No
         if len(poses_list) == 0:
             scores_i = torch.zeros((M, NUM_VIEW, NUM_ANGLE, NUM_DEPTH), device=device)
             widths_i = torch.zeros((M, NUM_VIEW, NUM_ANGLE, NUM_DEPTH), device=device)
+            valid_i  = torch.zeros((M, NUM_VIEW, NUM_ANGLE, NUM_DEPTH), dtype=torch.bool, device=device)  # NEW
             rot_g_i  = torch.zeros((M, VA), device=device)
+
             batch_scores_full.append(scores_i)
             batch_widths_full.append(widths_i)
+            batch_valid_full.append(valid_i)   # NEW
             batch_rot_graspness.append(rot_g_i)
             batch_gt_top.append(torch.zeros((M,), dtype=torch.long, device=device))
             continue
@@ -1743,8 +1930,7 @@ def process_grasp_labels_scene(end_points, GRASP_MAX_WIDTH=0.10, top_rot_inds=No
             gscores = torch.index_select(gscores, 1, view_inds)               # (P,V,A,D)
             gwidths = torch.index_select(gwidths, 1, view_inds)               # (P,V,A,D)
 
-            # (4) angle 对齐（你给的 align_angle_index）
-            # 注意：这里必须传 flatten 的 grasp_rot (VA,3,3)
+            # (4) angle 对齐
             _, gscores, gwidths = align_angle_index(grasp_rot.to(device), rot_cam, gscores, gwidths)
 
             all_points_trans.append(gpts_trans)
@@ -1763,12 +1949,21 @@ def process_grasp_labels_scene(end_points, GRASP_MAX_WIDTH=0.10, top_rot_inds=No
         widths_i = all_widths_aligned.index_select(0, nn_inds)      # (M,V,A,D)
 
         # valid mask
-        valid = (scores_i > 0) & (widths_i <= GRASP_MAX_WIDTH)
+        # 注意：
+        #   scores_i > 0       表示该 grasp label 在原始标注中有效
+        #   widths_i <= max    表示夹爪宽度可行
+        valid = (scores_i > 0) & (widths_i <= GRASP_MAX_WIDTH)      # (M,V,A,D)
+
+        # 保存一个 full valid mask 给 Exp1
+        valid_i = valid.clone()
+
+        # invalid 位置分数置 0（保持你原本的训练逻辑）
         scores_i = scores_i.clone()
         widths_i = widths_i.clone()
         scores_i[~valid] = 0
 
         # rot graspness label (M, V*A)
+        # 这里继承你原本的定义：统计 score 落在 (0, 0.6] 的比例
         rot_mask = (scores_i <= 0.6) & (scores_i > 0)               # (M,V,A,D)
         rot_g = rot_mask.float().mean(dim=-1).view(M, -1)           # (M,VA)
         rot_g = normalize_tensor(rot_g)
@@ -1778,23 +1973,30 @@ def process_grasp_labels_scene(end_points, GRASP_MAX_WIDTH=0.10, top_rot_inds=No
 
         batch_scores_full.append(scores_i)
         batch_widths_full.append(widths_i)
+        batch_valid_full.append(valid_i)    # NEW
         batch_rot_graspness.append(rot_g)
 
     # stack full labels
-    end_points["batch_grasp_score_full"] = torch.stack(batch_scores_full, dim=0)     # (B,M,V,A,D)
-    end_points["batch_grasp_width_full"] = torch.stack(batch_widths_full, dim=0)     # (B,M,V,A,D)
-    end_points["batch_grasp_rot_graspness"] = torch.stack(batch_rot_graspness, dim=0)  # (B,M,VA)
-    end_points["gt_top_rot_inds"] = torch.stack(batch_gt_top, dim=0)                 # (B,M)
+    end_points["batch_grasp_score_full"] = torch.stack(batch_scores_full, dim=0)        # (B,M,V,A,D)
+    end_points["batch_grasp_width_full"] = torch.stack(batch_widths_full, dim=0)        # (B,M,V,A,D)
+    end_points["batch_grasp_valid_mask_full"] = torch.stack(batch_valid_full, dim=0)    # (B,M,V,A,D)  NEW
+    end_points["batch_grasp_rot_graspness"] = torch.stack(batch_rot_graspness, dim=0)   # (B,M,VA)
+    end_points["gt_top_rot_inds"] = torch.stack(batch_gt_top, dim=0)                    # (B,M)
+
+    # ---------- Exp1 aliases ----------
+    # 这样前面提供的 inference 脚本可以直接默认读取
+    end_points["exp1_full_score"] = end_points["batch_grasp_score_full"]          # NEW
+    end_points["exp1_full_mask"]  = end_points["batch_grasp_valid_mask_full"]     # NEW
 
     # ---------- integrate match logic: slice top rot -> (B,M,D) ----------
     if top_rot_inds is None:
-        # 默认用 pred 的话你传进来；否则就用 GT top
         top_rot_inds = end_points["gt_top_rot_inds"]
     end_points["top_rot_inds_for_label"] = top_rot_inds
 
     scores_full = end_points["batch_grasp_score_full"]   # (B,M,V,A,D)
     widths_full = end_points["batch_grasp_width_full"]   # (B,M,V,A,D)
     B, M, V, A, D = scores_full.shape
+
     scores_flat = scores_full.view(B, M, V * A, D)
     widths_flat = widths_full.view(B, M, V * A, D)
 
@@ -1802,7 +2004,7 @@ def process_grasp_labels_scene(end_points, GRASP_MAX_WIDTH=0.10, top_rot_inds=No
     top_scores = torch.gather(scores_flat, 2, idx).squeeze(2)  # (B,M,D)
     top_widths = torch.gather(widths_flat, 2, idx).squeeze(2)  # (B,M,D)
 
-    # log normalize (按你原 match 的写法)
+    # log normalize (保持你原来的训练目标)
     u_max = top_scores.max()
     po_mask = top_scores > 0
     if po_mask.any() and float(u_max.item()) > 0:
