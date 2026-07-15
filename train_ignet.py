@@ -14,7 +14,8 @@ sys.path.append(os.path.join(ROOT_DIR, 'pointnet2'))
 # sys.path.append(os.path.join(ROOT_DIR, 'dataset'))
 
 import numpy as np
-from datetime import datetime
+from datetime import datetime, timedelta
+import time
 import argparse
 import torch.profiler
 
@@ -39,13 +40,12 @@ cv2.ocl.setUseOpenCL(False)
 
 import random
 def setup_seed(seed):
-     torch.manual_seed(seed)
-     torch.cuda.manual_seed_all(seed)
-     np.random.seed(seed)
-     random.seed(seed)
-     torch.backends.cudnn.deterministic = True
-# 设置随机数种子
-setup_seed(0)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 # from graspnet import GraspNet, get_loss
 # from models.GSNet import IGNet
@@ -77,7 +77,7 @@ parser.add_argument('--big_file_root', default=None, help='Big file root')
 parser.add_argument('--camera', default='realsense', help='Camera split [realsense/kinect]')
 parser.add_argument('--resume_checkpoint', default=None, help='Model checkpoint path [default: None]')
 parser.add_argument('--ckpt_root', default='/media/gpuadmin/rcao/result/ignet', help='Checkpoint dir to save model [default: log]')
-parser.add_argument('--method_id', default='ignet_v0.8.2.x', help='Method version')
+parser.add_argument('--method_id', default='ignet_v0.9', help='Method/version identifier used for logs and checkpoints')
 parser.add_argument('--log_root', default='log', help='Log dir to save log [default: log]')
 parser.add_argument('--num_point', type=int, default=20000, help='Point Number [default: 20000]')
 parser.add_argument('--m_point', type=int, default=1024, help='Number of sampled points for grasp prediction [default: 1024]')
@@ -90,7 +90,7 @@ parser.add_argument('--num_view', type=int, default=300, help='View Number [defa
 parser.add_argument('--max_epoch', type=int, default=61, help='Epoch to run [default: 61]')
 parser.add_argument('--eval_start_epoch', type=int, default=0, help='Epoch to start evaluation [default: 0]')
 parser.add_argument('--lr_sched', default=False, action='store_true')
-parser.add_argument('--lr_sched_period', type=int, default=16, help='T_max of cosine learing rate scheduler [default: 16]')
+parser.add_argument('--lr_sched_period', type=int, default=16, help='T_max of CosineAnnealingLR; set >= max_epoch for one-way decay')
 parser.add_argument('--batch_size', type=int, default=20, help='Batch Size during training [default: 2]')
 parser.add_argument('--learning_rate', type=float, default=0.002, help='Initial learning rate [default: 0.002]')
 parser.add_argument('--worker_num', type=int, default=18, help='Worker number for dataloader [default: 4]')
@@ -98,16 +98,26 @@ parser.add_argument('--ckpt_save_interval', type=int, default=5, help='Number fo
 parser.add_argument('--weight_decay', type=float, default=0.0, help='Optimization L2 weight decay [default: 0]')
 parser.add_argument('--inst_denoise', default=False, action='store_true', help='Denoise instance points during training and testing [default: False]')
 parser.add_argument('--pin_memory', action='store_true', help='Set pin_memory for faster training [default: False]')
+parser.add_argument('--seed', type=int, default=0, help='Random seed [default: 0]')
+parser.add_argument('--log_interval', type=int, default=10, help='Batches between progress/ETA logs [default: 10]')
 # parser.add_argument('--multi_modal_pose_augment', action='store_true', help='Set multi_modal_pose_augment for multi-modal consistent pose augmentation [default: False]')
 # parser.add_argument('--pose_augment', action='store_true', help='Set pose_augment for pose augmentation [default: False]')
 parser.add_argument('--augment', action='store_true', help='Set point_augment for point cloud augmentation [default: False]')
 parser.add_argument('--multi_scale_grouping', action='store_true', help='Multi-scale grouping [default: False]')
-parser.add_argument('--fuse_type', default='early', help='Fusion type [none/concat/add/gate/early]')
+parser.add_argument('--fuse_type', default='intermediate', choices=['none', 'concat', 'add', 'gate', 'early', 'direct', 'intermediate'], help='Fusion type')
+parser.add_argument('--grouping_type', default='rectangular', choices=['rectangular', 'cylinder'], help='Grouping type')
 # parser.add_argument('--bn_decay_step', type=int, default=2, help='Period of BN decay (in epochs) [default: 2]')
 # parser.add_argument('--bn_decay_rate', type=float, default=0.5, help='Decay rate for BN decay [default: 0.5]')
 # parser.add_argument('--lr_decay_steps', default='8,12,16', help='When to decay the learning rate (in epochs) [default: 8,12,16]')
 # parser.add_argument('--lr_decay_rates', default='0.1,0.1,0.1', help='Decay rates for lr decay [default: 0.1,0.1,0.1]')
 cfgs = parser.parse_args()
+if cfgs.log_interval <= 0:
+    parser.error('--log_interval must be positive')
+if cfgs.ckpt_save_interval <= 0:
+    parser.error('--ckpt_save_interval must be positive')
+if cfgs.grouping_type == 'cylinder' and cfgs.multi_scale_grouping:
+    print('[WARNING] cylinder grouping ignores crop_size, so multi-scale crop sizes do not change the queried region.')
+setup_seed(cfgs.seed)
 
 # ------------------------------------------------------------------------- GLOBAL CONFIG BEG
 
@@ -122,16 +132,39 @@ CHECKPOINT_PATH = cfgs.resume_checkpoint if cfgs.resume_checkpoint is not None \
     else DEFAULT_CHECKPOINT_PATH
 
 LOG_FOUT = open(os.path.join(cfgs.log_dir, 'log_train.txt'), 'a')
-LOG_FOUT.write(str(cfgs)+'\n')
+LOG_FOUT.write(str(cfgs) + '\n')
+
+
 def log_string(out_str):
-    LOG_FOUT.write(out_str+'\n')
+    LOG_FOUT.write(out_str + '\n')
     LOG_FOUT.flush()
     print(out_str)
 
-# Init datasets and dataloaders 
+
+def format_duration(seconds):
+    """Format a duration for compact progress logs."""
+    if seconds is None or not np.isfinite(seconds):
+        return 'unknown'
+    return str(timedelta(seconds=max(0, int(round(seconds)))))
+
+
+def format_eta(seconds):
+    """Return remaining duration and estimated wall-clock finish time."""
+    if seconds is None or not np.isfinite(seconds):
+        return 'ETA unknown'
+    finish_time = datetime.now() + timedelta(seconds=max(0.0, float(seconds)))
+    return '{} (finish {})'.format(
+        format_duration(seconds), finish_time.strftime('%Y-%m-%d %H:%M:%S')
+    )
+
+
+# Init datasets and dataloaders
 def my_worker_init_fn(worker_id):
-    np.random.seed(np.random.get_state()[1][0] + worker_id)
-    pass
+    # DataLoader assigns each worker a distinct torch seed. Reuse it for
+    # numpy/python RNGs so augmentations are reproducible and non-identical.
+    worker_seed = torch.initial_seed() % (2 ** 32)
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
 
 def to_device(x, device, non_blocking=False):
     """Recursively move tensors to device. Keep non-tensors unchanged."""
@@ -144,8 +177,10 @@ def to_device(x, device, non_blocking=False):
     # str / int / float / None / np scalar ... keep as is
     return x
 
-device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-torch.cuda.set_device(device)
+if not torch.cuda.is_available():
+    raise RuntimeError('IGNet training requires a CUDA-capable GPU.')
+device = torch.device('cuda:0')
+torch.cuda.set_device(0)
 
 # Create Dataset and Dataloader
 valid_obj_idxs, grasp_labels = load_grasp_labels(cfgs.big_file_root if cfgs.big_file_root is not None else cfgs.dataset_root)
@@ -159,10 +194,20 @@ print(len(TRAIN_DATASET), len(TEST_DATASET))
 # TEST_DATALOADER = DataLoader(TEST_DATASET, batch_size=cfgs.batch_size, shuffle=False,
 #     num_workers=cfgs.worker_num, worker_init_fn=my_worker_init_fn, collate_fn=minkowski_collate_fn)
 
-TRAIN_DATALOADER = DataLoader(TRAIN_DATASET, batch_size=cfgs.batch_size, shuffle=True,
-    num_workers=cfgs.worker_num, worker_init_fn=my_worker_init_fn, collate_fn=collate_fn, pin_memory=cfgs.pin_memory)
-TEST_DATALOADER = DataLoader(TEST_DATASET, batch_size=cfgs.batch_size, shuffle=False,
-    num_workers=cfgs.worker_num, worker_init_fn=my_worker_init_fn, collate_fn=collate_fn, pin_memory=cfgs.pin_memory)
+train_loader_generator = torch.Generator()
+train_loader_generator.manual_seed(cfgs.seed)
+
+TRAIN_DATALOADER = DataLoader(
+    TRAIN_DATASET, batch_size=cfgs.batch_size, shuffle=True,
+    num_workers=cfgs.worker_num, worker_init_fn=my_worker_init_fn,
+    collate_fn=collate_fn, pin_memory=cfgs.pin_memory,
+    generator=train_loader_generator,
+)
+TEST_DATALOADER = DataLoader(
+    TEST_DATASET, batch_size=cfgs.batch_size, shuffle=False,
+    num_workers=cfgs.worker_num, worker_init_fn=my_worker_init_fn,
+    collate_fn=collate_fn, pin_memory=cfgs.pin_memory,
+)
 
 # debug_target = "scene_0036_98"   # or None
 # if debug_target is not None:
@@ -208,9 +253,23 @@ print(len(TRAIN_DATALOADER), len(TEST_DATALOADER))
 # net.to(device)
 
 # v0.8
-net = IGNet(m_point=cfgs.m_point, num_view=cfgs.num_view, seed_feat_dim=cfgs.seed_feat_dim, img_feat_dim=cfgs.img_feat_dim, is_training=True, multi_scale_grouping=cfgs.multi_scale_grouping, fuse_type=cfgs.fuse_type)
+net = IGNet(
+    m_point=cfgs.m_point,
+    num_view=cfgs.num_view,
+    seed_feat_dim=cfgs.seed_feat_dim,
+    img_feat_dim=cfgs.img_feat_dim,
+    is_training=True,
+    multi_scale_grouping=cfgs.multi_scale_grouping,
+    fuse_type=cfgs.fuse_type,
+    grouping_type=cfgs.grouping_type,
+)
 net.to(device)
-net.enable_vis(f"vis/dbg/{cfgs.method_id}/{cfgs.camera}", vis_every=1000)
+if hasattr(net, 'enable_vis'):
+    net.enable_vis(f"vis/dbg/{cfgs.method_id}/{cfgs.camera}", vis_every=1000)
+
+
+def unwrap_model(model):
+    return model.module if hasattr(model, 'module') else model
 
 # for param in net.img_backbone.dino.parameters():
 #     param.requires_grad = False
@@ -223,142 +282,282 @@ if cfgs.lr_sched:
     lr_scheduler = CosineAnnealingLR(optimizer, T_max=cfgs.lr_sched_period, eta_min=1e-4)
 
 # Load checkpoint if there is any
-it = -1 # for the initialize value of `LambdaLR` and `BNMomentumScheduler`
 start_epoch = 0
-if CHECKPOINT_PATH is not None and os.path.isfile(CHECKPOINT_PATH):
-    checkpoint = torch.load(CHECKPOINT_PATH, map_location=device, weights_only=True)
-    net.load_state_dict(checkpoint['model_state_dict'])
-    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-    if cfgs.lr_sched:
-        lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
-    start_epoch = checkpoint['epoch']
-    log_string("-> loaded checkpoint %s (epoch: %d)"%(CHECKPOINT_PATH, start_epoch))
+resume_best_loss = np.inf
+resume_best_epoch = -1
 
+if cfgs.resume_checkpoint is not None and not os.path.isfile(cfgs.resume_checkpoint):
+    raise FileNotFoundError('Requested checkpoint does not exist: {}'.format(cfgs.resume_checkpoint))
+
+if CHECKPOINT_PATH is not None and os.path.isfile(CHECKPOINT_PATH):
+    try:
+        checkpoint = torch.load(CHECKPOINT_PATH, map_location=device, weights_only=True)
+    except TypeError:  # compatibility with older PyTorch releases
+        checkpoint = torch.load(CHECKPOINT_PATH, map_location=device)
+
+    if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+        net.load_state_dict(checkpoint['model_state_dict'])
+        if 'optimizer_state_dict' in checkpoint:
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        if cfgs.lr_sched and 'lr_scheduler' in checkpoint:
+            lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
+        start_epoch = int(checkpoint.get('epoch', 0))
+        resume_best_loss = float(checkpoint.get('best_eval_loss', np.inf))
+        resume_best_epoch = int(checkpoint.get('best_epoch', -1))
+        log_string('-> loaded full checkpoint {} (next epoch: {})'.format(
+            CHECKPOINT_PATH, start_epoch + 1
+        ))
+    else:
+        # Backward compatibility with the old best-checkpoint format, which
+        # stored only model_state_dict. Optimizer/epoch cannot be recovered.
+        net.load_state_dict(checkpoint)
+        log_string('-> loaded model weights only from {}; optimizer and epoch were not restored'.format(
+            CHECKPOINT_PATH
+        ))
+
+if cfgs.lr_sched and cfgs.lr_sched_period < cfgs.max_epoch:
+    log_string(
+        '[WARNING] CosineAnnealingLR with T_max={} and max_epoch={} will increase '
+        'again after epoch {}. Set --lr_sched_period >= --max_epoch for a '
+        'single monotonic cosine decay.'.format(
+            cfgs.lr_sched_period, cfgs.max_epoch, cfgs.lr_sched_period
+        )
+    )
 
 # TensorBoard Visualizers
 log_writer = SummaryWriter(os.path.join(cfgs.log_dir))
 # ------------------------------------------------------------------------- GLOBAL CONFIG END
 
 def train_one_epoch():
-    stat_dict = {} # collect statistics
-    # adjust_learning_rate(optimizer, EPOCH_CNT)
-    # bnm_scheduler.step() # decay BN momentum
-    # set model to training mode
+    stat_dict = {}
+    stat_batch_count = 0
     net.train()
-    overall_loss = 0
-    
+    loss_sum = 0.0
+    batch_count = 0
+    total_batches = len(TRAIN_DATALOADER)
+    phase_start = time.perf_counter()
+    last_batch_end = phase_start
+
     for batch_idx, batch_data_label in enumerate(TRAIN_DATALOADER):
-        batch_data_label = to_device(batch_data_label, device, non_blocking=cfgs.pin_memory)
-        # Forward pass
+        optimizer.zero_grad(set_to_none=True)
+        batch_data_label = to_device(
+            batch_data_label, device, non_blocking=cfgs.pin_memory
+        )
+
         end_points = net(batch_data_label)
-        
-        # Compute loss and gradients, update parameters.
         loss, end_points = get_loss(end_points, device)
         loss.backward()
         optimizer.step()
-        optimizer.zero_grad()
-        # scheduler.step()
-        
-        # Accumulate statistics and print out
-        for key in end_points:
-            if 'loss' in key or 'acc' in key or 'prec' in key or 'recall' in key or 'count' in key:
-                if key not in stat_dict: stat_dict[key] = 0
-                stat_dict[key] += end_points[key].item()
 
-        overall_loss += stat_dict['loss/grasp_loss']
-        # overall_loss += (stat_dict['loss/score_loss'] + stat_dict['loss/width_loss'] + stat_dict['loss/rot_graspness_loss'])
-        batch_interval = 10
-        if (batch_idx+1) % batch_interval == 0:
-            log_string(' ---- batch: %03d ----' % (batch_idx+1))
+        current_loss = float(loss.detach().item())
+        loss_sum += current_loss
+        batch_count += 1
+        stat_batch_count += 1
+
+        for key, value in end_points.items():
+            if ('loss' in key or 'acc' in key or 'prec' in key
+                    or 'recall' in key or 'count' in key):
+                if key not in stat_dict:
+                    stat_dict[key] = 0.0
+                stat_dict[key] += float(value.detach().item())
+
+        now = time.perf_counter()
+        batch_time = now - last_batch_end  # includes data loading + computation
+        last_batch_end = now
+        avg_batch_time = (now - phase_start) / batch_count
+        batches_left = total_batches - batch_count
+        phase_eta = avg_batch_time * batches_left
+
+        should_log = (
+            batch_count % cfgs.log_interval == 0
+            or batch_count == total_batches
+        )
+        if should_log:
+            log_string(
+                ' ---- train batch: {:04d}/{:04d} | batch {:.2f}s | '
+                'elapsed {} | train ETA {} ----'.format(
+                    batch_count, total_batches, batch_time,
+                    format_duration(now - phase_start), format_eta(phase_eta)
+                )
+            )
+            global_step = EPOCH_CNT * total_batches + batch_count
             for key in sorted(stat_dict.keys()):
-                log_writer.add_scalar('train_' + key, stat_dict[key]/batch_interval, (EPOCH_CNT*len(TRAIN_DATALOADER)+batch_idx)*cfgs.batch_size)
-                log_string('mean %s: %f'%(key, stat_dict[key]/batch_interval))
-                stat_dict[key] = 0
-    
-    overall_loss = overall_loss/float(cfgs.batch_size)
-    log_string('overall loss:{}, batch num:{}'.format(overall_loss, batch_idx+1))
-    mean_loss = overall_loss/float(batch_idx+1)
-    return mean_loss
+                mean_value = stat_dict[key] / float(stat_batch_count)
+                log_writer.add_scalar('train_' + key, mean_value, global_step)
+                log_string('mean {}: {:.6f}'.format(key, mean_value))
+            stat_dict.clear()
+            stat_batch_count = 0
+
+    elapsed = time.perf_counter() - phase_start
+    mean_loss = loss_sum / float(max(batch_count, 1))
+    log_string(
+        'train mean loss: {:.6f}, batch num: {}, elapsed: {}'.format(
+            mean_loss, batch_count, format_duration(elapsed)
+        )
+    )
+    return mean_loss, elapsed
+
 
 def evaluate_one_epoch():
-    stat_dict = {} # collect statistics
-    # set model to eval mode (for bn and dp)
+    stat_dict = {}
     net.eval()
-    overall_loss = 0
-    for batch_idx, batch_data_label in enumerate(TEST_DATALOADER):
-        if batch_idx % 10 == 0:
-            log_string('Eval batch: %d'%(batch_idx))
-        batch_data_label = to_device(batch_data_label, device, non_blocking=cfgs.pin_memory)
-        # Forward pass
-        with torch.no_grad():
+    loss_sum = 0.0
+    batch_count = 0
+    total_batches = len(TEST_DATALOADER)
+    phase_start = time.perf_counter()
+    last_batch_end = phase_start
+
+    with torch.no_grad():
+        for batch_idx, batch_data_label in enumerate(TEST_DATALOADER):
+            batch_data_label = to_device(
+                batch_data_label, device, non_blocking=cfgs.pin_memory
+            )
             end_points = net(batch_data_label)
+            loss, end_points = get_loss(end_points, device)
 
-        # Compute loss
-        loss, end_points = get_loss(end_points, device)
+            loss_sum += float(loss.detach().item())
+            batch_count += 1
 
-        # Accumulate statistics and print out
-        for key in end_points:
-            if 'loss' in key or 'acc' in key or 'prec' in key or 'recall' in key or 'count' in key:
-                if key not in stat_dict: stat_dict[key] = 0
-                stat_dict[key] += end_points[key].item()
-    
-        overall_loss += stat_dict['loss/grasp_loss']
-        # overall_loss += (stat_dict['loss/score_loss'] + stat_dict['loss/width_loss'] + stat_dict['loss/rot_graspness_loss'])
+            for key, value in end_points.items():
+                if ('loss' in key or 'acc' in key or 'prec' in key
+                        or 'recall' in key or 'count' in key):
+                    if key not in stat_dict:
+                        stat_dict[key] = 0.0
+                    stat_dict[key] += float(value.detach().item())
+
+            now = time.perf_counter()
+            batch_time = now - last_batch_end
+            last_batch_end = now
+            avg_batch_time = (now - phase_start) / batch_count
+            phase_eta = avg_batch_time * (total_batches - batch_count)
+
+            if (batch_count % cfgs.log_interval == 0
+                    or batch_count == total_batches):
+                log_string(
+                    'Eval batch: {:04d}/{:04d} | batch {:.2f}s | '
+                    'elapsed {} | eval ETA {}'.format(
+                        batch_count, total_batches, batch_time,
+                        format_duration(now - phase_start), format_eta(phase_eta)
+                    )
+                )
+
     for key in sorted(stat_dict.keys()):
-        log_writer.add_scalar('test_' + key, stat_dict[key]/float(batch_idx+1), (EPOCH_CNT+1)*len(TRAIN_DATALOADER)*cfgs.batch_size)
-        log_string('eval mean %s: %f'%(key, stat_dict[key]/(float(batch_idx+1))))
+        mean_value = stat_dict[key] / float(max(batch_count, 1))
+        global_step = (EPOCH_CNT + 1) * len(TRAIN_DATALOADER)
+        log_writer.add_scalar('test_' + key, mean_value, global_step)
+        log_string('eval mean {}: {:.6f}'.format(key, mean_value))
 
-    overall_loss = overall_loss/float(cfgs.batch_size)
-    log_string('overall loss:{}, batch num:{}'.format(overall_loss, batch_idx+1))
-    mean_loss = overall_loss/float(batch_idx+1)
-    return mean_loss
+    elapsed = time.perf_counter() - phase_start
+    mean_loss = loss_sum / float(max(batch_count, 1))
+    log_string(
+        'eval mean loss: {:.6f}, batch num: {}, elapsed: {}'.format(
+            mean_loss, batch_count, format_duration(elapsed)
+        )
+    )
+    return mean_loss, elapsed
 
 
-def train(start_epoch):
-    global EPOCH_CNT 
-    min_loss = np.inf
-    loss = 0
-    best_epoch = 0
+def train(start_epoch, min_loss=np.inf, best_epoch=-1):
+    global EPOCH_CNT
+
+    epoch_times = []
+    run_start = time.perf_counter()
+
     for epoch in range(start_epoch, cfgs.max_epoch):
+        epoch_start = time.perf_counter()
         EPOCH_CNT = epoch
-        log_string('**** EPOCH %03d ****' % (epoch))
+        log_string('**** EPOCH {:03d}/{:03d} ****'.format(epoch + 1, cfgs.max_epoch))
         current_lr = optimizer.param_groups[0]['lr']
-        log_string('Current learning rate: %f' % (current_lr))
-        # log_string('Current BN decay momentum: %f'%(bnm_scheduler.lmbd(bnm_scheduler.last_epoch)))
+        log_string('Current learning rate: {:.8f}'.format(current_lr))
         log_string(str(datetime.now()))
-        # Reset numpy seed.
-        # REF: https://github.com/pytorch/pytorch/issues/5059
-        np.random.seed()
-        train_loss = train_one_epoch()
-        log_writer.add_scalar('training/learning_rate', current_lr, epoch)
-        
-        # Save checkpoint
-        save_dict = {'epoch': epoch+1, # after training one epoch, the start_epoch should be epoch+1
-                    'optimizer_state_dict': optimizer.state_dict()}
-        
-        if cfgs.lr_sched:
-            lr_scheduler.step()
-            save_dict['lr_scheduler'] = lr_scheduler.state_dict()
-        try: # with nn.DataParallel() the net is added as a submodule of DataParallel
-            save_dict['model_state_dict'] = net.module.state_dict()
-        except:
-            save_dict['model_state_dict'] = net.state_dict()
-            
+
+        train_loss, train_elapsed = train_one_epoch()
+        log_writer.add_scalar('training/learning_rate', current_lr, epoch + 1)
+
+        eval_loss = None
+        eval_elapsed = 0.0
+        improved = False
         if epoch >= cfgs.eval_start_epoch:
-            eval_loss = evaluate_one_epoch()
+            eval_loss, eval_elapsed = evaluate_one_epoch()
             if eval_loss < min_loss:
                 min_loss = eval_loss
                 best_epoch = epoch
-                ckpt_name = "epoch_" + str(best_epoch) \
-                            + "_train_" + str(train_loss) \
-                            + "_val_" + str(eval_loss)
-                torch.save(save_dict['model_state_dict'], os.path.join(cfgs.ckpt_dir, ckpt_name + '.tar'))
-            elif not EPOCH_CNT % cfgs.ckpt_save_interval:
-                torch.save(save_dict, os.path.join(cfgs.ckpt_dir, 'checkpoint_{}.tar'.format(EPOCH_CNT)))
-            log_string("best_epoch:{}".format(best_epoch))
-            # if epoch in LR_DECAY_STEPS:
-            #     torch.save(save_dict, os.path.join(cfgs.log_dir, 'checkpoint_{}.tar'.format(epoch)))
+                improved = True
+            log_string(
+                'best epoch: {}, best eval loss: {:.6f}'.format(
+                    best_epoch + 1 if best_epoch >= 0 else 'N/A', min_loss
+                )
+            )
+
+        # Step once after completing this epoch. The saved scheduler state is
+        # therefore ready for the next epoch after resume.
+        if cfgs.lr_sched:
+            lr_scheduler.step()
+
+        model_state_dict = unwrap_model(net).state_dict()
+        save_dict = {
+            'epoch': epoch + 1,
+            'model_state_dict': model_state_dict,
+            'optimizer_state_dict': optimizer.state_dict(),
+            'best_eval_loss': min_loss,
+            'best_epoch': best_epoch,
+            'config': vars(cfgs),
+        }
+        if cfgs.lr_sched:
+            save_dict['lr_scheduler'] = lr_scheduler.state_dict()
+
+        if improved:
+            # Preserve the old model-only file convention for inference, while
+            # also writing a full checkpoint that can truly resume training.
+            ckpt_name = 'epoch_{}_train_{:.6f}_val_{:.6f}'.format(
+                epoch + 1, train_loss, eval_loss
+            )
+            torch.save(
+                model_state_dict,
+                os.path.join(cfgs.ckpt_dir, ckpt_name + '.tar')
+            )
+            torch.save(
+                save_dict,
+                os.path.join(cfgs.ckpt_dir, 'best_checkpoint.tar')
+            )
+
+        if (epoch + 1) % cfgs.ckpt_save_interval == 0:
+            torch.save(
+                save_dict,
+                os.path.join(cfgs.ckpt_dir, 'checkpoint_{}.tar'.format(epoch + 1))
+            )
+
         torch.save(save_dict, os.path.join(cfgs.ckpt_dir, 'checkpoint.tar'))
-        
-if __name__=='__main__':
-    train(start_epoch)
+
+        epoch_elapsed = time.perf_counter() - epoch_start
+        epoch_times.append(epoch_elapsed)
+        avg_epoch_time = float(np.mean(epoch_times[-3:]))
+        remaining_epochs = cfgs.max_epoch - (epoch + 1)
+        total_eta = avg_epoch_time * remaining_epochs
+        run_elapsed = time.perf_counter() - run_start
+
+        log_string(
+            'Epoch {:03d} time: {} (train {}, eval {})'.format(
+                epoch + 1,
+                format_duration(epoch_elapsed),
+                format_duration(train_elapsed),
+                format_duration(eval_elapsed),
+            )
+        )
+        log_string(
+            'Run elapsed: {} | remaining epochs: {} | total ETA: {}'.format(
+                format_duration(run_elapsed), remaining_epochs, format_eta(total_eta)
+            )
+        )
+
+    log_string('Training finished. Total elapsed: {}'.format(
+        format_duration(time.perf_counter() - run_start)
+    ))
+
+
+if __name__ == '__main__':
+    try:
+        train(start_epoch, min_loss=resume_best_loss, best_epoch=resume_best_epoch)
+    finally:
+        log_writer.close()
+        LOG_FOUT.close()

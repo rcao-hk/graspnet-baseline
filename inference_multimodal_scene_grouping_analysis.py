@@ -72,6 +72,9 @@ parser.add_argument('--depth_root',type=str, default='/media/gpuadmin/rcao/resul
 parser.add_argument('--multi_scale_grouping', action='store_true', help='Multi-scale grouping [default: False]')
 parser.add_argument('--fuse_type',type=str, default='early')
 parser.add_argument('--grouping_type', default='rectangular', choices=['rectangular', 'cylinder'], help='Grouping type')
+parser.add_argument('--grouping_nsample', default=None, type=int,
+                    help='Number of local samples used by CloudCrop grouping. '
+                         'Default None keeps the model default: 32 for single-scale grouping and 16 for multi-scale grouping.')
 parser.add_argument('--voxel_size', type=float, default=0.002, help='Voxel Size to quantize point cloud [default: 0.005]')
 parser.add_argument('--collision_voxel_size', type=float, default=0.01, help='Voxel Size to process point clouds before collision detection [default: 0.01]')
 parser.add_argument('--collision_thresh', type=float, default=0.01, help='Collision Threshold in collision detection [default: 0.01]')
@@ -564,7 +567,7 @@ elif data_type == 'noise' and int(cfgs.pc_sparse_level) > 0:
 if network_name.startswith('mmgnet'):
     from models.IGNet_v0_9 import IGNet, pred_decode
     # from models.IGNet_v0_10 import IGNet, pred_decode
-    net = IGNet(m_point=cfgs.m_point, num_view=300, seed_feat_dim=cfgs.seed_feat_dim, img_feat_dim=cfgs.img_feat_dim, is_training=False, multi_scale_grouping=cfgs.multi_scale_grouping, fuse_type=cfgs.fuse_type, grouping_type=cfgs.grouping_type)
+    net = IGNet(m_point=cfgs.m_point, num_view=300, seed_feat_dim=cfgs.seed_feat_dim, img_feat_dim=cfgs.img_feat_dim, is_training=False, multi_scale_grouping=cfgs.multi_scale_grouping, fuse_type=cfgs.fuse_type, grouping_type=cfgs.grouping_type, grouping_nsample=cfgs.grouping_nsample)
 elif network_name.startswith('gsnet'):
     from models.GSNet import GraspNet_multimodal, pred_decode
     net = GraspNet_multimodal(seed_feat_dim=cfgs.seed_feat_dim, img_feat_dim=64, is_training=False, fuse_type=cfgs.fuse_type)
@@ -849,3 +852,14 @@ else:
 # res = []
 for scene_idx in scene_list:
     inference(scene_idx)
+
+if hasattr(net, "get_grouping_timer"):
+    grouping_timer = net.get_grouping_timer(reset=False)
+    timer_path = os.path.join(
+        dump_dir,
+        f"grouping_timer_{cfgs.split}_{cfgs.camera}_{cfgs.grouping_type}_nsample{cfgs.grouping_nsample}.json"
+    )
+    with open(timer_path, "w", encoding="utf-8") as f:
+        json.dump(grouping_timer, f, indent=2, sort_keys=True)
+    print("[GROUPING_TIMER]", json.dumps(grouping_timer, sort_keys=True))
+    print(f"[GROUPING_TIMER] Saved to: {timer_path}")

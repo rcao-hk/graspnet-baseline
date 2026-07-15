@@ -1,4 +1,5 @@
 import numpy as np
+import time
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -15,7 +16,7 @@ sys.path.append(ROOT_DIR)
 
 from pytorch3d.ops.knn import knn_points
 import pointnet2.pytorch_utils as pt_utils
-from pointnet2.pointnet2_utils import RectangularQueryAndGroup, furthest_point_sample, gather_operation
+from pointnet2.pointnet2_utils import RectangularQueryAndGroup, CylinderQueryAndGroup, furthest_point_sample, gather_operation
 from utils.loss_utils import generate_grasp_views, batch_viewpoint_params_to_matrix, batch_get_key_points, transform_point_cloud, GRASPNESS_THRESHOLD, GRASP_MAX_WIDTH, NUM_ANGLE, NUM_VIEW, NUM_DEPTH, M_POINT
 from models.coral_loss import corn_label_from_logits
 from pytorch3d.transforms import rotation_6d_to_matrix, matrix_to_rotation_6d
@@ -164,18 +165,103 @@ psp_models = {
 
 
 class CloudCrop(nn.Module):
-    def __init__(self, nsample, seed_feature_dim, out_dim):
+    def __init__(self, nsample, seed_feature_dim, out_dim,
+                 grouping_type='rectangular', cylinder_radius=0.05,
+                 hmin=-0.02, hmax=0.04):
         super().__init__()
         self.nsample = nsample
         self.in_dim = seed_feature_dim
         self.out_dim = out_dim
+        self.grouping_type = grouping_type
         mlps = [3 + self.in_dim, 256, self.out_dim]   # use xyz, so plus 3
-        self.grouper = RectangularQueryAndGroup(nsample=nsample, use_xyz=True)
+
+        if self.grouping_type == 'rectangular':
+            self.grouper = RectangularQueryAndGroup(nsample=nsample, use_xyz=True)
+        elif self.grouping_type == 'cylinder':
+            self.grouper = CylinderQueryAndGroup(
+                radius=cylinder_radius, hmin=hmin, hmax=hmax, nsample=nsample,
+                use_xyz=True, normalize_xyz=True
+            )
+        else:
+            raise ValueError(
+                f"Unsupported grouping_type={grouping_type!r}; "
+                "expected 'rectangular' or 'cylinder'."
+            )
+
         self.mlps = pt_utils.SharedMLP(mlps, bn=True)
         # self.attnpool = AttentionPool1d(spacial_dim=nsample, embed_dim=256, num_heads=4)
+        self._grouping_timer_enabled = False
+        self._grouping_timer_sync_cuda = True
+        self._grouping_timer_warmup = 0
+        self.reset_grouping_timer()
+
+    def enable_grouping_timer(self, enabled=True, warmup=0, sync_cuda=True, reset=True):
+        self._grouping_timer_enabled = bool(enabled)
+        self._grouping_timer_warmup = max(0, int(warmup))
+        self._grouping_timer_sync_cuda = bool(sync_cuda)
+        if reset:
+            self.reset_grouping_timer()
+
+    def reset_grouping_timer(self):
+        self._grouping_timer_stats = {
+            "grouping_type": self.grouping_type,
+            "count": 0,
+            "warmup_count": 0,
+            "total_ms": 0.0,
+            "last_ms": 0.0,
+            "min_ms": float("inf"),
+            "max_ms": 0.0,
+        }
+
+    def get_grouping_timer(self):
+        stats = dict(self._grouping_timer_stats)
+        count = stats["count"]
+        stats["mean_ms"] = stats["total_ms"] / count if count > 0 else 0.0
+        if count == 0:
+            stats["min_ms"] = 0.0
+        return stats
+
+    def _call_grouper(self, seed_xyz, seed_features, rot, crop_size):
+        if self.grouping_type == 'rectangular':
+            return self.grouper(
+                seed_xyz, seed_xyz, rot, crop_size, seed_features
+            )
+        return self.grouper(
+            seed_xyz, seed_xyz, rot, seed_features
+        )
+
+    def _record_grouping_time(self, elapsed_ms):
+        stats = self._grouping_timer_stats
+        if stats["warmup_count"] < self._grouping_timer_warmup:
+            stats["warmup_count"] += 1
+            return
+        stats["count"] += 1
+        stats["total_ms"] += float(elapsed_ms)
+        stats["last_ms"] = float(elapsed_ms)
+        stats["min_ms"] = min(stats["min_ms"], float(elapsed_ms))
+        stats["max_ms"] = max(stats["max_ms"], float(elapsed_ms))
+
+    def _timed_grouper(self, seed_xyz, seed_features, rot, crop_size):
+        if seed_xyz.is_cuda and self._grouping_timer_sync_cuda:
+            start_event = torch.cuda.Event(enable_timing=True)
+            end_event = torch.cuda.Event(enable_timing=True)
+            start_event.record()
+            grouped_feature = self._call_grouper(seed_xyz, seed_features, rot, crop_size)
+            end_event.record()
+            torch.cuda.synchronize(seed_xyz.device)
+            elapsed_ms = start_event.elapsed_time(end_event)
+        else:
+            start_time = time.perf_counter()
+            grouped_feature = self._call_grouper(seed_xyz, seed_features, rot, crop_size)
+            elapsed_ms = (time.perf_counter() - start_time) * 1000.0
+        self._record_grouping_time(elapsed_ms)
+        return grouped_feature
 
     def forward(self, seed_xyz, seed_features, rot, crop_size):
-        grouped_feature = self.grouper(seed_xyz, seed_xyz, rot, crop_size, seed_features)  # B*3 + feat_dim*M*K
+        if self._grouping_timer_enabled:
+            grouped_feature = self._timed_grouper(seed_xyz, seed_features, rot, crop_size)
+        else:
+            grouped_feature = self._call_grouper(seed_xyz, seed_features, rot, crop_size)
         new_features = self.mlps(grouped_feature)  # (batch_size, mlps[-1], M, nsample) (32, 256, 1024, 32)
         new_features = F.max_pool2d(new_features, kernel_size=[1, new_features.size(3)])  # (batch_size, mlps[-1], M, 1)
     
@@ -1092,7 +1178,8 @@ def _avg_map(xs, ys, vals, H=448, W=448):
    
 class IGNet(nn.Module):
     def __init__(self,  m_point=1024, num_view=300, num_angle=12, num_depth=4, seed_feat_dim=256, img_feat_dim=64, 
-                 is_training=True, multi_scale_grouping=False, fuse_type='early'):
+                 is_training=True, multi_scale_grouping=False, fuse_type='early',
+                 grouping_type='rectangular', grouping_nsample=None):
         super().__init__()
         self.is_training = is_training
         self.seed_feature_dim = seed_feat_dim
@@ -1101,6 +1188,8 @@ class IGNet(nn.Module):
         self.num_angle = num_angle
         self.num_view = num_view
         self.multi_scale_grouping = multi_scale_grouping
+        self.grouping_type = grouping_type
+        self.grouping_nsample = None if grouping_nsample is None else int(grouping_nsample)
         self.M_points = m_point
         assert self.num_view == NUM_VIEW and self.num_angle == NUM_ANGLE and self.num_depth == NUM_DEPTH
         self.fuse_type = fuse_type
@@ -1205,19 +1294,28 @@ class IGNet(nn.Module):
         
         if self.multi_scale_grouping:
             feat_dim = self.seed_feature_dim + self.img_feature_dim
+            crop_nsample = 16 if self.grouping_nsample is None else self.grouping_nsample
             self.crop_scales = [0.25, 0.5, 0.75, 1.0]
             self.multi_scale_fuse = nn.Conv1d(feat_dim * 4, feat_dim, 1)
             self.multi_scale_gate = nn.Sequential(
                 nn.Conv1d(feat_dim, feat_dim, 1),
                 nn.Sigmoid()
             )
-            self.crop1 = CloudCrop(nsample=16, seed_feature_dim=feat_dim, out_dim=self.seed_feature_dim)
-            self.crop2 = CloudCrop(nsample=16, seed_feature_dim=feat_dim, out_dim=self.seed_feature_dim)
-            self.crop3 = CloudCrop(nsample=16, seed_feature_dim=feat_dim, out_dim=self.seed_feature_dim)
-            self.crop4 = CloudCrop(nsample=16, seed_feature_dim=feat_dim, out_dim=self.seed_feature_dim)
+            self.crop1 = CloudCrop(nsample=crop_nsample, seed_feature_dim=feat_dim, out_dim=self.seed_feature_dim,
+                                   grouping_type=self.grouping_type)
+            self.crop2 = CloudCrop(nsample=crop_nsample, seed_feature_dim=feat_dim, out_dim=self.seed_feature_dim,
+                                   grouping_type=self.grouping_type)
+            self.crop3 = CloudCrop(nsample=crop_nsample, seed_feature_dim=feat_dim, out_dim=self.seed_feature_dim,
+                                   grouping_type=self.grouping_type)
+            self.crop4 = CloudCrop(nsample=crop_nsample, seed_feature_dim=feat_dim, out_dim=self.seed_feature_dim,
+                                   grouping_type=self.grouping_type)
             self.crop_op_list = [self.crop1, self.crop2, self.crop3, self.crop4]
         else:
-            self.crop = CloudCrop(nsample=32, seed_feature_dim=self.seed_feature_dim + self.img_feature_dim, out_dim=self.seed_feature_dim)
+            crop_nsample = 32 if self.grouping_nsample is None else self.grouping_nsample
+            self.crop = CloudCrop(nsample=crop_nsample,
+                                  seed_feature_dim=self.seed_feature_dim + self.img_feature_dim,
+                                  out_dim=self.seed_feature_dim,
+                                  grouping_type=self.grouping_type)
 
         self.vis_dir = None
         self.vis_every = 200
@@ -1250,6 +1348,91 @@ class IGNet(nn.Module):
         self.max_points_ply = int(max_points_ply)
         self._vis_iter = 0
         _ensure_dir(self.vis_dir)
+
+    def _iter_crop_modules(self):
+        if self.multi_scale_grouping:
+            return list(self.crop_op_list)
+        return [self.crop]
+
+    def enable_grouping_timer(self, enabled=True, warmup=10, sync_cuda=True, reset=True):
+        """
+        Enable timing for the grouping operator inside CloudCrop.
+
+        With sync_cuda=True, CUDA event timing is used and the measured value is
+        the actual GPU elapsed time for RectangularQueryAndGroup/CylinderQueryAndGroup.
+        This intentionally synchronizes CUDA and should only be used for profiling.
+        """
+        for crop_op in self._iter_crop_modules():
+            crop_op.enable_grouping_timer(
+                enabled=enabled,
+                warmup=warmup,
+                sync_cuda=sync_cuda,
+                reset=reset,
+            )
+        return self
+
+    def reset_grouping_timer(self):
+        for crop_op in self._iter_crop_modules():
+            crop_op.reset_grouping_timer()
+
+    def get_grouping_timer(self, reset=False):
+        """
+        Return aggregated grouping time stats in milliseconds.
+
+        The result always contains both keys, so logs are easy to compare across
+        rectangular and cylinder variants. Only the active grouping type will have
+        non-zero counts for a single model instance.
+        """
+        stats = {
+            "rectangular": {
+                "count": 0,
+                "warmup_count": 0,
+                "total_ms": 0.0,
+                "mean_ms": 0.0,
+                "last_ms": 0.0,
+                "min_ms": 0.0,
+                "max_ms": 0.0,
+                "num_modules": 0,
+            },
+            "cylinder": {
+                "count": 0,
+                "warmup_count": 0,
+                "total_ms": 0.0,
+                "mean_ms": 0.0,
+                "last_ms": 0.0,
+                "min_ms": 0.0,
+                "max_ms": 0.0,
+                "num_modules": 0,
+            },
+        }
+
+        for crop_op in self._iter_crop_modules():
+            cur = crop_op.get_grouping_timer()
+            key = cur["grouping_type"]
+            dst = stats[key]
+            prev_count = dst["count"]
+            cur_count = cur["count"]
+            dst["count"] += cur_count
+            dst["warmup_count"] += cur["warmup_count"]
+            dst["total_ms"] += cur["total_ms"]
+            dst["last_ms"] += cur["last_ms"]
+            dst["max_ms"] = max(dst["max_ms"], cur["max_ms"])
+            if cur_count > 0:
+                if prev_count == 0:
+                    dst["min_ms"] = cur["min_ms"]
+                else:
+                    dst["min_ms"] = min(dst["min_ms"], cur["min_ms"])
+            dst["num_modules"] += 1
+
+        for dst in stats.values():
+            if dst["count"] > 0:
+                dst["mean_ms"] = dst["total_ms"] / dst["count"]
+            else:
+                dst["min_ms"] = 0.0
+
+        if reset:
+            self.reset_grouping_timer()
+        return stats
 
     @torch.no_grad()
     def _maybe_save_vis(
