@@ -7,6 +7,7 @@ from timm.layers import DropPath, trunc_normal_
 import MinkowskiEngine as ME
 from models.minkowski import MinkUNet14D
 from typing import Dict, Tuple, Optional
+from contextlib import contextmanager
 
 import os
 import sys
@@ -1177,9 +1178,13 @@ def _avg_map(xs, ys, vals, H=448, W=448):
 
    
 class IGNet(nn.Module):
-    def __init__(self,  m_point=1024, num_view=300, num_angle=12, num_depth=4, seed_feat_dim=256, img_feat_dim=64, 
+    def __init__(self,  m_point=1024, num_view=300, num_angle=12, num_depth=4, seed_feat_dim=256, img_feat_dim=64,
                  is_training=True, multi_scale_grouping=False, fuse_type='early',
-                 grouping_type='rectangular', grouping_nsample=None):
+                 grouping_type='rectangular', grouping_nsample=None,
+                 image_backbone_pretrained=True,
+                 image_pretraining_source='ImageNet-1K',
+                 freeze_image_backbone=False,
+                 preserve_pretrained_image_weights=True):
         super().__init__()
         self.is_training = is_training
         self.seed_feature_dim = seed_feat_dim
@@ -1193,6 +1198,14 @@ class IGNet(nn.Module):
         self.M_points = m_point
         assert self.num_view == NUM_VIEW and self.num_angle == NUM_ANGLE and self.num_depth == NUM_DEPTH
         self.fuse_type = fuse_type
+        self.img_feat_dim = int(img_feat_dim)
+        self.image_backbone_pretrained = bool(image_backbone_pretrained)
+        self.image_pretraining_source = str(image_pretraining_source)
+        self.freeze_image_backbone = bool(freeze_image_backbone)
+        self.preserve_pretrained_image_weights = bool(preserve_pretrained_image_weights)
+        self.inactive_parameter_prefixes = (
+            ('img_backbone',) if self.fuse_type == 'direct' else ()
+        )
         # self.img_backbone = psp_models['resnet34'.lower()]()
 
         # self.img_backbone = dino_extractor(feat_ext='dino')
@@ -1208,33 +1221,38 @@ class IGNet(nn.Module):
             print('no fusion')
         elif self.fuse_type == 'early':
             self.img_backbone = PSPNet(sizes=(1, 2, 3, 6), psp_size=512, 
-                                    deep_features_size=img_feat_dim, backend='resnet34')
+                                    deep_features_size=img_feat_dim, backend='resnet34',
+                                    pretrained=self.image_backbone_pretrained)
             self.img_feature_dim = 0
             self.point_backbone = MinkUNet14D(in_channels=img_feat_dim, out_channels=self.seed_feature_dim, D=3)
             print('sparse convolution, early fusion')
         elif self.fuse_type == 'concat':
             self.img_backbone = PSPNet(sizes=(1, 2, 3, 6), psp_size=512, 
-                                    deep_features_size=img_feat_dim, backend='resnet34')
+                                    deep_features_size=img_feat_dim, backend='resnet34',
+                                    pretrained=self.image_backbone_pretrained)
             self.img_feature_dim = img_feat_dim
             self.point_backbone = MinkUNet14D(in_channels=3, out_channels=self.seed_feature_dim, D=3)
             print('sparse convolution, late fusion (concatentation)')
         elif self.fuse_type == 'gate':
             self.img_backbone = PSPNet(sizes=(1, 2, 3, 6), psp_size=512, 
-                                    deep_features_size=img_feat_dim, backend='resnet34')
+                                    deep_features_size=img_feat_dim, backend='resnet34',
+                                    pretrained=self.image_backbone_pretrained)
             self.img_feature_dim = 0
             self.point_backbone = MinkUNet14D(in_channels=3, out_channels=self.seed_feature_dim, D=3)
             self.fusion_module = GatedFusion(point_dim=self.seed_feature_dim, img_dim=img_feat_dim)
             print('sparse convolution, late fusion (Gated fusion)')
         elif self.fuse_type == 'add':
             self.img_backbone = PSPNet(sizes=(1, 2, 3, 6), psp_size=512, 
-                                    deep_features_size=img_feat_dim, backend='resnet34')
+                                    deep_features_size=img_feat_dim, backend='resnet34',
+                                    pretrained=self.image_backbone_pretrained)
             self.img_feature_dim = 0
             self.point_backbone = MinkUNet14D(in_channels=3, out_channels=self.seed_feature_dim, D=3)
             self.fusion_module = AddFusion(point_dim=self.seed_feature_dim, img_dim=img_feat_dim)
             print('sparse convolution, late fusion (Add fusion)')
         elif self.fuse_type == 'direct':
             self.img_backbone = PSPNet(sizes=(1, 2, 3, 6), psp_size=512, 
-                                    deep_features_size=img_feat_dim, backend='resnet34')
+                                    deep_features_size=img_feat_dim, backend='resnet34',
+                                    pretrained=self.image_backbone_pretrained)
             self.img_feature_dim = 0
             self.point_backbone = MinkUNet14D(in_channels=3, out_channels=self.seed_feature_dim, D=3)
             print('sparse convolution, direct fusion (RGB as sparse feats)')
@@ -1245,7 +1263,7 @@ class IGNet(nn.Module):
                 deep_features_size=img_feat_dim,      # 你现在 p1/p2 是 64
                 out_dim=img_feat_dim,       # 统一维度（=img_dim）
                 return_pyramid=True,
-                pretrained=True
+                pretrained=self.image_backbone_pretrained
             )
             # self.img_backbone = PSPNet(sizes=(1, 2, 3, 6), psp_size=2048, 
             #     backend='resnext50_32x4d',
@@ -1322,13 +1340,45 @@ class IGNet(nn.Module):
         self.max_points_2d = 30000
         self.max_points_ply = 50000
         self._vis_iter = 0
+
+        # Model-level inference breakdown timer. Disabled by default because
+        # synchronized stage timing intentionally serializes CUDA execution.
+        self._inference_timer_enabled = False
+        self._inference_timer_warmup = 10
+        self._inference_timer_sync_cuda = True
+        self._inference_timer_attach_to_end_points = False
+        self._inference_timer_current = None
+        self._inference_timer_total_start = None
+        self.reset_inference_timer()
+
         self._init_weights()
+        if self.freeze_image_backbone and hasattr(self, 'img_backbone'):
+            for parameter in self.img_backbone.parameters():
+                parameter.requires_grad = False
+
+    def train(self, mode=True):
+        """Keep a frozen image branch fully frozen, including BatchNorm state."""
+        super().train(mode)
+        if self.freeze_image_backbone and hasattr(self, 'img_backbone'):
+            self.img_backbone.eval()
+        return self
 
     def _init_weights(self):
+        preserve_image_weights = (
+            self.image_backbone_pretrained
+            and self.preserve_pretrained_image_weights
+            and hasattr(self, 'img_backbone')
+        )
         for name, module in self.named_modules():
-            # 跳过 img_backbone 的所有子模块
-            # if name.startswith('img_backbone.encoder') or name.startswith('img_backbone.decoder'):
-            #     continue
+            # PSPNet constructs the ImageNet-pretrained encoder before IGNet calls
+            # this initializer. Reinitializing every Conv2d here would silently
+            # destroy that pretraining and invalidate a controlled pretraining
+            # comparison. Preserve the complete image branch when requested; the
+            # PSPNet implementation initializes its newly-created decoder layers.
+            if preserve_image_weights and (
+                name == 'img_backbone' or name.startswith('img_backbone.')
+            ):
+                continue
             if isinstance(module, nn.Conv2d):
                 n = module.kernel_size[0] * module.kernel_size[1] * module.out_channels
                 module.weight.data.normal_(0, np.math.sqrt(2. / n))
@@ -1339,6 +1389,157 @@ class IGNet(nn.Module):
                 nn.init.kaiming_normal_(module.weight)
                 if module.bias is not None:
                     nn.init.constant_(module.bias, 0)
+
+    @staticmethod
+    def parameter_group_for_name(name: str) -> str:
+        """Map every parameter to one mutually-exclusive reporting group."""
+        if name.startswith('img_backbone.'):
+            return 'image_backbone'
+        if name.startswith('point_backbone.fuse_') or name.startswith('fusion_module.'):
+            return 'fusion_projection'
+        if name.startswith('point_backbone.'):
+            return 'point_backbone'
+        if name.startswith(('objectness.', 'rot_head.', 'depth_head.')):
+            return 'prediction_heads'
+        if name.startswith((
+            'crop.', 'crop1.', 'crop2.', 'crop3.', 'crop4.',
+            'multi_scale_fuse.', 'multi_scale_gate.'
+        )):
+            return 'local_grouping'
+        return 'other'
+
+    @classmethod
+    def module_group_for_name(cls, module_name: str) -> str:
+        parameter_like_name = module_name + '.weight' if module_name else ''
+        return cls.parameter_group_for_name(parameter_like_name)
+
+    def get_inactive_parameter_prefixes(self):
+        """Registered modules excluded from the active forward graph."""
+        return tuple(self.inactive_parameter_prefixes)
+
+    def get_fusion_profile_metadata(self):
+        """Return architecture/initialization metadata for controlled ablations."""
+        label_map = {
+            'none': 'Point-only',
+            'direct': 'Direct RGB',
+            'early': 'Early',
+            'concat': 'Late-Concat',
+            'add': 'Late-Add',
+            'gate': 'Late-Gate',
+            'intermediate': 'Hierarchical',
+        }
+        operator_map = {
+            'none': 'none',
+            'direct': 'raw RGB as sparse input feature',
+            'early': 'image feature as sparse input feature',
+            'concat': 'output concatenation',
+            'add': 'projected addition',
+            'gate': 'learned gated addition',
+            'intermediate': 'stage-wise concatenation + 1x1 sparse projection',
+        }
+        injection_stage_map = {
+            'none': [],
+            'direct': ['sparse_input'],
+            'early': ['sparse_input'],
+            'concat': ['3d_backbone_output'],
+            'add': ['3d_backbone_output'],
+            'gate': ['3d_backbone_output'],
+            'intermediate': ['p1', 'p2', 'p4', 'p8', 'p16'],
+        }
+        has_image_backbone = hasattr(self, 'img_backbone')
+        image_branch_active = has_image_backbone and self.fuse_type != 'direct'
+        effective_image_pretraining = bool(
+            image_branch_active
+            and self.image_backbone_pretrained
+            and self.preserve_pretrained_image_weights
+        )
+        fused_feature_dim = self.seed_feature_dim + self.img_feature_dim
+        warnings = []
+        if self.fuse_type == 'concat':
+            warnings.append(
+                'Late-Concat increases downstream feature channels from '
+                f'{self.seed_feature_dim} to {fused_feature_dim}; report this '
+                'explicitly because prediction/grouping capacity is not channel-matched.'
+            )
+        if self.fuse_type == 'direct' and has_image_backbone:
+            warnings.append(
+                'The legacy Direct variant registers an image backbone that is not '
+                'executed; active-parameter statistics exclude img_backbone.'
+            )
+        if image_branch_active and self.image_backbone_pretrained and not self.preserve_pretrained_image_weights:
+            warnings.append(
+                'Image pretraining was requested but IGNet reinitialization is allowed '
+                'to overwrite the image branch; this run is not a valid pretrained control.'
+            )
+
+        return {
+            'model_class': type(self).__name__,
+            'fusion_type': self.fuse_type,
+            'fusion_label': label_map.get(self.fuse_type, self.fuse_type),
+            'grouping_type': self.grouping_type,
+            'multi_scale_grouping': bool(self.multi_scale_grouping),
+            'modalities': ['point_cloud'] + (['rgb'] if self.fuse_type != 'none' else []),
+            'image_backbone': {
+                'present': bool(has_image_backbone),
+                'active': bool(image_branch_active),
+                'architecture': 'ResNet34 + PSPNet' if has_image_backbone else None,
+                'encoder': 'ResNet34' if has_image_backbone else None,
+                'decoder': 'PSPNet' if has_image_backbone else None,
+                'pretraining_requested': bool(
+                    image_branch_active and self.image_backbone_pretrained
+                ),
+                # ``encoder_pretrained`` denotes the effective initialization at
+                # the start of optimization, not merely that pretrained weights
+                # were briefly loaded and then overwritten.
+                'encoder_pretrained': effective_image_pretraining,
+                'encoder_pretraining_source': (
+                    self.image_pretraining_source
+                    if effective_image_pretraining else None
+                ),
+                'external_pretraining_data': (
+                    [self.image_pretraining_source]
+                    if effective_image_pretraining else []
+                ),
+                'encoder_initialization': (
+                    self.image_pretraining_source
+                    if effective_image_pretraining
+                    else ('reinitialized_after_pretrained_load'
+                          if self.image_backbone_pretrained else 'random')
+                ) if image_branch_active else None,
+                'decoder_initialization': 'PSPNet constructor default/random' if image_branch_active else None,
+                'pretrained_weights_preserved': effective_image_pretraining,
+                'frozen': bool(image_branch_active and self.freeze_image_backbone),
+                'trainable': bool(
+                    image_branch_active
+                    and any(p.requires_grad for p in self.img_backbone.parameters())
+                ) if image_branch_active else False,
+            },
+            'fusion': {
+                'operator': operator_map.get(self.fuse_type, self.fuse_type),
+                'injection_stages': injection_stage_map.get(self.fuse_type, []),
+                'num_injections': len(injection_stage_map.get(self.fuse_type, [])),
+                'stage_specific_projection_count': 5 if self.fuse_type == 'intermediate' else 0,
+            },
+            'feature_channels': {
+                'image_feature_dim': self.img_feat_dim if image_branch_active else 0,
+                'point_backbone_output_dim': self.seed_feature_dim,
+                'fused_feature_dim': fused_feature_dim,
+                'prediction_head_input_dim': fused_feature_dim,
+                'grouping_input_dim': fused_feature_dim,
+                'grouping_output_dim': self.seed_feature_dim,
+            },
+            'sampling': {
+                'scene_points': None,
+                'graspable_points': self.M_points,
+                'grouped_points_per_candidate': (
+                    self.grouping_nsample
+                    if self.grouping_nsample is not None
+                    else (16 if self.multi_scale_grouping else 32)
+                ),
+            },
+            'inactive_parameter_prefixes': list(self.inactive_parameter_prefixes),
+            'warnings': warnings,
+        }
 
     def enable_vis(self, vis_dir: str, vis_every: int = 200, max_points_2d: int = 30000,
                 max_points_ply: int = 50000):
@@ -1433,6 +1634,244 @@ class IGNet(nn.Module):
         if reset:
             self.reset_grouping_timer()
         return stats
+
+    _INFERENCE_TIMER_STAGES = (
+        "image_backbone",
+        "image_to_point",
+        "sparse_preprocess",
+        "point_backbone",
+        "sparse_to_points",
+        "feature_fusion",
+        "objectness_head",
+        "graspable_sampling",
+        "visualization",
+        "rotation_head",
+        "label_processing",
+        "rotation_lookup",
+        "local_grouping",
+        "depth_head",
+    )
+
+    def enable_inference_timer(
+        self,
+        enabled=True,
+        warmup=10,
+        sync_cuda=True,
+        attach_to_end_points=False,
+        reset=True,
+    ):
+        """
+        Enable model-level inference breakdown timing.
+
+        Args:
+            enabled: Enable/disable profiling.
+            warmup: Number of complete forward calls excluded from aggregation.
+            sync_cuda: Synchronize CUDA at every stage boundary. This measures
+                end-to-end wall latency (CPU launch/preprocessing + GPU work),
+                but deliberately serializes the pipeline and should only be used
+                for profiling.
+            attach_to_end_points: Attach the last-call timing dict to
+                end_points["_inference_time_ms"]. Disabled by default to avoid
+                changing downstream endpoint iteration/serialization behavior.
+            reset: Clear previous statistics.
+        """
+        self._inference_timer_enabled = bool(enabled)
+        self._inference_timer_warmup = max(0, int(warmup))
+        self._inference_timer_sync_cuda = bool(sync_cuda)
+        self._inference_timer_attach_to_end_points = bool(attach_to_end_points)
+        if reset:
+            self.reset_inference_timer()
+        return self
+
+    def reset_inference_timer(self):
+        self._inference_timer_seen_forwards = 0
+        self._inference_timer_current = None
+        self._inference_timer_total_start = None
+        self._inference_timer_last = {
+            "is_warmup": False,
+            "batch_size": 0,
+            "stages_ms": {},
+        }
+        self._inference_timer_stats = {
+            "count": 0,
+            "warmup_count": 0,
+            "total_samples": 0,
+            "stages": {},
+        }
+
+    @staticmethod
+    def _new_timer_stage_stats():
+        return {
+            "count": 0,
+            "total_ms": 0.0,
+            "last_ms": 0.0,
+            "min_ms": float("inf"),
+            "max_ms": 0.0,
+        }
+
+    def _sync_timer_device(self, device):
+        if (
+            self._inference_timer_sync_cuda
+            and isinstance(device, torch.device)
+            and device.type == "cuda"
+        ):
+            torch.cuda.synchronize(device)
+
+    def _begin_inference_timer(self, device, batch_size):
+        if not self._inference_timer_enabled:
+            return
+        self._sync_timer_device(device)
+        self._inference_timer_current = {
+            name: 0.0 for name in self._INFERENCE_TIMER_STAGES
+        }
+        self._inference_timer_current_batch_size = int(batch_size)
+        self._inference_timer_total_start = time.perf_counter()
+
+    @contextmanager
+    def _time_inference_stage(self, name, device):
+        if not self._inference_timer_enabled or self._inference_timer_current is None:
+            yield
+            return
+        if name not in self._inference_timer_current:
+            raise KeyError(f"Unknown inference timer stage: {name}")
+
+        # Synchronization makes each value an end-to-end stage wall time rather
+        # than only asynchronous CPU launch time.
+        self._sync_timer_device(device)
+        start = time.perf_counter()
+        try:
+            yield
+        finally:
+            self._sync_timer_device(device)
+            elapsed_ms = (time.perf_counter() - start) * 1000.0
+            # Accumulate because a stage may be entered more than once.
+            self._inference_timer_current[name] += float(elapsed_ms)
+
+    def _finish_inference_timer(self, end_points, device):
+        if not self._inference_timer_enabled or self._inference_timer_current is None:
+            return end_points
+
+        self._sync_timer_device(device)
+        total_ms = (time.perf_counter() - self._inference_timer_total_start) * 1000.0
+        stage_sum_ms = sum(self._inference_timer_current.values())
+        stages_ms = dict(self._inference_timer_current)
+        stages_ms["other"] = max(0.0, float(total_ms - stage_sum_ms))
+        stages_ms["model_total"] = float(total_ms)
+
+        self._inference_timer_seen_forwards += 1
+        is_warmup = self._inference_timer_seen_forwards <= self._inference_timer_warmup
+        batch_size = int(self._inference_timer_current_batch_size)
+        self._inference_timer_last = {
+            "is_warmup": bool(is_warmup),
+            "batch_size": batch_size,
+            "stages_ms": stages_ms,
+        }
+
+        if self._inference_timer_attach_to_end_points:
+            end_points["_inference_time_ms"] = dict(stages_ms)
+            end_points["_inference_time_is_warmup"] = bool(is_warmup)
+
+        stats = self._inference_timer_stats
+        if is_warmup:
+            stats["warmup_count"] += 1
+        else:
+            stats["count"] += 1
+            stats["total_samples"] += batch_size
+            for name, elapsed_ms in stages_ms.items():
+                cur = stats["stages"].setdefault(name, self._new_timer_stage_stats())
+                cur["count"] += 1
+                cur["total_ms"] += float(elapsed_ms)
+                cur["last_ms"] = float(elapsed_ms)
+                cur["min_ms"] = min(cur["min_ms"], float(elapsed_ms))
+                cur["max_ms"] = max(cur["max_ms"], float(elapsed_ms))
+
+        self._inference_timer_current = None
+        self._inference_timer_total_start = None
+        return end_points
+
+    def get_last_inference_timer(self):
+        return {
+            "is_warmup": bool(self._inference_timer_last["is_warmup"]),
+            "batch_size": int(self._inference_timer_last["batch_size"]),
+            "stages_ms": dict(self._inference_timer_last["stages_ms"]),
+        }
+
+    def get_inference_timer(self, reset=False):
+        raw = self._inference_timer_stats
+        total_samples = int(raw["total_samples"])
+        total_forward_ms = raw["stages"].get("model_total", {}).get("total_ms", 0.0)
+
+        result = {
+            "enabled": bool(self._inference_timer_enabled),
+            "sync_cuda": bool(self._inference_timer_sync_cuda),
+            "warmup": int(self._inference_timer_warmup),
+            "count": int(raw["count"]),
+            "warmup_count": int(raw["warmup_count"]),
+            "total_samples": total_samples,
+            "fuse_type": self.fuse_type,
+            "grouping_type": self.grouping_type,
+            "multi_scale_grouping": bool(self.multi_scale_grouping),
+            "stages": {},
+        }
+
+        ordered_names = list(self._INFERENCE_TIMER_STAGES) + ["other", "model_total"]
+        for name in ordered_names:
+            cur = raw["stages"].get(name)
+            if cur is None:
+                result["stages"][name] = {
+                    "count": 0,
+                    "total_ms": 0.0,
+                    "mean_ms": 0.0,
+                    "mean_ms_per_sample": 0.0,
+                    "last_ms": 0.0,
+                    "min_ms": 0.0,
+                    "max_ms": 0.0,
+                    "share_pct": 0.0,
+                }
+                continue
+
+            count = int(cur["count"])
+            total_ms = float(cur["total_ms"])
+            result["stages"][name] = {
+                "count": count,
+                "total_ms": total_ms,
+                "mean_ms": total_ms / count if count > 0 else 0.0,
+                "mean_ms_per_sample": total_ms / total_samples if total_samples > 0 else 0.0,
+                "last_ms": float(cur["last_ms"]),
+                "min_ms": float(cur["min_ms"]) if count > 0 else 0.0,
+                "max_ms": float(cur["max_ms"]),
+                "share_pct": 100.0 * total_ms / total_forward_ms if total_forward_ms > 0 else 0.0,
+            }
+
+        # The existing CloudCrop timer isolates only the grouping CUDA operator;
+        # local_grouping above includes crop construction + grouping + SharedMLP + pooling.
+        result["grouping_operator"] = self.get_grouping_timer(reset=False)
+
+        if reset:
+            self.reset_inference_timer()
+        return result
+
+    def format_inference_timer(self, reset=False):
+        stats = self.get_inference_timer(reset=reset)
+        header = (
+            f"Inference breakdown | fuse={stats['fuse_type']} | "
+            f"grouping={stats['grouping_type']} | forwards={stats['count']} | "
+            f"samples={stats['total_samples']} | warmup={stats['warmup_count']}"
+        )
+        lines = [header, "stage                         mean/batch   mean/sample   share     min       max"]
+        lines.append("-" * 88)
+        ordered_names = list(self._INFERENCE_TIMER_STAGES) + ["other", "model_total"]
+        for name in ordered_names:
+            cur = stats["stages"][name]
+            lines.append(
+                f"{name:<28} "
+                f"{cur['mean_ms']:>9.3f} ms  "
+                f"{cur['mean_ms_per_sample']:>9.3f} ms  "
+                f"{cur['share_pct']:>6.2f}%  "
+                f"{cur['min_ms']:>7.3f}  "
+                f"{cur['max_ms']:>7.3f}"
+            )
+        return "\n".join(lines)
 
     @torch.no_grad()
     def _maybe_save_vis(
@@ -1676,175 +2115,190 @@ class IGNet(nn.Module):
         xyz_full = end_points['point_clouds']
         B, N, _ = xyz_full.shape
         device = xyz_full.device
+        self._begin_inference_timer(device=device, batch_size=B)
 
         xyz_full_cache = xyz_full
         img_cache = end_points.get("img", None)
         img_idxs_cache = end_points.get("img_idxs", None)
-        
+        image_features = None
+        pfeat = None
+
         if self.fuse_type == 'intermediate':
             img = end_points['img']              # (B,3,448,448)
-            img_idxs = end_points['img_idxs']    # (B,N) flat idx on 448*448
+            img_idxs = end_points['img_idxs']    # (B,N) flat idx on H0*W0
             H0, W0 = img.shape[-2], img.shape[-1]
 
-            # 2D pyramid from PSPNet (you need to implement return_pyramid=True)
-            pyr = self.img_backbone(img, return_pyramid=True)  # dict: p1/p2/p4/p8/p16
+            with self._time_inference_stage("image_backbone", device):
+                # dict: p1/p2/p4/p8/p16
+                pyr = self.img_backbone(img, return_pyramid=True)
 
-            # per-point 2D feats at each scale: (B,N,C)
-            pfeat = {k: self._gather_2d_to_points(pyr[k], img_idxs, base_hw=(H0,W0))
-                    for k in ['p1', 'p2', 'p4', 'p8', 'p16']}  # each -> (B,N,Cimg)
-
-            # 3D backbone 的输入特征（保持你原逻辑：ones 或 direct 都行，这里用 feats）
-            input_feats = end_points['feats']
+            with self._time_inference_stage("image_to_point", device):
+                # per-point 2D feats at each scale: (B,N,Cimg)
+                pfeat = {
+                    k: self._gather_2d_to_points(pyr[k], img_idxs, base_hw=(H0, W0))
+                    for k in ['p1', 'p2', 'p4', 'p8', 'p16']
+                }
+                input_feats = end_points['feats']
 
         elif self.fuse_type in ['early', 'concat', 'gate', 'add']:
             img = end_points['img']
             img_idxs = end_points['img_idxs']
-            img_feat = self.img_backbone(img)
-            _, Cimg, _, _ = img_feat.shape
 
-            img_feat = img_feat.view(B, Cimg, -1)
-            img_idxs = img_idxs.unsqueeze(1).repeat(1, Cimg, 1)
-            image_features = torch.gather(img_feat, 2, img_idxs).transpose(1, 2).contiguous()
-            if self.fuse_type == 'early':
-                input_feats = image_features
-            else:
-                input_feats = end_points['feats']
+            with self._time_inference_stage("image_backbone", device):
+                img_feat = self.img_backbone(img)
+
+            with self._time_inference_stage("image_to_point", device):
+                _, Cimg, _, _ = img_feat.shape
+                img_feat = img_feat.view(B, Cimg, -1)
+                gather_idxs = img_idxs.unsqueeze(1).expand(-1, Cimg, -1)
+                image_features = torch.gather(img_feat, 2, gather_idxs).transpose(1, 2).contiguous()
+                if self.fuse_type == 'early':
+                    input_feats = image_features
+                else:
+                    input_feats = end_points['feats']
         else:
-            image_features = None
-            if self.fuse_type == 'direct':
-                input_feats = [c * 2.0 - 1.0 for c in end_points['cloud_colors']]
-            else:
-                input_feats = end_points['feats']
+            with self._time_inference_stage("image_to_point", device):
+                if self.fuse_type == 'direct':
+                    input_feats = [c * 2.0 - 1.0 for c in end_points['cloud_colors']]
+                else:
+                    input_feats = end_points['feats']
 
-        coordinates_batch, features_batch = ME.utils.sparse_collate(coords=[c for c in end_points['coors']], 
-                                                                    feats=[f for f in input_feats], 
-                                                                    dtype=torch.float32)
-        coordinates_batch, features_batch, unique_map, quantize2original = ME.utils.sparse_quantize(
-            coordinates_batch, features_batch, return_index=True, return_inverse=True, device=device)
-
-        # # collate (建议先放 CPU，最稳)
-        # coords_list = [c.detach().cpu().int() for c in end_points['coors']]   # list of (N,3)
-        # feats_list  = [f.detach().cpu().float() for f in input_feats]        # list of (N,C)
-
-        # coords_c, feats_c = ME.utils.sparse_collate(coords=coords_list, feats=feats_list, dtype=torch.float32)
-        # # orig_num = coords_c.shape[0]   # 这里才是真正的原始点数，应该是 B*N (=512)
-
-        # # quantize on CPU (不传 device)
-        # coords_q, feats_q, unique_map, quantize2original = ME.utils.sparse_quantize(
-        #     coords_c, feats_c, return_index=True, return_inverse=True
-        # )
-
-        # # # ---- sanity ----
-        # # assert quantize2original is not None and quantize2original.numel() == orig_num, \
-        # #     f"inverse_map numel {quantize2original.numel()} != orig_num {orig_num}"
-
-        # # move BOTH to GPU before SparseTensor
-        # coordinates_batch = coords_q.to(device)
-        # features_batch  = feats_q.to(device)
-
-        mink_input = ME.SparseTensor(coordinates=coordinates_batch, features=features_batch)
-
-        if self.fuse_type == 'intermediate':
-            # 后面构建 mink_input 不变
-            out_sparse = self.point_backbone(mink_input, pfeat, end_points['coors'])
-        else:
-            out_sparse = self.point_backbone(mink_input)
-
-        point_features = out_sparse.F
-        point_features = point_features[quantize2original].view(B, N, -1).transpose(1, 2).contiguous()
-
-        if self.fuse_type in ['concat']:
-            feat_full = torch.concat([point_features, image_features.transpose(1, 2)], dim=1)
-        elif self.fuse_type in ['gate', 'add']:
-            feat_full = self.fusion_module(point_features, image_features.transpose(1, 2))
-        else:
-            feat_full = point_features
-
-        # ----- graspable head on full scene -----
-        end_points = self.objectness(feat_full, end_points)
-
-        obj_prob = None
-        if "objectness_score" in end_points:
-            obj_prob = torch.softmax(end_points["objectness_score"], dim=1)[:, 1]  # (B,N)
-    
-        # ----- 方案A：选 M graspable points -----
-        with torch.no_grad():
-            inds = self._select_M_points(end_points["objectness_score"], xyz_full)
-            
-        xyz_sel = torch.gather(xyz_full, 1, inds.unsqueeze(-1).expand(-1, -1, 3)).contiguous()  # (B,M,3)
-        feat_sel = torch.gather(feat_full, 2, inds.unsqueeze(1).expand(-1, feat_full.size(1), -1)).contiguous()  # (B,C,M)
-
-        end_points["graspable_inds"] = inds
-        end_points["xyz_graspable"] = xyz_sel
-        end_points["seed_features"] = feat_sel
-        end_points["point_clouds"] = xyz_sel
-        end_points["D: Graspable Points"] = _as_tensor(float(self.M_points), device)  # 避免 float.item 崩
-
-        # collect stats that help compare cameras
-        stats = {}
-        try:
-            stats["N_full"] = int(xyz_full_cache.shape[1])
-            stats["M_sel"] = int(xyz_sel.shape[1])
-            if obj_prob is not None:
-                stats["obj_prob_mean"] = float(obj_prob.mean().item())
-                stats["obj_prob_p95"]  = float(obj_prob.quantile(0.95).item())
-            span = (xyz_sel.max(dim=1).values - xyz_sel.min(dim=1).values)  # (B,3)
-            stats["sel_span_xyz"] = span[0].detach().cpu().tolist()
-        except Exception:
-            pass
-
-        self._maybe_save_vis(
-            end_points,
-            xyz_full=xyz_full_cache,
-            img=img_cache,
-            img_idxs=img_idxs_cache,
-            obj_prob=obj_prob,
-            inds=inds,
-            xyz_sel=xyz_sel,
-            stats=stats,
-        )
-        self._vis_iter += 1
-        
-        # end_points['seed_features'] = seed_features  # (B, seed_feature_dim, num_seed)
-        # end_points, rot_features = self.rot_head(seed_features, end_points)
-        # seed_features = seed_features + rot_features
-        end_points, feat_sel = self.rot_head(feat_sel, end_points)
-
-        if self.is_training:
-            top_inds = end_points["grasp_top_rot_inds"].long()  # (B,M)
-
-            end_points = process_grasp_labels_scene(
-                end_points, GRASP_MAX_WIDTH=GRASP_MAX_WIDTH,
-                top_rot_inds=top_inds  # 用 pred top 来 slice GT score/width
+        with self._time_inference_stage("sparse_preprocess", device):
+            coordinates_batch, features_batch = ME.utils.sparse_collate(
+                coords=[c for c in end_points['coors']],
+                feats=[f for f in input_feats],
+                dtype=torch.float32,
             )
-            grasp_rot_flat = grasp_rot.to(device)               # (V*A,3,3) 例如 (3600,3,3)
-            grasp_top_rots = grasp_rot_flat[top_inds]           # (B,M,3,3)
+            coordinates_batch, features_batch, unique_map, quantize2original = ME.utils.sparse_quantize(
+                coordinates_batch,
+                features_batch,
+                return_index=True,
+                return_inverse=True,
+                device=device,
+            )
+            mink_input = ME.SparseTensor(
+                coordinates=coordinates_batch,
+                features=features_batch,
+            )
 
-        else:
+        with self._time_inference_stage("point_backbone", device):
+            if self.fuse_type == 'intermediate':
+                out_sparse = self.point_backbone(mink_input, pfeat, end_points['coors'])
+            else:
+                out_sparse = self.point_backbone(mink_input)
+
+        with self._time_inference_stage("sparse_to_points", device):
+            point_features = out_sparse.F
+            point_features = point_features[quantize2original].view(B, N, -1).transpose(1, 2).contiguous()
+
+        with self._time_inference_stage("feature_fusion", device):
+            if self.fuse_type == 'concat':
+                feat_full = torch.concat([point_features, image_features.transpose(1, 2)], dim=1)
+            elif self.fuse_type in ['gate', 'add']:
+                feat_full = self.fusion_module(point_features, image_features.transpose(1, 2))
+            else:
+                feat_full = point_features
+
+        # ----- objectness head on full scene -----
+        with self._time_inference_stage("objectness_head", device):
+            end_points = self.objectness(feat_full, end_points)
+
+        # ----- select M graspable points and gather their features -----
+        with self._time_inference_stage("graspable_sampling", device):
+            with torch.no_grad():
+                inds = self._select_M_points(end_points["objectness_score"], xyz_full)
+
+            xyz_sel = torch.gather(
+                xyz_full, 1, inds.unsqueeze(-1).expand(-1, -1, 3)
+            ).contiguous()
+            feat_sel = torch.gather(
+                feat_full, 2, inds.unsqueeze(1).expand(-1, feat_full.size(1), -1)
+            ).contiguous()
+
+            end_points["graspable_inds"] = inds
+            end_points["xyz_graspable"] = xyz_sel
+            end_points["seed_features"] = feat_sel
+            end_points["point_clouds"] = xyz_sel
+            end_points["D: Graspable Points"] = _as_tensor(float(self.M_points), device)
+
+        # Visualization is excluded from normal inference when disabled. The old
+        # implementation computed .item()/quantile statistics even with vis off,
+        # causing unnecessary CUDA synchronization.
+        with self._time_inference_stage("visualization", device):
+            do_collect_vis = self.vis_dir is not None or bool(end_points.get("force_vis", False))
+            if do_collect_vis:
+                obj_prob = torch.softmax(end_points["objectness_score"], dim=1)[:, 1]
+                stats = {}
+                try:
+                    stats["N_full"] = int(xyz_full_cache.shape[1])
+                    stats["M_sel"] = int(xyz_sel.shape[1])
+                    stats["obj_prob_mean"] = float(obj_prob.mean().item())
+                    stats["obj_prob_p95"] = float(obj_prob.quantile(0.95).item())
+                    span = xyz_sel.max(dim=1).values - xyz_sel.min(dim=1).values
+                    stats["sel_span_xyz"] = span[0].detach().cpu().tolist()
+                except Exception:
+                    pass
+
+                self._maybe_save_vis(
+                    end_points,
+                    xyz_full=xyz_full_cache,
+                    img=img_cache,
+                    img_idxs=img_idxs_cache,
+                    obj_prob=obj_prob,
+                    inds=inds,
+                    xyz_sel=xyz_sel,
+                    stats=stats,
+                )
+            self._vis_iter += 1
+
+        with self._time_inference_stage("rotation_head", device):
+            end_points, feat_sel = self.rot_head(feat_sel, end_points)
             top_inds = end_points["grasp_top_rot_inds"].long()
-            grasp_top_rots = grasp_rot.to(device)[top_inds]     # (B,M,3,3)
-            
+
+        with self._time_inference_stage("label_processing", device):
+            if self.is_training:
+                end_points = process_grasp_labels_scene(
+                    end_points,
+                    GRASP_MAX_WIDTH=GRASP_MAX_WIDTH,
+                    top_rot_inds=top_inds,
+                )
+
+        with self._time_inference_stage("rotation_lookup", device):
+            grasp_top_rots = grasp_rot.to(device)[top_inds]
+
         B, M, _ = xyz_sel.shape
-        if self.multi_scale_grouping:
-            group_features = []
-            for crop_scale, crop_op in zip(self.crop_scales, self.crop_op_list):
+        with self._time_inference_stage("local_grouping", device):
+            if self.multi_scale_grouping:
+                group_features = []
+                for crop_scale, crop_op in zip(self.crop_scales, self.crop_op_list):
+                    crop_length = (0.04 + base_depth) * torch.ones((B, M, 1), device=device)
+                    crop_width = crop_scale * GRASP_MAX_WIDTH * torch.ones_like(crop_length)
+                    crop_height = 0.02 * torch.ones_like(crop_length)
+                    crop_size = torch.concat(
+                        [crop_length, crop_width, crop_height], dim=-1
+                    ).contiguous()
+                    group_features.append(
+                        crop_op(xyz_sel, feat_sel, grasp_top_rots, crop_size)
+                    )
+                group_features = torch.cat(group_features, dim=1)
+                group_features = self.multi_scale_fuse(group_features)
+                seed_features_gate = self.multi_scale_gate(feat_sel) * feat_sel
+                group_features = group_features + seed_features_gate
+            else:
                 crop_length = (0.04 + base_depth) * torch.ones((B, M, 1), device=device)
-                crop_width = crop_scale * GRASP_MAX_WIDTH * torch.ones_like(crop_length, device=device)
-                crop_height = 0.02 * torch.ones_like(crop_length, device=device)
-                crop_size = torch.concat([crop_length, crop_width, crop_height], dim=-1).contiguous()
-                group_features.append(crop_op(xyz_sel, feat_sel, grasp_top_rots, crop_size))
-            group_features = torch.cat(group_features, dim=1) #            
-            group_features = self.multi_scale_fuse(group_features)
-            seed_features_gate = self.multi_scale_gate(feat_sel) * feat_sel
-            group_features = group_features + seed_features_gate
-        else:
-            crop_length = (0.04 + base_depth) * torch.ones((B, M, 1), device=device)
-            crop_width = GRASP_MAX_WIDTH * torch.ones_like(crop_length, device=device)
-            crop_height = 0.02 * torch.ones_like(crop_length, device=device)
-            crop_size = torch.concat([crop_length, crop_width, crop_height], dim=-1).contiguous()
-            group_features = self.crop(xyz_sel, feat_sel, grasp_top_rots, crop_size)
-        end_points = self.depth_head(group_features, end_points)
-        return end_points
+                crop_width = GRASP_MAX_WIDTH * torch.ones_like(crop_length)
+                crop_height = 0.02 * torch.ones_like(crop_length)
+                crop_size = torch.concat(
+                    [crop_length, crop_width, crop_height], dim=-1
+                ).contiguous()
+                group_features = self.crop(
+                    xyz_sel, feat_sel, grasp_top_rots, crop_size
+                )
+
+        with self._time_inference_stage("depth_head", device):
+            end_points = self.depth_head(group_features, end_points)
+
+        return self._finish_inference_timer(end_points, device)
 
 
 # @torch.no_grad()
@@ -2252,8 +2706,19 @@ def match_grasp_view_and_label(end_points):
     return top_template_rot_mat, end_points
 
 
-def pred_decode(end_points, normalize=False):
+def pred_decode(end_points, normalize=False, return_timing=False, sync_cuda=True):
+    """
+    Decode network outputs into GraspNet-format arrays.
+
+    With return_timing=True, returns (grasp_preds, timing_dict). The default
+    return value remains unchanged for backward compatibility.
+    """
     batch_size, num_samples, _ = end_points['xyz_graspable'].shape
+    decode_device = end_points['xyz_graspable'].device
+    if return_timing and sync_cuda and decode_device.type == "cuda":
+        torch.cuda.synchronize(decode_device)
+    decode_start = time.perf_counter() if return_timing else None
+
     grasp_preds = []
     for i in range(batch_size):
         grasp_center = end_points['xyz_graspable'][i].float()
@@ -2294,4 +2759,13 @@ def pred_decode(end_points, normalize=False):
                                       grasp_depth, topk_grasp_rots, grasp_center, obj_ids],
                                      axis=-1).detach().cpu().numpy())
 
+    if return_timing:
+        if sync_cuda and decode_device.type == "cuda":
+            torch.cuda.synchronize(decode_device)
+        elapsed_ms = (time.perf_counter() - decode_start) * 1000.0
+        return grasp_preds, {
+            "pred_decode_ms": float(elapsed_ms),
+            "pred_decode_ms_per_sample": float(elapsed_ms) / max(1, int(batch_size)),
+            "batch_size": int(batch_size),
+        }
     return grasp_preds

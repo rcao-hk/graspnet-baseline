@@ -23,3 +23,6 @@ checkpoints
 data
 aubo
 demo_saved_data
+experiment
+*.csv
+*tsv

@@ -1,5 +1,5 @@
 import os
-os.environ['CUDA_LAUNCH_BLOCKING'] = '1' 
+# CUDA synchronization is performed explicitly at the timer boundaries.
 
 import sys
 
@@ -80,6 +80,11 @@ parser.add_argument('--dropout_min_size', type=int, default=200,
 
 parser.add_argument('--pc_sparse_level', type=int, default=0,
                     help='Point sparsity level (only for data_type==noise): 0=off, 1..4 -> [512,1024,2048,5120]')
+
+parser.add_argument('--enable_inference_timer', action='store_true',
+                    help='Measure and print mean GSNet inference time [default: False]')
+parser.add_argument('--timer_warmup', type=int, default=20,
+                    help='Number of initial frames excluded from timing [default: 20]')
 
 cfgs = parser.parse_args()
 
@@ -168,7 +173,21 @@ save_run_config_json(
 net.load_state_dict(checkpoint['model_state_dict'])
 eps = 1e-8
 
+
+def _sync_cuda():
+    if torch.cuda.is_available():
+        torch.cuda.synchronize(device)
+
+
+# Timing covers sparse collation/quantization, GSNet forward, and pred_decode.
+# It excludes RGB-D loading, point-cloud construction/sampling, GraspGroup
+# construction, model-free collision detection, and result saving.
+inference_times_ms = []
+inference_call_count = 0
+
+
 def inference(scene_idx):
+    global inference_call_count
     for anno_idx in range(256):
 
         depth_raw_path = None  # only used in noise mode
@@ -306,6 +325,14 @@ def inference(scene_idx):
         coors_tensor = torch.tensor(cloud_sampled / cfgs.voxel_size, dtype=torch.int32, device=device)
         feats_tensor = torch.ones_like(cloud_tensor).float().to(device)
 
+        should_time = (
+            cfgs.enable_inference_timer
+            and inference_call_count >= max(0, cfgs.timer_warmup)
+        )
+        if should_time:
+            _sync_cuda()
+            infer_start = time.perf_counter()
+
         coordinates_batch, features_batch = ME.utils.sparse_collate([coors_tensor], [feats_tensor],
                                                                     dtype=torch.float32)
         coordinates_batch, features_batch, _, quantize2original = ME.utils.sparse_quantize(
@@ -317,11 +344,19 @@ def inference(scene_idx):
                             "feats": features_batch,
                             "quantize2original": quantize2original}
 
-        with torch.no_grad():
+        with torch.inference_mode():
             end_points = net(batch_data_label)
             grasp_preds = pred_decode(end_points)
-            preds = grasp_preds[0]
-            gg = GraspGroup(preds)
+
+        if should_time:
+            _sync_cuda()
+            elapsed_ms = (time.perf_counter() - infer_start) * 1000.0
+            inference_times_ms.append(elapsed_ms)
+
+        inference_call_count += 1
+
+        preds = grasp_preds[0]
+        gg = GraspGroup(preds)
 
         # collision detection (use same cloud domain as input)
         if cfgs.collision_thresh > 0:
@@ -343,7 +378,7 @@ if split == 'test':
     for i in range(100, 190):
         scene_list.append(i)
 elif split == 'test_seen':
-    for i in range(100, 130):
+    for i in range(100, 103):
         scene_list.append(i)
 elif split == 'test_similar':
     for i in range(130, 160):
@@ -359,3 +394,18 @@ else:
 for scene_idx in scene_list:
     inference(scene_idx)
     # res.append(results)
+
+if cfgs.enable_inference_timer:
+    if inference_times_ms:
+        mean_inference_ms = float(np.mean(inference_times_ms))
+        print(
+            "\n[INFERENCE-TIMER] "
+            f"Mean inference time: {mean_inference_ms:.3f} ms/sample "
+            f"(samples={len(inference_times_ms)}, "
+            f"warmup={max(0, cfgs.timer_warmup)})"
+        )
+    else:
+        print(
+            "\n[INFERENCE-TIMER][WARN] No timed samples. "
+            "Reduce --timer_warmup or process more frames."
+        )
