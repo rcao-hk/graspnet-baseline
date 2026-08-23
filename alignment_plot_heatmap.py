@@ -8,181 +8,214 @@ import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
 
-PC_ORDER = ["block1", "block2", "block3", "block4", "final"]
-IMG_ORDER = ["p1", "p2", "p4", "p8", "p16"]
+# ---------- orders (already removed p16) ----------
 SPLITS = ["test_seen", "test_similar", "test_novel"]
 
+# 用于从 JSON 里取值的 keys（不要改）
+PC_KEYS   = ["block1", "block2", "block3", "final"]
+IMG_KEYS  = ["p1", "p2", "p4", "p8"]   # 不画 p16
+
+# 论文/图中显示的 labels（你想怎么写都行）
+PC_LABELS  = ["s2", "s4", "s8", "out"]
+IMG_LABELS = ["p1", "p2", "p4", "p8"]
+
 METHOD_SPECS_DEFAULT = [
-    ("mmgnet_scene",  "early",  "mmgnet_scene_early (early)"),
-    ("mmgnet_scene_concat", "concat", "mmgnet_scene_concat (late (concat))"),
-    ("mmgnet_scene_add",    "add",    "mmgnet_scene_add (late (add))"),
-    ("mmgnet_scene_gate",   "gate",   "mmgnet_scene_gate (late (gate))"),
+    ("mmgnet_scene",        "early",  "Early"),
+    ("mmgnet_scene_intermediate", "intermediate", "Hierarchical"),
+    ("mmgnet_scene_concat", "concat", "Late (concat)"),
+    ("mmgnet_scene_add",    "add",    "Late (add)"),
+    ("mmgnet_scene_gate",   "gate",   "Late (gate)"),
 ]
+
+METRIC_KEYS = ["cka", "r2_x2y", "r2_y2x"]
+METRIC_DISPLAY = {
+    "cka": "CKA",
+    "r2_x2y": r"$R^2_{\mathrm{pc}\rightarrow\mathrm{img}}$",
+    "r2_y2x": r"$R^2_{\mathrm{img}\rightarrow\mathrm{pc}}$",
+}
 
 def load_json(path):
     with open(path, "r") as f:
         return json.load(f)
 
-def safe_float(x):
-    try:
-        v = float(x)
-        return v
-    except Exception:
-        return np.nan
+def build_json_path(root, method_name, fusion_type, split, interval):
+    p1 = os.path.join(root, f"{method_name}_{fusion_type}_{split}_{interval}.json")
+    if os.path.exists(p1):
+        return p1
+    p2 = os.path.join(root, f"{method_name}_{split}_{interval}.json")
+    if os.path.exists(p2):
+        return p2
+    return p1
 
-def extract_matrix_from_record(r, key):
-    """key: 'cka' | 'r2_x2y' | 'r2_y2x' """
-    d = r.get(key, {})
-    mat = np.full((len(PC_ORDER), len(IMG_ORDER)), np.nan, dtype=np.float64)
-    for i, pl in enumerate(PC_ORDER):
-        row = d.get(pl, {})
-        for j, ik in enumerate(IMG_ORDER):
-            mat[i, j] = safe_float(row.get(ik, np.nan))
-    return mat
-
-def mean_stats_from_records(records, key, clip=None):
-    """
-    Return:
-      mean_mat: (5,5)
-      count_mat: finite counts
-      frac_valid: count / N
-      frac_neg: fraction of values < 0 among finite (only meaningful for R2)
-    clip: None | (lo, hi)  applied PER-VALUE before accumulation
-    """
-    N = len(records)
-    S = np.zeros((len(PC_ORDER), len(IMG_ORDER)), dtype=np.float64)
-    C = np.zeros_like(S)
-    Neg = np.zeros_like(S)  # count of v<0 among finite
+def mean_matrix_from_records(records, key):
+    H = np.full((len(PC_KEYS), len(IMG_KEYS)), np.nan, dtype=np.float64)
+    S = np.zeros_like(H)
+    C = np.zeros_like(H)
 
     for r in records:
-        mat = extract_matrix_from_record(r, key)  # (5,5)
-        if clip is not None:
-            lo, hi = clip
-            # clip only finite entries
-            fin = np.isfinite(mat)
-            mat_clip = mat.copy()
-            mat_clip[fin] = np.clip(mat_clip[fin], lo, hi)
-            mat = mat_clip
+        m = r.get(key, {})
+        for i, pl_key in enumerate(PC_KEYS):
+            row = m.get(pl_key, {})
+            for k, img_key in enumerate(IMG_KEYS):
+                v = row.get(img_key, None)
+                if v is None:
+                    continue
+                try:
+                    v = float(v)
+                except Exception:
+                    continue
+                if np.isfinite(v):
+                    S[i, k] += v
+                    C[i, k] += 1
 
-        fin = np.isfinite(mat)
-        S[fin] += mat[fin]
-        C[fin] += 1
-        # negative stats on raw values only makes sense when clip is None
-        if clip is None and key.startswith("r2"):
-            Neg[fin & (mat < 0)] += 1
-
-    mean = np.full_like(S, np.nan)
     mask = C > 0
-    mean[mask] = S[mask] / C[mask]
+    H[mask] = S[mask] / C[mask]
+    return H, C
 
-    frac_valid = np.zeros_like(S)
-    if N > 0:
-        frac_valid = C / float(N)
 
-    frac_neg = None
-    if key.startswith("r2") and clip is None:
-        frac_neg = np.full_like(S, np.nan)
-        m2 = C > 0
-        frac_neg[m2] = Neg[m2] / C[m2]
+def mean_matrix(j, key):
+    recs = j.get("records", [])
+    H, C = mean_matrix_from_records(recs, key)
+    return H, C, len(recs)
 
-    return mean, C, frac_valid, frac_neg, N
-
-def merge_records(json_list):
+def merge_records_mean(json_list, key):
     all_records = []
     for j in json_list:
         all_records.extend(j.get("records", []))
-    return all_records
+    H, C = mean_matrix_from_records(all_records, key)
+    return H, C, len(all_records)
+def _set_bold_ticks(ax, fontsize=26):
+    ax.tick_params(axis="both", labelsize=fontsize)
+    for lab in ax.get_xticklabels():
+        lab.set_fontweight("bold")
+    for lab in ax.get_yticklabels():
+        lab.set_fontweight("bold")
 
-def plot_row_4methods(mats, titles, out_path, suptitle, vmin=None, vmax=None, show_numbers=True, cbar=True):
+
+import matplotlib.patheffects as pe
+
+def annotate_with_stroke(ax, mat, fmt="{:.2f}", fontsize=16, fontweight="bold"):
+    for i in range(mat.shape[0]):
+        for j in range(mat.shape[1]):
+            v = mat[i, j]
+            if not np.isfinite(v):
+                continue
+            t = ax.text(
+                j, i, fmt.format(v),
+                ha="center", va="center",
+                fontsize=fontsize, fontweight=fontweight,
+                color="black"
+            )
+            # 白色描边（线宽可调大一点）
+            t.set_path_effects([pe.Stroke(linewidth=3.5, foreground="white"), pe.Normal()])
+            
+            
+def plot_combo_3rows_4cols(
+    mats_by_metric,          # dict: metric_key -> list of 4 mats
+    col_titles,              # list of 4 fusion names
+    out_path,
+    suptitle,
+    show_numbers=True,
+    fontsize=26,
+    cmap="viridis",
+):
     """
-    mats: list of 2D arrays (5x5) len=4
+    Layout:
+      3 rows (CKA / pc2img / img2pc)
+      4 cols (early / concat / add / gate)
+      + 1 extra col for colorbar per row (so total 5 cols)
     """
-    fig, axes = plt.subplots(1, 4, figsize=(4*4.8, 4.9), constrained_layout=True)
 
-    im0 = None
-    for idx, ax in enumerate(axes):
-        mat = mats[idx]
-        im0 = ax.imshow(mat, vmin=vmin, vmax=vmax)
-        ax.set_title(titles[idx], fontsize=11)
+    plt.rcParams.update({
+        "font.size": fontsize,
+        "font.weight": "bold",
+        "axes.labelweight": "bold",
+        "axes.titleweight": "bold",
+    })
 
-        ax.set_xticks(range(len(IMG_ORDER)))
-        ax.set_xticklabels(IMG_ORDER, fontsize=10)
-        ax.set_yticks(range(len(PC_ORDER)))
-        if idx == 0:
-            ax.set_yticklabels(PC_ORDER, fontsize=10)
-        else:
-            ax.set_yticklabels([])
+    # ranges per metric (keep as you used)
+    ranges = {
+        "cka": (0.0, 1.0),
+        "r2_x2y": (-1.0, 1.0),
+        "r2_y2x": (-1.0, 1.0),
+    }
 
-        if show_numbers:
-            for i in range(mat.shape[0]):
-                for j in range(mat.shape[1]):
-                    v = mat[i, j]
-                    if np.isfinite(v):
-                        ax.text(j, i, f"{v:.2f}", ha="center", va="center", fontsize=9)
+    fig = plt.figure(figsize=(5 * 6.2 + 1.0, 3 * 5.6))  # extra width for colorbars
+    gs = gridspec.GridSpec(
+        nrows=3, ncols=6,
+        width_ratios=[1, 1, 1, 1, 1, 0.06],   # last column reserved for colorbar
+        wspace=0.15, hspace=0.18
+    )
 
-    if cbar:
-        cbar_obj = fig.colorbar(im0, ax=axes, fraction=0.02, pad=0.02)
-        cbar_obj.ax.tick_params(labelsize=10)
+    axes = [[None for _ in range(5)] for _ in range(3)]
+    caxes = [None for _ in range(3)]
 
-    fig.suptitle(suptitle, fontsize=14)
-    fig.savefig(out_path, dpi=200)
+    # create axes
+    for r in range(3):
+        for c in range(5):
+            axes[r][c] = fig.add_subplot(gs[r, c])
+        caxes[r] = fig.add_subplot(gs[r, 5])
+
+    # draw
+    for r, metric_key in enumerate(METRIC_KEYS):
+        vmin, vmax = ranges[metric_key]
+        im_last = None
+
+        for c in range(5):
+            ax = axes[r][c]
+            mat = mats_by_metric[metric_key][c]
+
+            im = ax.imshow(mat, vmin=vmin, vmax=vmax, cmap=cmap)
+            im_last = im
+
+            # ticks
+            ax.set_xticks(range(len(IMG_KEYS)))
+            ax.set_xticklabels(IMG_LABELS, fontsize=fontsize, fontweight="bold")
+
+            ax.set_yticks(range(len(PC_KEYS)))
+            if c == 0:
+                ax.set_yticklabels(PC_LABELS, fontsize=fontsize, fontweight="bold")
+            else:
+                ax.set_yticklabels([])
+
+            _set_bold_ticks(ax, fontsize=fontsize)
+
+            # row label on the left-most subplot
+            if c == 0:
+                ax.set_ylabel(METRIC_DISPLAY[metric_key], fontsize=fontsize, fontweight="bold")
+
+            # fusion labels as x-label ONLY on bottom row
+            if r == 2:
+                ax.set_xlabel(col_titles[c], fontsize=fontsize, fontweight="bold", labelpad=18)
+
+            # numbers
+            if show_numbers:
+                annotate_with_stroke(ax, mat, fmt="{:.2f}", fontsize=14, fontweight="bold")
+                # for i in range(mat.shape[0]):
+                #     for j in range(mat.shape[1]):
+                #         v = mat[i, j]
+                #         if np.isfinite(v):
+                #             ax.text(
+                #                 j, i, f"{v:.2f}",
+                #                 ha="center", va="center",
+                #                 fontsize=max(10, fontsize - 10),
+                #                 fontweight="bold",
+                #                 color="black"
+                #             )
+
+        # colorbar for this row (never disappears)
+        cb = fig.colorbar(im_last, cax=caxes[r])
+        cb.ax.tick_params(labelsize=fontsize)
+        for lab in cb.ax.get_yticklabels():
+            lab.set_fontweight("bold")
+
+    # fig.suptitle(suptitle, fontsize=fontsize + 2, fontweight="bold", y=0.98)
+    fig.savefig(out_path, dpi=400, bbox_inches="tight")
+    fig.savefig(out_path.replace('.png', '.svg'), dpi=400, bbox_inches="tight")
     plt.close(fig)
     print(f"[SAVE] {out_path}")
-
-def build_json_path(root, method_name, fusion_type, split, interval):
-    # preferred format: {method_name}_{fusion_type}_{split}_{interval}.json
-    fname = f"{method_name}_{fusion_type}_{split}_{interval}.json"
-    p = os.path.join(root, fname)
-    if os.path.exists(p):
-        return p
-    # fallback (old format): {method_name}_{split}_{interval}.json
-    alt = os.path.join(root, f"{method_name}_{split}_{interval}.json")
-    if os.path.exists(alt):
-        return alt
-    return p  # default (will trigger FileNotFoundError upstream)
-
-def collect_mats_for_split(data, method_specs, split, key, clip=None, want_counts=False):
-    mats = []
-    titles = []
-    counts = []
-    nrecs = []
-    frac_valid_list = []
-    frac_neg_list = []
-
-    for method_name, fusion_type, title in method_specs:
-        j = data[method_name][split]
-        records = j.get("records", [])
-        mean, C, frac_valid, frac_neg, N = mean_stats_from_records(records, key=key, clip=clip)
-        mats.append(mean)
-        titles.append(title)
-        counts.append(C)
-        frac_valid_list.append(frac_valid)
-        frac_neg_list.append(frac_neg)
-        nrecs.append(N)
-
-    return mats, titles, counts, frac_valid_list, frac_neg_list, nrecs
-
-def collect_mats_for_test_mean(data, method_specs, key, clip=None):
-    mats = []
-    titles = []
-    counts = []
-    frac_valid_list = []
-    frac_neg_list = []
-    nrecs = []
-
-    for method_name, fusion_type, title in method_specs:
-        jlist = [data[method_name][sp] for sp in SPLITS]
-        records = merge_records(jlist)
-        mean, C, frac_valid, frac_neg, N = mean_stats_from_records(records, key=key, clip=clip)
-        mats.append(mean)
-        titles.append(title)
-        counts.append(C)
-        frac_valid_list.append(frac_valid)
-        frac_neg_list.append(frac_neg)
-        nrecs.append(N)
-
-    return mats, titles, counts, frac_valid_list, frac_neg_list, nrecs
 
 def main():
     ap = argparse.ArgumentParser()
@@ -190,39 +223,16 @@ def main():
     ap.add_argument("--out_dir", default="vis/feat_redun_vis", help="Output directory for figures")
     ap.add_argument("--interval", type=int, default=10, help="Interval suffix in json filename")
     ap.add_argument("--prefix", default="mmgnet", help="Figure filename prefix")
-    ap.add_argument("--no_numbers", action="store_true", help="Disable writing values on heatmaps")
-
-    # plotting switches
-    ap.add_argument("--plot_cka", action="store_true", help="Plot CKA mean heatmaps")
-    ap.add_argument("--plot_r2", action="store_true", help="Plot raw R2 mean heatmaps (x2y/y2x)")
-    ap.add_argument("--plot_r2_clip", action="store_true", help="Plot clipped R2 mean heatmaps (x2y/y2x), clip per-value to [0,1]")
-    ap.add_argument("--plot_neg_frac", action="store_true", help="Plot negative fraction heatmaps for raw R2 (x2y/y2x)")
-    ap.add_argument("--plot_valid_frac", action="store_true", help="Plot valid fraction heatmaps (finite ratio) for each metric")
-
-    # ranges
-    ap.add_argument("--cka_vmin", type=float, default=0.0)
-    ap.add_argument("--cka_vmax", type=float, default=1.0)
-    ap.add_argument("--r2_vmin", type=float, default=-1.0)
-    ap.add_argument("--r2_vmax", type=float, default=1.0)
-    ap.add_argument("--r2clip_vmin", type=float, default=0.0)
-    ap.add_argument("--r2clip_vmax", type=float, default=1.0)
-    ap.add_argument("--frac_vmin", type=float, default=0.0)
-    ap.add_argument("--frac_vmax", type=float, default=1.0)
-
+    ap.add_argument("--split", default="test_mean", choices=SPLITS + ["test_mean"])
+    ap.add_argument("--no_numbers", action="store_true")
+    ap.add_argument("--fontsize", type=int, default=22)
     args = ap.parse_args()
 
-    # default behavior: if user didn't specify any, plot all the main ones
-    if not (args.plot_cka or args.plot_r2 or args.plot_r2_clip or args.plot_neg_frac or args.plot_valid_frac):
-        args.plot_cka = True
-        args.plot_r2 = True
-        args.plot_r2_clip = True
-
     os.makedirs(args.out_dir, exist_ok=True)
-    method_specs = METHOD_SPECS_DEFAULT
 
-    # --------- Load all JSONs: method x split ----------
+    # load all jsons
     data = {}
-    for method_name, fusion_type, _title in method_specs:
+    for method_name, fusion_type, _title in METHOD_SPECS_DEFAULT:
         data[method_name] = {}
         for sp in SPLITS:
             p = build_json_path(args.json_root, method_name, fusion_type, sp, args.interval)
@@ -231,73 +241,31 @@ def main():
             data[method_name][sp] = load_json(p)
             print(f"[LOAD] {p}")
 
-    def _plot_for_one_split(split_name, records_mode="split"):
-        # helper to avoid duplication; returns dict with mats/stats per metric
-        out = {}
+    # collect matrices for the requested split
+    mats_by_metric = {"cka": [], "r2_x2y": [], "r2_y2x": []}
+    col_titles = []
+    for method_name, fusion_type, title in METHOD_SPECS_DEFAULT:
+        col_titles.append(title)
 
-        def _collect(key, clip=None):
-            if records_mode == "split":
-                mats, titles, counts, frac_valid_list, frac_neg_list, nrecs = collect_mats_for_split(
-                    data, method_specs, split_name, key, clip=clip
-                )
+        for metric_key in ["cka", "r2_x2y", "r2_y2x"]:
+            if args.split == "test_mean":
+                jlist = [data[method_name][s] for s in SPLITS]
+                H, _, _ = merge_records_mean(jlist, metric_key)
             else:
-                mats, titles, counts, frac_valid_list, frac_neg_list, nrecs = collect_mats_for_test_mean(
-                    data, method_specs, key, clip=clip
-                )
-            return mats, titles, counts, frac_valid_list, frac_neg_list, nrecs
-
-        show_numbers = (not args.no_numbers)
-
-        # ---- CKA ----
-        if args.plot_cka:
-            mats, titles, counts, frac_valid_list, _frac_neg_list, nrecs = _collect("cka", clip=None)
-            out_path = os.path.join(args.out_dir, f"{args.prefix}_cka_{split_name}_row4.png")
-            suptitle = f"Mean CKA heatmaps | {split_name}"
-            plot_row_4methods(mats, titles, out_path, suptitle, vmin=args.cka_vmin, vmax=args.cka_vmax, show_numbers=show_numbers)
-            out["cka"] = (mats, frac_valid_list)
-
-            if args.plot_valid_frac:
-                out_path = os.path.join(args.out_dir, f"{args.prefix}_cka_validfrac_{split_name}_row4.png")
-                suptitle = f"Valid fraction (finite) | CKA | {split_name}"
-                plot_row_4methods(frac_valid_list, titles, out_path, suptitle,
-                                  vmin=args.frac_vmin, vmax=args.frac_vmax, show_numbers=show_numbers)
-
-        # ---- R2 raw ----
-        if args.plot_r2:
-            for key in ["r2_x2y", "r2_y2x"]:
-                mats, titles, counts, frac_valid_list, frac_neg_list, nrecs = _collect(key, clip=None)
-                out_path = os.path.join(args.out_dir, f"{args.prefix}_{key}_{split_name}_row4.png")
-                suptitle = f"Mean {key} heatmaps (raw) | {split_name}"
-                plot_row_4methods(mats, titles, out_path, suptitle, vmin=args.r2_vmin, vmax=args.r2_vmax, show_numbers=show_numbers)
-
-                if args.plot_valid_frac:
-                    out_path = os.path.join(args.out_dir, f"{args.prefix}_{key}_validfrac_{split_name}_row4.png")
-                    suptitle = f"Valid fraction (finite) | {key} | {split_name}"
-                    plot_row_4methods(frac_valid_list, titles, out_path, suptitle,
-                                      vmin=args.frac_vmin, vmax=args.frac_vmax, show_numbers=show_numbers)
-
-                if args.plot_neg_frac and frac_neg_list[0] is not None:
-                    out_path = os.path.join(args.out_dir, f"{args.prefix}_{key}_negfrac_{split_name}_row4.png")
-                    suptitle = f"Negative fraction (v<0) | {key} | {split_name}"
-                    plot_row_4methods(frac_neg_list, titles, out_path, suptitle,
-                                      vmin=args.frac_vmin, vmax=args.frac_vmax, show_numbers=show_numbers)
-
-        # ---- R2 clipped ----
-        if args.plot_r2_clip:
-            for key in ["r2_x2y", "r2_y2x"]:
-                mats, titles, counts, frac_valid_list, _frac_neg_list, nrecs = _collect(key, clip=(0.0, 1.0))
-                out_path = os.path.join(args.out_dir, f"{args.prefix}_{key}_clip01_{split_name}_row4.png")
-                suptitle = f"Mean {key} heatmaps (clip [0,1] per-value) | {split_name}"
-                plot_row_4methods(mats, titles, out_path, suptitle, vmin=args.r2clip_vmin, vmax=args.r2clip_vmax, show_numbers=show_numbers)
-
-        return out
-
-    # --------- per split ---------
-    for sp in SPLITS:
-        _plot_for_one_split(sp, records_mode="split")
-
-    # --------- test_mean ---------
-    _plot_for_one_split("test_mean", records_mode="test_mean")
+                H, _, _ = mean_matrix(data[method_name][args.split], metric_key)
+            mats_by_metric[metric_key].append(H)
+            
+    out_path = os.path.join(args.out_dir, f"{args.prefix}_combo_{args.split}.png")
+    suptitle = f"Mean cross-modal alignment (CKA) and redundancy ($R^2$)"
+    plot_combo_3rows_4cols(
+        mats_by_metric=mats_by_metric,
+        col_titles=col_titles,
+        out_path=out_path,
+        suptitle=suptitle,
+        show_numbers=(not args.no_numbers),
+        fontsize=args.fontsize,
+        cmap="viridis",
+    )
 
 if __name__ == "__main__":
     main()

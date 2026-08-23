@@ -16,6 +16,8 @@ import torch.optim as optim
 from torch.optim import lr_scheduler
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
+from torch.optim.lr_scheduler import ExponentialLR, MultiStepLR, CosineAnnealingLR
+
 
 import resource
 # RuntimeError: received 0 items of ancdata. Issue: pytorch/pytorch#973
@@ -61,13 +63,18 @@ parser.add_argument('--num_point', type=int, default=15000, help='Point Number [
 parser.add_argument('--seed_feat_dim', default=512, type=int, help='Point wise feature dim')
 parser.add_argument('--num_view', type=int, default=300, help='View Number [default: 300]')
 parser.add_argument('--max_epoch', type=int, default=18, help='Epoch to run [default: 18]')
+parser.add_argument('--lr_sched', default=False, action='store_true')
+parser.add_argument('--lr_sched_period', type=int, default=16, help='T_max of cosine learing rate scheduler [default: 16]')
+parser.add_argument('--ckpt_save_interval', type=int, default=5, help='Number for save checkpoint[default: 5]')
 parser.add_argument('--batch_size', type=int, default=12, help='Batch Size during training [default: 2]')
 parser.add_argument('--learning_rate', type=float, default=0.002, help='Initial learning rate [default: 0.001]')
 parser.add_argument('--weight_decay', type=float, default=0, help='Optimization L2 weight decay [default: 0]')
 parser.add_argument('--worker_num', type=int, default=12, help='Worker number for dataloader [default: 4]')
 parser.add_argument('--voxel_size', type=float, default=0.005, help='Voxel Size for sparse convolution')
+parser.add_argument('--eval_start_epoch', type=int, default=6, help='Number of epoch starting ckpt saving')
 parser.add_argument('--pin_memory', action='store_true', help='Set pin_memory for faster training [default: False]')
 parser.add_argument('--multi_modal', action='store_true', default=False, help='Use multi-modal gsnet[default: False]')
+parser.add_argument('--fusion_type', default='early', choices=['early', 'concat', 'intermediate'])
 parser.add_argument('--virtual_depth', action='store_true', default=False, help='Use virtual depth for training [default: False]')
 cfgs = parser.parse_args()
 
@@ -124,18 +131,23 @@ print(len(TRAIN_DATALOADER), len(TEST_DATALOADER))
 #                         cylinder_radius=0.05, hmin=-0.02, hmax_list=[0.01,0.02,0.03,0.04])
 
 if cfgs.multi_modal:
-    net = GraspNet_multimodal(seed_feat_dim=cfgs.seed_feat_dim, img_feat_dim=64, is_training=True)
+    net = GraspNet_multimodal(seed_feat_dim=cfgs.seed_feat_dim, img_feat_dim=64, is_training=True, fuse_type=cfgs.fusion_type)
 else:
     net = GraspNet(seed_feat_dim=cfgs.seed_feat_dim, is_training=True)
 net.to(device)
 
 # Load the Adam optimizer
-optimizer = optim.Adam(net.parameters(), lr=cfgs.learning_rate)
+optimizer = optim.AdamW(net.parameters(), lr=cfgs.learning_rate, weight_decay=cfgs.weight_decay)
+if cfgs.lr_sched:
+    lr_scheduler = CosineAnnealingLR(optimizer, T_max=cfgs.lr_sched_period, eta_min=1e-4)
+
 start_epoch = 0
 if CHECKPOINT_PATH is not None and os.path.isfile(CHECKPOINT_PATH):
     checkpoint = torch.load(CHECKPOINT_PATH)
     net.load_state_dict(checkpoint['model_state_dict'])
     optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    if cfgs.lr_sched:
+        lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
     start_epoch = checkpoint['epoch']
     log_string("-> loaded checkpoint %s (epoch: %d)" % (CHECKPOINT_PATH, start_epoch))
 # TensorBoard Visualizers
@@ -155,9 +167,10 @@ def adjust_learning_rate(optimizer, epoch):
 
 def train_one_epoch():
     stat_dict = {}  # collect statistics
-    adjust_learning_rate(optimizer, EPOCH_CNT)
+    # adjust_learning_rate(optimizer, EPOCH_CNT)
     net.train()
     batch_interval = 20
+    overall_loss = 0
     for batch_idx, batch_data_label in enumerate(TRAIN_DATALOADER):
         for key in batch_data_label:
             if 'list' in key:
@@ -179,6 +192,7 @@ def train_one_epoch():
                     stat_dict[key] = 0
                 stat_dict[key] += end_points[key].item()
 
+        overall_loss += stat_dict['loss/overall_loss']
         if (batch_idx + 1) % batch_interval == 0:
             log_string(' ----epoch: %03d  ---- batch: %03d ----' % (EPOCH_CNT, batch_idx + 1))
             for key in sorted(stat_dict.keys()):
@@ -187,9 +201,55 @@ def train_one_epoch():
                 log_string('mean %s: %f' % (key, stat_dict[key] / batch_interval))
                 stat_dict[key] = 0
 
+    overall_loss = overall_loss/float(cfgs.batch_size)
+    log_string('overall loss:{}, batch num:{}'.format(overall_loss, batch_idx+1))
+    mean_loss = overall_loss/float(batch_idx+1)
+    return mean_loss
+
+def evaluate_one_epoch():
+    stat_dict = {} # collect statistics
+    # set model to eval mode (for bn and dp)
+    net.eval()
+    overall_loss = 0
+    for batch_idx, batch_data_label in enumerate(TEST_DATALOADER):
+        if batch_idx % 10 == 0:
+            log_string('Eval batch: %d'%(batch_idx))
+        for key in batch_data_label:
+            if 'list' in key:
+                for i in range(len(batch_data_label[key])):
+                    for j in range(len(batch_data_label[key][i])):
+                        batch_data_label[key][i][j] = batch_data_label[key][i][j].cuda(non_blocking=cfgs.pin_memory)
+            else:
+                batch_data_label[key] = batch_data_label[key].cuda(non_blocking=cfgs.pin_memory)
+        # Forward pass
+        with torch.no_grad():
+            end_points = net(batch_data_label)
+
+        # Compute loss
+        loss, end_points = get_loss(end_points)
+
+        # Accumulate statistics and print out
+        for key in end_points:
+            if 'loss' in key or 'acc' in key or 'prec' in key or 'recall' in key or 'count' in key:
+                if key not in stat_dict: stat_dict[key] = 0
+                stat_dict[key] += end_points[key].item()
+    
+        overall_loss += stat_dict['loss/overall_loss']
+        # overall_loss += (stat_dict['loss/score_loss'] + stat_dict['loss/width_loss'] + stat_dict['loss/rot_graspness_loss'])
+    for key in sorted(stat_dict.keys()):
+        TRAIN_WRITER.add_scalar('test_' + key, stat_dict[key]/float(batch_idx+1), (EPOCH_CNT+1)*len(TRAIN_DATALOADER)*cfgs.batch_size)
+        log_string('eval mean %s: %f'%(key, stat_dict[key]/(float(batch_idx+1))))
+
+    overall_loss = overall_loss/float(cfgs.batch_size)
+    log_string('overall loss:{}, batch num:{}'.format(overall_loss, batch_idx+1))
+    mean_loss = overall_loss/float(batch_idx+1)
+    return mean_loss
+
 
 def train(start_epoch):
     global EPOCH_CNT
+    min_loss = np.inf
+    best_epoch = 0
     for epoch in range(start_epoch, cfgs.max_epoch):
         EPOCH_CNT = epoch
         log_string('**** EPOCH %03d ****' % epoch)
@@ -198,12 +258,36 @@ def train(start_epoch):
         # Reset numpy seed.
         # REF: https://github.com/pytorch/pytorch/issues/5059
         np.random.seed()
-        train_one_epoch()
+        train_loss = train_one_epoch()
 
-        save_dict = {'epoch': epoch + 1, 'optimizer_state_dict': optimizer.state_dict(),
-                     'model_state_dict': net.state_dict()}
-        torch.save(save_dict, os.path.join(cfgs.log_dir, 'epoch' + str(epoch + 1).zfill(2) + '.tar'))
-
+        # Save checkpoint
+        save_dict = {'epoch': epoch+1, # after training one epoch, the start_epoch should be epoch+1
+                    'optimizer_state_dict': optimizer.state_dict()}
+        
+        if cfgs.lr_sched:
+            lr_scheduler.step()
+            save_dict['lr_scheduler'] = lr_scheduler.state_dict()
+        try: # with nn.DataParallel() the net is added as a submodule of DataParallel
+            save_dict['model_state_dict'] = net.module.state_dict()
+        except:
+            save_dict['model_state_dict'] = net.state_dict()
+            
+        # torch.save(save_dict, os.path.join(cfgs.log_dir, 'epoch' + str(epoch + 1).zfill(2) + '.tar'))
+        if epoch >= cfgs.eval_start_epoch:
+            eval_loss = evaluate_one_epoch()
+            if eval_loss < min_loss:
+                min_loss = eval_loss
+                best_epoch = epoch
+                ckpt_name = "epoch_" + str(best_epoch) \
+                            + "_train_" + str(train_loss) \
+                            + "_val_" + str(eval_loss)
+                torch.save(save_dict['model_state_dict'], os.path.join(cfgs.ckpt_dir, ckpt_name + '.tar'))
+            elif not EPOCH_CNT % cfgs.ckpt_save_interval:
+                torch.save(save_dict, os.path.join(cfgs.ckpt_dir, 'checkpoint_{}.tar'.format(EPOCH_CNT)))
+            log_string("best_epoch:{}".format(best_epoch))
+            # if epoch in LR_DECAY_STEPS:
+            #     torch.save(save_dict, os.path.join(cfgs.log_dir, 'checkpoint_{}.tar'.format(epoch)))
+        torch.save(save_dict, os.path.join(cfgs.ckpt_dir, 'checkpoint.tar'))
 
 if __name__ == '__main__':
     train(start_epoch)

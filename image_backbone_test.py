@@ -1,6 +1,7 @@
 import os
 # import sys
 # ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
+os.environ['CUDA_VISIBLE_DEVICES'] = '2'
 
 from models.pspnet import PSPNet
 psp_models = {
@@ -81,7 +82,7 @@ resnext_feats = resnext_extractor(image_input)
 
 print(resnext_feats.shape)
 
-for name, m in resnext_extractor.named_modules():
-    print(name, m)
+# for name, m in resnext_extractor.named_modules():
+#     print(name, m)
 # for resnext_feat in resnext_feats:
 #     print(resnext_feat.shape)

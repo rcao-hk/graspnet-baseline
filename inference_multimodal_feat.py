@@ -356,83 +356,83 @@ def r2_score_multi_masked(Y, Yhat, ss_tot_thr=1e-6):
     return r2.mean()
 
 
-@torch.no_grad()
-def _ridge_fit_predict_r2(X, Y, train_ratio=0.8, l2=1e-1, seed=0,
-                          std_thr=1e-3, ss_tot_thr=1e-6, clip_min=-1.0):
-    """
-    X: (N, dx), Y: (N, dy), float tensor on same device
-    返回： (r2_mean, valid_dim_count, total_dim)
-    - per-dim R2 on TEST, then average over valid dims
-    - masks dims with tiny target variance (std/SST)
-    - ridge with adaptive strength when ill-conditioned
-    """
-    assert X.ndim == 2 and Y.ndim == 2
-    N = X.shape[0]
-    if N < 256:
-        return float("nan"), 0, int(Y.shape[1])
+# @torch.no_grad()
+# def _ridge_fit_predict_r2(X, Y, train_ratio=0.8, l2=1e-1, seed=0,
+#                           std_thr=1e-3, ss_tot_thr=1e-6, clip_min=-1.0):
+#     """
+#     X: (N, dx), Y: (N, dy), float tensor on same device
+#     返回： (r2_mean, valid_dim_count, total_dim)
+#     - per-dim R2 on TEST, then average over valid dims
+#     - masks dims with tiny target variance (std/SST)
+#     - ridge with adaptive strength when ill-conditioned
+#     """
+#     assert X.ndim == 2 and Y.ndim == 2
+#     N = X.shape[0]
+#     if N < 256:
+#         return float("nan"), 0, int(Y.shape[1])
 
-    # ---- split ----
-    g = torch.Generator(device=X.device)
-    g.manual_seed(int(seed))
-    perm = torch.randperm(N, generator=g, device=X.device)
-    ntr = int(round(N * train_ratio))
-    ntr = max(128, min(ntr, N - 64))
-    tr_idx = perm[:ntr]
-    te_idx = perm[ntr:]
+#     # ---- split ----
+#     g = torch.Generator(device=X.device)
+#     g.manual_seed(int(seed))
+#     perm = torch.randperm(N, generator=g, device=X.device)
+#     ntr = int(round(N * train_ratio))
+#     ntr = max(128, min(ntr, N - 64))
+#     tr_idx = perm[:ntr]
+#     te_idx = perm[ntr:]
 
-    Xtr = X[tr_idx].double()
-    Ytr = Y[tr_idx].double()
-    Xte = X[te_idx].double()
-    Yte = Y[te_idx].double()
+#     Xtr = X[tr_idx].double()
+#     Ytr = Y[tr_idx].double()
+#     Xte = X[te_idx].double()
+#     Yte = Y[te_idx].double()
 
-    # ---- center X/Y using TRAIN mean (for stable ridge, implicit bias) ----
-    mx = Xtr.mean(0, keepdim=True)
-    my = Ytr.mean(0, keepdim=True)
-    Xtrc = Xtr - mx
-    Ytrc = Ytr - my
-    Xtec = Xte - mx
-    Yte_centered_for_sst = Yte - Yte.mean(0, keepdim=True)  # R2 baseline用 test mean
+#     # ---- center X/Y using TRAIN mean (for stable ridge, implicit bias) ----
+#     mx = Xtr.mean(0, keepdim=True)
+#     my = Ytr.mean(0, keepdim=True)
+#     Xtrc = Xtr - mx
+#     Ytrc = Ytr - my
+#     Xtec = Xte - mx
+#     Yte_centered_for_sst = Yte - Yte.mean(0, keepdim=True)  # R2 baseline用 test mean
 
-    # ---- mask dims with tiny train std (almost-constant targets) ----
-    y_std_tr = Ytr.std(0)  # (dy,)
-    dim_mask_std = y_std_tr > std_thr
+#     # ---- mask dims with tiny train std (almost-constant targets) ----
+#     y_std_tr = Ytr.std(0)  # (dy,)
+#     dim_mask_std = y_std_tr > std_thr
 
-    # ---- ridge: adaptive lambda ----
-    # base l2 乘一个 scale，避免不同层/不同N导致过弱
-    dx = Xtrc.shape[1]
-    # trace(X^T X)/dx 作为尺度（均方能量）
-    x_energy = (Xtrc.pow(2).sum() / max(1, Xtrc.numel())).clamp_min(1e-12)
-    # 当 dx 接近/超过 ntr 时，增大正则（防止权重爆炸）
-    ratio = float(dx) / float(Xtrc.shape[0])
-    boost = 1.0 if ratio < 0.5 else (2.0 if ratio < 1.0 else 5.0)
-    lam = (l2 * boost) * x_energy
+#     # ---- ridge: adaptive lambda ----
+#     # base l2 乘一个 scale，避免不同层/不同N导致过弱
+#     dx = Xtrc.shape[1]
+#     # trace(X^T X)/dx 作为尺度（均方能量）
+#     x_energy = (Xtrc.pow(2).sum() / max(1, Xtrc.numel())).clamp_min(1e-12)
+#     # 当 dx 接近/超过 ntr 时，增大正则（防止权重爆炸）
+#     ratio = float(dx) / float(Xtrc.shape[0])
+#     boost = 1.0 if ratio < 0.5 else (2.0 if ratio < 1.0 else 5.0)
+#     lam = (l2 * boost) * x_energy
 
-    # ---- solve (X^T X + lam I) W = X^T Y ----
-    XtX = Xtrc.T @ Xtrc
-    XtY = Xtrc.T @ Ytrc
-    I = torch.eye(dx, device=X.device, dtype=torch.float64)
-    W = torch.linalg.solve(XtX + lam * I, XtY)  # (dx, dy)
+#     # ---- solve (X^T X + lam I) W = X^T Y ----
+#     XtX = Xtrc.T @ Xtrc
+#     XtY = Xtrc.T @ Ytrc
+#     I = torch.eye(dx, device=X.device, dtype=torch.float64)
+#     W = torch.linalg.solve(XtX + lam * I, XtY)  # (dx, dy)
 
-    # ---- predict on TEST in original Y scale ----
-    Yhat = (Xtec @ W) + my  # (Nte, dy)
+#     # ---- predict on TEST in original Y scale ----
+#     Yhat = (Xtec @ W) + my  # (Nte, dy)
 
-    # ---- per-dim R2 on TEST ----
-    sse = (Yte - Yhat).pow(2).sum(0)                 # (dy,)
-    sst = Yte_centered_for_sst.pow(2).sum(0)         # (dy,)
-    dim_mask_sst = sst > ss_tot_thr
-    dim_mask = dim_mask_std & dim_mask_sst
+#     # ---- per-dim R2 on TEST ----
+#     sse = (Yte - Yhat).pow(2).sum(0)                 # (dy,)
+#     sst = Yte_centered_for_sst.pow(2).sum(0)         # (dy,)
+#     dim_mask_sst = sst > ss_tot_thr
+#     dim_mask = dim_mask_std & dim_mask_sst
 
-    if int(dim_mask.sum()) == 0:
-        return float("nan"), 0, int(Y.shape[1])
+#     if int(dim_mask.sum()) == 0:
+#         return float("nan"), 0, int(Y.shape[1])
 
-    r2_dim = 1.0 - sse / (sst + 1e-12)
+#     r2_dim = 1.0 - sse / (sst + 1e-12)
 
-    # 可选：为了避免极端 outlier 影响热图，可 clip 到 [-1, 1]（不影响“好坏趋势”）
-    if clip_min is not None:
-        r2_dim = torch.clamp(r2_dim, min=float(clip_min), max=1.0)
+#     # 可选：为了避免极端 outlier 影响热图，可 clip 到 [-1, 1]（不影响“好坏趋势”）
+#     if clip_min is not None:
+#         r2_dim = torch.clamp(r2_dim, min=float(clip_min), max=1.0)
 
-    r2 = r2_dim[dim_mask].mean().item()
-    return float(r2), int(dim_mask.sum().item()), int(Y.shape[1])
+#     r2 = r2_dim[dim_mask].mean().item()
+#     return float(r2), int(dim_mask.sum().item()), int(Y.shape[1])
 
 
 # @torch.no_grad()
@@ -468,14 +468,14 @@ def linear_predictability_r2(
     - multi-output ridge regression with per-dim R2 + variance masking
     - robust to near-constant channels
     """
-    def _ridge_r2(A, B):
+    def _ridge_r2(A, B, seed_local):
         # A: (N, Da) -> B: (N, Db)
         N = A.shape[0]
         if N < 128:
             return float("nan")
 
         g = torch.Generator(device=A.device)
-        g.manual_seed(int(seed))
+        g.manual_seed(int(seed_local))
         perm = torch.randperm(N, generator=g, device=A.device)
 
         ntr = max(64, int(N * train_ratio))
@@ -528,10 +528,8 @@ def linear_predictability_r2(
         r2 = r2_dim.mean().clamp(min=clip_min, max=clip_max).item()
         return float(r2)
 
-    # x2y: pc -> img
-    r2_x2y = _ridge_r2(X, Y)
-    # y2x: img -> pc
-    r2_y2x = _ridge_r2(Y, X)
+    r2_x2y = _ridge_r2(X, Y, seed_local=seed)
+    r2_y2x = _ridge_r2(Y, X, seed_local=seed + 17)
     return r2_x2y, r2_y2x
 
 @torch.no_grad()
@@ -593,6 +591,27 @@ def group_mean(feat: torch.Tensor, inv: torch.Tensor, n_groups: int):
     return out / cnt.clamp_min(1.0)
 
 
+# -------------------------
+# Deterministic helpers (DO NOT rely on global RNG state)
+# -------------------------
+def make_base_seed(seed0: int, scene_idx: int, anno_idx: int) -> int:
+    # 你可以按需扩大系数，保证不同 scene/anno 不冲突
+    return int(seed0) * 1_000_000 + int(scene_idx) * 1_000 + int(anno_idx)
+
+def sample_points_seeded(points_len: int, sample_num: int, seed: int):
+    """Deterministic version of sample_points() using a local RNG."""
+    if points_len <= 0 or sample_num <= 0:
+        return np.zeros((0,), dtype=np.int64)
+    rng = np.random.RandomState(int(seed) & 0xFFFFFFFF)
+    if points_len >= sample_num:
+        idxs = rng.choice(points_len, sample_num, replace=False)
+    else:
+        idxs1 = np.arange(points_len)
+        idxs2 = rng.choice(points_len, sample_num - points_len, replace=True)
+        idxs = np.concatenate([idxs1, idxs2], axis=0)
+    return idxs.astype(np.int64)
+
+
 parser = argparse.ArgumentParser()
 parser.add_argument('--split', default='test_seen', help='Dataset split [default: test_seen]')
 parser.add_argument('--camera', default='realsense', help='Camera to use [kinect | realsense]')
@@ -628,15 +647,20 @@ parser.add_argument('--rgb_severity', type=int, default=0,
                     help='RGB corruption severity in [0,5], 0 means no corruption')
 parser.add_argument('--sample_interval', type=int, default=10,
                     help='Sample 1 frame every K frames in each scene (e.g., 10 means 0,10,20,...)')
+parser.add_argument('--seed', type=int, default=0)
 cfgs = parser.parse_args()
+setup_seed(cfgs.seed)
 
 print(cfgs)
 FEAT_VIS_DIR = os.path.join(ROOT_DIR, 'vis', 'feat_redun_vis')
 os.makedirs(FEAT_VIS_DIR, exist_ok=True)
 
+# def _auto_json_name(cfgs):
+#     # 避免 early/late 覆盖同名文件（对比时你必须要两个json）
+#     return f"{cfgs.network_name}_{cfgs.fuse_type}_{cfgs.split}_{cfgs.sample_interval}.json"
+
 def _auto_json_name(cfgs):
-    # 避免 early/late 覆盖同名文件（对比时你必须要两个json）
-    return f"{cfgs.network_name}_{cfgs.fuse_type}_{cfgs.split}_{cfgs.sample_interval}.json"
+    return f"{cfgs.network_name}_{cfgs.fuse_type}_{cfgs.split}_{cfgs.rgb_noise}_s{int(cfgs.rgb_severity)}_{cfgs.sample_interval}_seed{getattr(cfgs,'seed',0)}.json"
 
 json_name = _auto_json_name(cfgs)
 json_path = os.path.join(FEAT_VIS_DIR, json_name)
@@ -818,7 +842,7 @@ def _from_pil_float01(img_pil):
     arr = np.asarray(img_pil, dtype=np.float32) / 255.0
     return arr
 
-def apply_rgb_corruption(img_float01, corr_type='none', severity=0):
+def apply_rgb_corruption(img_float01, corr_type='none', severity=0, seed: int = 0):
     """
     img_float01: np.ndarray float32 in [0,1], (H,W,3) RGB
     corr_type: none|cutout|blur|brightness|saturation|contrast
@@ -861,7 +885,8 @@ def apply_rgb_corruption(img_float01, corr_type='none', severity=0):
     delta = delta_seq[severity - 1]
 
     # random direction only: +1 or -1
-    sign = 1.0 if np.random.rand() < 0.5 else -1.0
+    rng = np.random.RandomState(int(seed) & 0xFFFFFFFF)
+    sign = 1.0 if (rng.randint(0, 2) == 0) else -1.0
     factor = max(0.0, 1.0 + sign * delta)
 
     if corr_type == 'brightness':
@@ -973,7 +998,7 @@ except :
 net.to(device)
 net.eval()
 checkpoint = torch.load(ckpt_name, map_location=device)
-# print(net)
+print(net)
 
 try:
     net.load_state_dict(checkpoint['model_state_dict'], strict=True)
@@ -999,6 +1024,7 @@ def inference(scene_idx):
     for anno_idx in range(256):
         if (anno_idx % interval) != 0:
             continue
+        base_seed = make_base_seed(getattr(cfgs, "seed", 0), scene_idx, anno_idx)
         if data_type == 'real':
             rgb_path = os.path.join(dataset_root,
                                     'scenes/scene_{:04d}/{}/rgb/{:04d}.png'.format(scene_idx, camera, anno_idx))
@@ -1025,10 +1051,9 @@ def inference(scene_idx):
                                 'scenes/scene_{:04d}/{}/meta/{:04d}.mat'.format(scene_idx, camera, anno_idx))
 
         color = np.array(Image.open(rgb_path), dtype=np.float32) / 255.0
-        if data_type == 'noise':
-            color = apply_rgb_corruption(color, cfgs.rgb_noise, cfgs.rgb_severity)
-        else:
-            _disable_corruptions(cfgs)
+        if cfgs.rgb_noise != "none" and int(cfgs.rgb_severity) > 0:
+            color = apply_rgb_corruption(color, cfgs.rgb_noise, cfgs.rgb_severity, seed=base_seed + 19)
+
         # visualize_rgb_corruptions(rgb_path, out_path=os.path.join('vis', '{}_rgb_corruption.png'.format(scene_idx)))
 
         depth = np.array(Image.open(depth_path))
@@ -1096,7 +1121,9 @@ def inference(scene_idx):
         color_masked = color[mask]
         # normal_masked = normal
 
-        idxs = sample_points(len(cloud_masked), cfgs.num_point)
+        # idxs = sample_points(len(cloud_masked), cfgs.num_point)
+        idxs = sample_points_seeded(len(cloud_masked), cfgs.num_point, seed=base_seed + 11)
+
         cloud_sampled = cloud_masked[idxs]
         color_sampled = color_masked[idxs]
 
@@ -1154,7 +1181,7 @@ def inference(scene_idx):
 
             Xall, hit = query_sparse_feats_by_join(st, coords_u)
             pc_layers[lname] = Xall
-            print(f"[JOIN] {lname}: hit {int(hit.sum())}/{hit.numel()} stride={st.tensor_stride} C={tuple(st.F.shape)}")
+            # print(f"[JOIN] {lname}: hit {int(hit.sum())}/{hit.numel()} stride={st.tensor_stride} C={tuple(st.F.shape)}")
 
         # subsample for speed
         # Nu = coords_u.shape[0]
@@ -1181,7 +1208,7 @@ def inference(scene_idx):
 
             for k, Yu in Y_unique_dict.items():
                 sd = Yu.float().std(0)
-                print(pl_name, k, "Y std min/med =", float(sd.min()), float(sd.median()), "num<1e-3 =", int((sd < 1e-3).sum()))
+                # print(pl_name, k, "Y std min/med =", float(sd.min()), float(sd.median()), "num<1e-3 =", int((sd < 1e-3).sum()))
     
             # 4) CKA on unique voxels
             Nu2 = q_unique.shape[0]
@@ -1202,7 +1229,11 @@ def inference(scene_idx):
                 r2_y2x_map[pl_name] = row_r2y2x
                 continue
 
-            sel2 = torch.randperm(Nu2, device=X_unique.device)[:min(2048, Nu2)]
+            # deterministic sel2 per (scene, anno, pc_stage)
+            pc_id = {"block1": 1, "block2": 2, "block3": 3, "block4": 4, "final": 5}.get(pl_name, 0)
+            g_sel = torch.Generator(device=X_unique.device)
+            g_sel.manual_seed(int(base_seed + 1000 * pc_id))
+            sel2 = torch.randperm(Nu2, generator=g_sel, device=X_unique.device)[:min(2048, Nu2)]
 
             X = X_unique[sel2].float()
             valid_x = (X.abs().sum(1) > 0)
@@ -1225,10 +1256,13 @@ def inference(scene_idx):
                     #     std_thr=1e-3, ss_tot_thr=1e-6
                     # )
 
+                    img_id = {"p1": 1, "p2": 2, "p4": 3, "p8": 4, "p16": 5}.get(ikey, 0)
+                    pair_seed = int(base_seed + 1000 * pc_id + 10 * img_id)
+
                     r2x2y, r2y2x = linear_predictability_r2(
                         X[valid], Y[valid],
                         train_ratio=0.8, l2=1e-1,
-                        seed=int(scene_idx * 1000 + anno_idx),
+                        seed=pair_seed,
                         std_thr=1e-3, ss_tot_thr=1e-6,
                         clip_min=-1.0
                     )
@@ -1242,9 +1276,9 @@ def inference(scene_idx):
             r2_x2y_map[pl_name] = r2_row_x2y
             r2_y2x_map[pl_name] = r2_row_y2x
 
-        print(f"[CKA] scene {scene_idx} anno {anno_idx}: {cka_map}")
-        print(f"[R2 x2y] scene {scene_idx} anno {anno_idx}: {r2_x2y_map}")
-        print(f"[R2 y2x] scene {scene_idx} anno {anno_idx}: {r2_y2x_map}")
+        # print(f"[CKA] scene {scene_idx} anno {anno_idx}: {cka_map}")
+        # print(f"[R2 x2y] scene {scene_idx} anno {anno_idx}: {r2_x2y_map}")
+        # print(f"[R2 y2x] scene {scene_idx} anno {anno_idx}: {r2_y2x_map}")
 
         # ---- 记录到 JSON results ----
         cka_results["records"].append({
