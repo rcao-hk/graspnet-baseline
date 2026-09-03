@@ -21,85 +21,110 @@ plt.rcParams['axes.prop_cycle'] = plt.cycler(color=palette)
 # plt.rcParams['axes.prop_cycle'] = plt.cycler(color=colors)
 
 
+model_list = [
+    'gsnet_base.clear', 'gsnet_base.s5', 'gsnet_base.s15', 'gsnet_base.s29', 
+    'scale_grasp.clear', 'scale_grasp.s5', 'scale_grasp.s15', 'scale_grasp.s29',
+    'gsnet.clear', 'gsnet.s5', 'gsnet.s15', 'gsnet.s29', 
+    'mmgnet_baseline.clear', 'mmgnet_baseline.s5', 'mmgnet_baseline.s15', 'mmgnet_baseline.s29',
+    # 'mmgnet_scene.clear', 'mmgnet_scene.s5', 'mmgnet_scene.s15', 'mmgnet_scene.s29'
+    'mmgnet_scene_intermediate.clear', 'mmgnet_scene_intermediate.s5', 'mmgnet_scene_intermediate.s15', 'mmgnet_scene_intermediate.s29',
+]
+noise_levels = [0, 5, 15, 29]
+noise_type = 'smooth'
+bar_font_size = 14
+
+groups = {
+    'GSNet': ['gsnet_base.clear', 'gsnet_base.s5', 'gsnet_base.s15', 'gsnet_base.s29'],
+    'Scale_grasp': ['scale_grasp.clear', 'scale_grasp.s5', 'scale_grasp.s15', 'scale_grasp.s29'],
+    'Anygrasp': ['gsnet.clear', 'gsnet.s5', 'gsnet.s15', 'gsnet.s29'],
+    'Our Baseline': ['mmgnet_baseline.clear', 'mmgnet_baseline.s5', 'mmgnet_baseline.s15', 'mmgnet_baseline.s29'],
+    # 'MMGNet': ['mmgnet_scene.clear', 'mmgnet_scene.s5', 'mmgnet_scene.s15', 'mmgnet_scene.s29']
+     'MMGNet': ['mmgnet_scene_intermediate.clear', 'mmgnet_scene_intermediate.s5', 'mmgnet_scene_intermediate.s15', 'mmgnet_scene_intermediate.s29']
+}
+
+
 # model_list = [
-#     'gsnet_base.clear', 'gsnet_base.s5', 'gsnet_base.s15', 'gsnet_base.s29', 
-#     'scale_grasp.clear', 'scale_grasp.s5', 'scale_grasp.s15', 'scale_grasp.s29',
-#     'gsnet.clear', 'gsnet.s5', 'gsnet.s15', 'gsnet.s29', 
-#     'mmgnet_baseline.clear', 'mmgnet_baseline.s5', 'mmgnet_baseline.s15', 'mmgnet_baseline.s29',
-#     'mmgnet_scene.clear', 'mmgnet_scene.s5', 'mmgnet_scene.s15', 'mmgnet_scene.s29'
+#         'gsnet_base.clear', 'gsnet_base.0.002', 'gsnet_base.0.005', 'gsnet_base.0.008', 'gsnet_base.0.01', 
+#         'scale_grasp.clear', 'scale_grasp.0.002', 'scale_grasp.0.005', 'scale_grasp.0.008', 'scale_grasp.0.01',
+#         'gsnet.clear', 'gsnet.0.002', 'gsnet.0.005', 'gsnet.0.008', 'gsnet.0.01', 
+#         'mmgnet_baseline.clear', 'mmgnet_baseline.0.002', 'mmgnet_baseline.0.005', 'mmgnet_baseline.0.008','mmgnet_baseline.0.01',
+#         'mmgnet_scene_intermediate.clear', 'mmgnet_scene_intermediate.0.002', 'mmgnet_scene_intermediate.0.005', 'mmgnet_scene_intermediate.0.008', 'mmgnet_scene_intermediate.0.01',
+#         'mmgnet_scene.clear', 'mmgnet_scene.0.002', 'mmgnet_scene.0.005', 'mmgnet_scene.0.008', 'mmgnet_scene.0.01'
 # ]
-# noise_levels = [0, 5, 15, 29]
-# noise_type = 'smooth'
-# bar_font_size = 14
-
-# groups = {
-#     'GSNet': ['gsnet_base.clear', 'gsnet_base.s5', 'gsnet_base.s15', 'gsnet_base.s29'],
-#     'Scale_grasp': ['scale_grasp.clear', 'scale_grasp.s5', 'scale_grasp.s15', 'scale_grasp.s29'],
-#     'Anygrasp': ['gsnet.clear', 'gsnet.s5', 'gsnet.s15', 'gsnet.s29'],
-#     'Our Baseline': ['mmgnet_baseline.clear', 'mmgnet_baseline.s5', 'mmgnet_baseline.s15', 'mmgnet_baseline.s29'],
-#     'MMGNet': ['mmgnet_scene.clear', 'mmgnet_scene.s5', 'mmgnet_scene.s15', 'mmgnet_scene.s29']
-# }
-
-
-
-# model_list = [
-#     'gsnet_base.clear', 'gsnet_base.0.002', 'gsnet_base.0.005', 'gsnet_base.0.01', 
-#     'scale_grasp.clear', 'scale_grasp.0.002', 'scale_grasp.0.005', 'scale_grasp.0.01',
-#     'gsnet.clear', 'gsnet.0.002', 'gsnet.0.005', 'gsnet.0.01', 
-#     'mmgnet_baseline.clear', 'mmgnet_baseline.0.002', 'mmgnet_baseline.0.005', 'mmgnet_baseline.0.01',
-#     'mmgnet_scene.clear', 'mmgnet_scene.0.002', 'mmgnet_scene.0.005', 'mmgnet_scene.0.01'
-# ]
-# noise_levels = [0, 0.002, 0.005, 0.01]
+# noise_levels = [0, 0.002, 0.005, 0.008, 0.01]
 # noise_type = 'gaussian'
 # bar_font_size = 14
 
 # groups = {
-# 'GSNet': ['gsnet_base.clear', 'gsnet_base.0.002', 'gsnet_base.0.005', 'gsnet_base.0.01'],
-# 'Scale_grasp': ['scale_grasp.clear', 'scale_grasp.0.002', 'scale_grasp.0.005', 'scale_grasp.0.01'],
-# 'Anygrasp': ['gsnet.clear', 'gsnet.0.002', 'gsnet.0.005', 'gsnet.0.01'],
-# 'Our Baseline': ['mmgnet_baseline.clear', 'mmgnet_baseline.0.002', 'mmgnet_baseline.0.005', 'mmgnet_baseline.0.01'],
-# 'MMGNet': ['mmgnet_scene.clear', 'mmgnet_scene.0.002', 'mmgnet_scene.0.005', 'mmgnet_scene.0.01']
+#     'GSNet': ['gsnet_base.clear', 'gsnet_base.0.002', 'gsnet_base.0.005', 'gsnet_base.0.008', 'gsnet_base.0.01'],
+#     'Scale_grasp': ['scale_grasp.clear', 'scale_grasp.0.002', 'scale_grasp.0.005', 'scale_grasp.0.008', 'scale_grasp.0.01'],
+#     'Anygrasp': ['gsnet.clear', 'gsnet.0.002', 'gsnet.0.005', 'gsnet.0.008', 'gsnet.0.01'],
+#     'Our Baseline': ['mmgnet_baseline.clear', 'mmgnet_baseline.0.002', 'mmgnet_baseline.0.005', 'mmgnet_baseline.0.008', 'mmgnet_baseline.0.01'],
+#     # 'MMGNet': ['mmgnet_scene.clear', 'mmgnet_scene.0.002', 'mmgnet_scene.0.005', 'mmgnet_scene.0.008','mmgnet_scene.0.01'],
+#     'MMGNet': ['mmgnet_scene_intermediate.clear', 'mmgnet_scene_intermediate.0.002', 'mmgnet_scene_intermediate.0.005', 'mmgnet_scene_intermediate.0.008','mmgnet_scene_intermediate.0.01']
 # }
 
 
 # model_list = [
-#     # 'gsnet_base.clear', 'gsnet_base.d1', 'gsnet_base.d2', 'gsnet_base.d3', 
-#     'scale_grasp.clear', 'scale_grasp.d1', 'scale_grasp.d2', 'scale_grasp.d3',
-#     'gsnet.clear', 'gsnet.d1', 'gsnet.d2', 'gsnet.d3', 
-#     'mmgnet_baseline.clear', 'mmgnet_baseline.d1', 'mmgnet_baseline.d2', 'mmgnet_baseline.d3',
-#     'mmgnet_scene.clear', 'mmgnet_scene.d1', 'mmgnet_scene.d2', 'mmgnet_scene.d3'
+#     'gsnet_base.clear', 'gsnet_base.dr0.1', 'gsnet_base.dr0.2', 'gsnet_base.dr0.4', 'gsnet_base.dr0.6', 
+#     'scale_grasp.clear', 'scale_grasp.dr0.1', 'scale_grasp.dr0.2', 'scale_grasp.dr0.4', 'scale_grasp.dr0.6', 
+#     'gsnet.clear', 'gsnet.dr0.1', 'gsnet.dr0.2', 'gsnet.dr0.4', 'gsnet.dr0.6', 
+#     'mmgnet_baseline.clear', 'mmgnet_baseline.dr0.1', 'mmgnet_baseline.dr0.2', 'mmgnet_baseline.dr0.4', 'mmgnet_baseline.dr0.6', 
+#     'mmgnet_scene_intermediate.clear', 'mmgnet_scene_intermediate.dr0.1', 'mmgnet_scene_intermediate.dr0.2', 'mmgnet_scene_intermediate.dr0.4', 'mmgnet_scene_intermediate.dr0.6', 
 # ]
-# noise_levels = [0, 1, 2, 3]
+# noise_levels = [0, 0.1, 0.2, 0.4, 0.6]
 # noise_type = 'dropout'
 # bar_font_size = 14
 
 # groups = {
-#     # 'GSNet': ['gsnet_base.clear', 'gsnet_base.s5', 'gsnet_base.s15', 'gsnet_base.s23'],
-#     'Scale_grasp': ['scale_grasp.clear', 'scale_grasp.d1', 'scale_grasp.d2', 'scale_grasp.d3'],
-#     'Anygrasp': ['gsnet.clear', 'gsnet.d1', 'gsnet.d2', 'gsnet.d3'],
-#     'MMGNet (Baseline)': ['mmgnet_baseline.clear', 'mmgnet_baseline.d1', 'mmgnet_baseline.d2', 'mmgnet_baseline.d3'],
-#     'MMGNet': ['mmgnet_scene.clear', 'mmgnet_scene.d1', 'mmgnet_scene.d2', 'mmgnet_scene.d3']
+#     'GSNet': ['gsnet_base.clear', 'gsnet_base.dr0.1', 'gsnet_base.dr0.2', 'gsnet_base.dr0.4', 'gsnet_base.dr0.6'],
+#     'Scale_grasp': ['scale_grasp.clear', 'scale_grasp.dr0.1', 'scale_grasp.dr0.2', 'scale_grasp.dr0.4', 'scale_grasp.dr0.6'],
+#     'Anygrasp': ['gsnet.clear', 'gsnet.dr0.1', 'gsnet.dr0.2', 'gsnet.dr0.4', 'gsnet.dr0.6'],
+#     'Our Baseline': ['mmgnet_baseline.clear', 'mmgnet_baseline.dr0.1', 'mmgnet_baseline.dr0.2', 'mmgnet_baseline.dr0.4', 'mmgnet_baseline.dr0.6'],
+#     'MMGNet': ['mmgnet_scene_intermediate.clear', 'mmgnet_scene_intermediate.dr0.1', 'mmgnet_scene_intermediate.dr0.2', 'mmgnet_scene_intermediate.dr0.4', 'mmgnet_scene_intermediate.dr0.6']
 # }
 
 
-model_list = [
-    'gsnet_base.clear', 'gsnet_base.dr0.2', 'gsnet_base.dr0.4', 'gsnet_base.dr0.6', 'gsnet_base.dr0.8', 'gsnet_base.dr1.0',
-    'scale_grasp.clear', 'scale_grasp.dr0.2', 'scale_grasp.dr0.4', 'scale_grasp.dr0.6', 'scale_grasp.dr0.8', 'scale_grasp.dr1.0',
-    'gsnet.clear', 'gsnet.dr0.2', 'gsnet.dr0.4', 'gsnet.dr0.6', 'gsnet.dr0.8', 'gsnet.dr1.0',
-    'mmgnet_baseline.clear', 'mmgnet_baseline.dr0.2', 'mmgnet_baseline.dr0.4', 'mmgnet_baseline.dr0.6', 'mmgnet_baseline.dr0.8', 'mmgnet_baseline.dr1.0',
-    'mmgnet_scene.clear', 'mmgnet_scene.dr0.2', 'mmgnet_scene.dr0.4', 'mmgnet_scene.dr0.6', 'mmgnet_scene.dr0.8', 'mmgnet_scene.dr1.0'
-]
-noise_levels = [0, 0.2, 0.4, 0.6, 0.8, 1.0]
-noise_type = 'controlled_dropout'
-bar_font_size = 9
+# model_list = [
+#     # 'gsnet_base.clear', 'gsnet_base.dr0.2', 'gsnet_base.dr0.4', 'gsnet_base.dr0.6', 'gsnet_base.dr0.8', 'gsnet_base.dr1.0',
+#     'scale_grasp.clear', 'scale_grasp.dr0.2', 'scale_grasp.dr0.4', 'scale_grasp.dr0.6', 'scale_grasp.dr0.8', 'scale_grasp.dr1.0',
+#     # 'gsnet.clear', 'gsnet.dr0.2', 'gsnet.dr0.4', 'gsnet.dr0.6', 'gsnet.dr0.8', 'gsnet.dr1.0',
+#     'mmgnet_baseline.clear', 'mmgnet_baseline.dr0.2', 'mmgnet_baseline.dr0.4', 'mmgnet_baseline.dr0.6', 'mmgnet_baseline.dr0.8', 'mmgnet_baseline.dr1.0',
+#     'mmgnet_scene.clear', 'mmgnet_scene.dr0.2', 'mmgnet_scene.dr0.4', 'mmgnet_scene.dr0.6', 'mmgnet_scene.dr0.8', 'mmgnet_scene.dr1.0'
+# ]
+# noise_levels = [0, 0.2, 0.4, 0.6, 0.8, 1.0]
+# noise_type = 'controlled_dropout'
+# bar_font_size = 9
 
-groups = {
-    'GSNet': ['gsnet_base.clear', 'gsnet_base.dr0.2', 'gsnet_base.dr0.4', 'gsnet_base.dr0.6', 'gsnet_base.dr0.8', 'gsnet_base.dr1.0'],
-    'Scale_grasp': ['scale_grasp.clear', 'scale_grasp.dr0.2', 'scale_grasp.dr0.4', 'scale_grasp.dr0.6', 'scale_grasp.dr0.8', 'scale_grasp.dr1.0'],
-    'Anygrasp': ['gsnet.clear', 'gsnet.dr0.2', 'gsnet.dr0.4', 'gsnet.dr0.6', 'gsnet.dr0.8', 'gsnet.dr1.0'],
-    'Our Baseline': ['mmgnet_baseline.clear', 'mmgnet_baseline.dr0.2', 'mmgnet_baseline.dr0.4', 'mmgnet_baseline.dr0.6', 'mmgnet_baseline.dr0.8', 'mmgnet_baseline.dr1.0'],
-    'MMGNet': ['mmgnet_scene.clear', 'mmgnet_scene.dr0.2', 'mmgnet_scene.dr0.4', 'mmgnet_scene.dr0.6', 'mmgnet_scene.dr0.8', 'mmgnet_scene.dr1.0']
-}
+# groups = {
+#     # 'GSNet': ['gsnet_base.clear', 'gsnet_base.dr0.2', 'gsnet_base.dr0.4', 'gsnet_base.dr0.6', 'gsnet_base.dr0.8', 'gsnet_base.dr1.0'],
+#     'Scale_grasp': ['scale_grasp.clear', 'scale_grasp.dr0.2', 'scale_grasp.dr0.4', 'scale_grasp.dr0.6', 'scale_grasp.dr0.8', 'scale_grasp.dr1.0'],
+#     # 'Anygrasp': ['gsnet.clear', 'gsnet.dr0.2', 'gsnet.dr0.4', 'gsnet.dr0.6', 'gsnet.dr0.8', 'gsnet.dr1.0'],
+#     'Our Baseline': ['mmgnet_baseline.clear', 'mmgnet_baseline.dr0.2', 'mmgnet_baseline.dr0.4', 'mmgnet_baseline.dr0.6', 'mmgnet_baseline.dr0.8', 'mmgnet_baseline.dr1.0'],
+#     'MMGNet': ['mmgnet_scene.clear', 'mmgnet_scene.dr0.2', 'mmgnet_scene.dr0.4', 'mmgnet_scene.dr0.6', 'mmgnet_scene.dr0.8', 'mmgnet_scene.dr1.0']
+# }
+
+
+# model_list = [
+#     'gsnet_base.clear', 'gsnet_base.5120', 'gsnet_base.2048', 'gsnet_base.1024', 'gsnet_base.512',
+#     'scale_grasp.clear', 'scale_grasp.5120', 'scale_grasp.2048', 'scale_grasp.1024', 'scale_grasp.512',
+#     'gsnet.clear', 'gsnet.5120', 'gsnet.2048', 'gsnet.1024', 'gsnet.512',
+#     'mmgnet_baseline.clear', 'mmgnet_baseline.5120', 'mmgnet_baseline.2048', 'mmgnet_baseline.1024', 'mmgnet_baseline.512',
+#     # 'mmgnet_scene.clear', 'mmgnet_scene.5120', 'mmgnet_scene.2048', 'mmgnet_scene.1024', 'mmgnet_scene.512'
+#     'mmgnet_scene_pt_early.clear', 'mmgnet_scene_pt_early.5120', 'mmgnet_scene_pt_early.2048', 'mmgnet_scene_pt_early.1024', 'mmgnet_scene_pt_early.512'
+# ]
+# noise_levels = [20000, 5210, 2048, 1024, 512]
+# noise_type = 'sparsity'
+# bar_font_size = 9
+
+# groups = {
+#     'GSNet': ['gsnet_base.clear', 'gsnet_base.5120', 'gsnet_base.2048', 'gsnet_base.1024', 'gsnet_base.512'],
+#     'Scale_grasp': ['scale_grasp.clear', 'scale_grasp.5120', 'scale_grasp.2048', 'scale_grasp.1024', 'scale_grasp.512'],
+#     'Anygrasp': ['gsnet.clear', 'gsnet.5120', 'gsnet.2048', 'gsnet.1024', 'gsnet.512'],
+#     'Our Baseline': ['mmgnet_baseline.clear', 'mmgnet_baseline.5120', 'mmgnet_baseline.2048', 'mmgnet_baseline.1024', 'mmgnet_baseline.512'],
+#     # 'MMGNet': ['mmgnet_scene.clear', 'mmgnet_scene.5120', 'mmgnet_scene.2048', 'mmgnet_scene.1024', 'mmgnet_scene.512'],
+#     'MMGNet': ['mmgnet_scene_pt_early.clear', 'mmgnet_scene_pt_early.5120', 'mmgnet_scene_pt_early.2048', 'mmgnet_scene_pt_early.1024', 'mmgnet_scene_pt_early.512']
+# }
 
 
 # # 读取数据
@@ -195,26 +220,58 @@ for group_name, models in groups.items():
 
 # 绘制柱状图
 fig, ax = plt.subplots(figsize=(12, 8))
-bar_width = 1 / (5 + 2)
-x = np.arange(len(noise_levels[1:]))  # 跳过 clear 方法
-# colors = ['blue', 'orange', 'green', 'red', 'purple']
+# bar_width = 1 / (5 + 2)
+# x = np.arange(len(noise_levels[1:]))  # 跳过 clear 方法
 
+# for idx, (group_name, ap_drops) in enumerate(ap_drop_results.items()):
+#     if group_name == 'Scale_grasp':
+#         # label_name = r'Ma \textit{et al.}'
+#         label_name = 'Ma et al.'
+#     else:
+#         label_name = group_name
+#     bars = ax.bar(x + idx * bar_width, ap_drops, bar_width, label=label_name)
+    
+#     # 在每个柱上方显示数字
+#     for bar in bars:
+#         height = bar.get_height()
+#         ax.text(
+#             bar.get_x() + bar.get_width() / 2,
+#             height,
+#             f'{height:.2f}',
+#             ha='center',
+#             va='bottom',
+#             fontsize=bar_font_size,
+#             color='black',
+#             weight='bold'
+#         )
+
+# colors = ['blue', 'orange', 'green', 'red', 'purple']
+n_groups = len(ap_drop_results)
+n_levels = len(noise_levels[1:])  # 跳过 clear
+
+# ===== 可调间距参数 =====
+cluster_step = 1.30            # 组与组之间的间距（越大越松）
+cluster_width_ratio = 0.85     # 每个组里柱子占 cluster_step 的比例（0~1）
+bar_gap_ratio = 0.1           # 同组内每根bar的“槽位”留白比例（0~0.8）
+# =======================
+
+x = np.arange(n_levels) * cluster_step
+slot = (cluster_step * cluster_width_ratio) / n_groups
+bar_width = slot * (1.0 - bar_gap_ratio)
+offsets = (np.arange(n_groups) - (n_groups - 1) / 2.0) * slot
 
 for idx, (group_name, ap_drops) in enumerate(ap_drop_results.items()):
-    if group_name == 'Scale_grasp':
-        # label_name = r'Ma \textit{et al.}'
-        label_name = 'Ma et al.'
-    else:
-        label_name = group_name
-    bars = ax.bar(x + idx * bar_width, ap_drops, bar_width, label=label_name)
-    
+    label_name = 'Ma et al.' if group_name == 'Scale_grasp' else group_name
+    pos = x + offsets[idx]
+    bars = ax.bar(pos, ap_drops, width=bar_width, label=label_name)
+
     # 在每个柱上方显示数字
     for bar in bars:
-        height = bar.get_height()
+        h = bar.get_height()
         ax.text(
             bar.get_x() + bar.get_width() / 2,
-            height,
-            f'{height:.2f}',
+            h,
+            f'{h:.2f}',
             ha='center',
             va='bottom',
             fontsize=bar_font_size,
@@ -231,7 +288,8 @@ ax.set_ylabel(r'$\mathbf{AP}_{mean}$ Drop (pp)', fontsize=16, fontweight='bold')
 ax.tick_params(axis='x', labelsize=16, color='black')
 ax.tick_params(axis='y', labelsize=16, color='black')
 
-ax.set_xticks(x + (len(ap_drop_results) - 1) * bar_width / 2)
+# ax.set_xticks(x + (len(ap_drop_results) - 1) * bar_width / 2)
+ax.set_xticks(x)
 ax.set_xticklabels(noise_levels[1:])  # 跳过 clear 的噪声级别
 # ax.set_yticklabels([f'{y:.1f}' for y in ax.get_yticks()], fontsize=16, fontweight='bold')
 # ax.legend(title='Methods', fontsize=10)
@@ -265,14 +323,40 @@ for group_name, drops in ap_drop_results.items():
 
 # 绘制柱状图
 fig, ax = plt.subplots(figsize=(12, 8))
-bar_width = 1 / (len(ap_drop_results) + 2)
-x = np.arange(len(noise_levels[1:]))  # 跳过 clear
+# bar_width = 1 / (len(ap_drop_results) + 2)
+# x = np.arange(len(noise_levels[1:]))  # 跳过 clear
+
+# for idx, (group_name, drops_rel) in enumerate(ap_drop_results.items()):
+#     label_name = 'Ma et al.' if group_name == 'Scale_grasp' else group_name
+#     bars = ax.bar(x + idx * bar_width, drops_rel, bar_width, label=label_name)
+
+#     # 在每个柱上方显示相对 drop(%)
+#     for bar in bars:
+#         h = bar.get_height()
+#         ax.text(
+#             bar.get_x() + bar.get_width() / 2,
+#             h,
+#             f'{h:.2f}',
+#             ha='center',
+#             va='bottom',
+#             fontsize=bar_font_size,
+#             color='black',
+#             weight='bold'
+#         )
+
+n_groups = len(ap_drop_results)
+n_levels = len(noise_levels[1:])
+
+x = np.arange(n_levels) * cluster_step
+slot = (cluster_step * cluster_width_ratio) / n_groups
+bar_width = slot * (1.0 - bar_gap_ratio)
+offsets = (np.arange(n_groups) - (n_groups - 1) / 2.0) * slot
 
 for idx, (group_name, drops_rel) in enumerate(ap_drop_results.items()):
     label_name = 'Ma et al.' if group_name == 'Scale_grasp' else group_name
-    bars = ax.bar(x + idx * bar_width, drops_rel, bar_width, label=label_name)
+    pos = x + offsets[idx]
+    bars = ax.bar(pos, drops_rel, width=bar_width, label=label_name)
 
-    # 在每个柱上方显示相对 drop(%)
     for bar in bars:
         h = bar.get_height()
         ax.text(
@@ -286,6 +370,7 @@ for idx, (group_name, drops_rel) in enumerate(ap_drop_results.items()):
             weight='bold'
         )
 
+
 # 图表美化
 ax.set_xlabel('Noise Level', fontsize=16, fontweight='bold')
 ax.set_ylabel(r'$\mathbf{AP}_{mean}$ Relative Drop (%)', fontsize=16, fontweight='bold')
@@ -293,7 +378,8 @@ ax.set_ylabel(r'$\mathbf{AP}_{mean}$ Relative Drop (%)', fontsize=16, fontweight
 ax.tick_params(axis='x', labelsize=16, color='black')
 ax.tick_params(axis='y', labelsize=16, color='black')
 
-ax.set_xticks(x + (len(ap_drop_results) - 1) * bar_width / 2)
+# ax.set_xticks(x + (len(ap_drop_results) - 1) * bar_width / 2)
+ax.set_xticks(x)
 ax.set_xticklabels(noise_levels[1:])  # 跳过 clear
 ax.grid(True, linestyle='--', alpha=0.7)
 
